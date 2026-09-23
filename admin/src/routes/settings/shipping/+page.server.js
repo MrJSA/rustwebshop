@@ -3,14 +3,14 @@ export async function load({ fetch }) {
   const headers = { 'X-Dev-Mode': 'true' };
 
   try {
-    const res = await fetch(`${backendUrl}/api/v1/admin/settings/shipping`, { headers });
+    const res = await fetch(`${backendUrl}/api/v1/admin/settings/shipping/providers`, { headers });
     if (res.ok) {
-      const shippingZones = await res.json();
-      return { shippingZones };
+      const providers = await res.json();
+      return { providers };
     }
   } catch (e) {
-    console.error('Failed to load shipping zones:', e);
+    console.error('Failed to load shipping providers:', e);
   }
 
-  return { shippingZones: [] };
+  return { providers: [] };
 }

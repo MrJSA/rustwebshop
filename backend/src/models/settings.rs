@@ -14,6 +14,9 @@ pub struct StoreSettings {
     pub support_email: String,
     pub company_address: String,
     pub vat_id: String,
+    pub logo_url: String,
+    pub phone: String,
+    pub hero_config: serde_json::Value,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -28,6 +31,9 @@ pub struct StoreSettingsDTO {
     pub support_email: String,
     pub company_address: String,
     pub vat_id: String,
+    pub logo_url: String,
+    pub phone: String,
+    pub hero_config: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +47,9 @@ pub struct UpdateStoreSettingsRequest {
     pub support_email: Option<String>,
     pub company_address: Option<String>,
     pub vat_id: Option<String>,
+    pub logo_url: Option<String>,
+    pub phone: Option<String>,
+    pub hero_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]

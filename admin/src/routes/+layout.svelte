@@ -3,7 +3,8 @@
   import { page } from '$app/stores';
   import { 
     LayoutDashboard, Package, Warehouse, ShoppingCart, 
-    CreditCard, Truck, Sliders, ExternalLink, ShieldCheck, Zap 
+    CreditCard, Truck, Sliders, ExternalLink, ShieldCheck, Zap,
+    FileText, Menu, FolderTree
   } from 'lucide-svelte';
 
   export let data;
@@ -11,13 +12,17 @@
 
   const navLinks = [
     { href: '/', label: 'Overview & Analytics', icon: LayoutDashboard },
-    { href: '/products', label: 'Products & Variants', icon: Package },
+    { href: '/products', label: 'Products & BOM', icon: Package },
+    { href: '/categories', label: 'Categories Tree', icon: FolderTree },
     { href: '/logistics', label: 'Logistics & Stock', icon: Warehouse },
     { href: '/orders', label: 'Orders & Slips', icon: ShoppingCart },
+    { href: '/settings/shipping', label: 'Shipping Providers & Zones', icon: Truck },
+    { href: '/settings/pages', label: 'Policy CMS (Markdown)', icon: FileText },
+    { href: '/settings/menu', label: 'Navigation Menu', icon: Menu },
     { href: '/settings/payments', label: 'Payment Providers', icon: CreditCard },
-    { href: '/settings/shipping', label: 'Shipping Zones', icon: Truck },
-    { href: '/settings/system', label: 'System & Modes', icon: Sliders }
+    { href: '/settings/system', label: 'System & Shop Identity', icon: Sliders }
   ];
+
 </script>
 
 <div class="min-h-screen flex bg-slate-950 text-slate-100 selection:bg-orange-500 selection:text-white">

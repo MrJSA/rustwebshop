@@ -1,19 +1,58 @@
 <script>
   import { cart, isCartOpen } from '$lib/stores/cart.js';
-  import { ShieldCheck, Truck, Zap, Download, Check, AlertCircle, ArrowLeft, Plus, Minus, Box } from 'lucide-svelte';
+  import { customer } from '$lib/stores/customer.js';
+  import {
+    ShieldCheck,
+    Truck,
+    Zap,
+    Download,
+    Check,
+    AlertCircle,
+    ArrowLeft,
+    Plus,
+    Minus,
+    Box,
+    Layers,
+    Heart
+  } from 'lucide-svelte';
 
   export let data;
   $: product = data.product || {};
   $: variants = data.variants || [];
+  $: allParts = data.parts || [];
 
   let selectedVariantIndex = 0;
   let quantity = 1;
+  let isInWishlist = false;
 
   $: currentVariant = variants[selectedVariantIndex] || {};
   $: currentPriceCents = currentVariant.price_override_cents || product.base_price_cents;
   $: isDigital = product.product_type === 'digital';
   $: inStock = isDigital || (currentVariant.stock_quantity && currentVariant.stock_quantity > 0);
   $: isLowStock = !isDigital && currentVariant.stock_quantity > 0 && currentVariant.stock_quantity <= currentVariant.low_stock_threshold;
+
+  // Dynamically filter included parts for the selected variant/version!
+  $: activeParts = allParts.filter((p) => !p.variant_id || p.variant_id === currentVariant.id);
+
+  async function toggleWishlist() {
+    try {
+      const headers = {
+        'Content-Type': 'application/json',
+        ...($customer ? { Authorization: `Bearer ${$customer.token}` } : {})
+      };
+      const res = await fetch('/api/v1/customer/wishlist/toggle', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ product_id: product.id })
+      });
+      if (res.ok) {
+        const d = await res.json();
+        isInWishlist = d.in_wishlist;
+      }
+    } catch (e) {
+      console.error('Failed to toggle wishlist:', e);
+    }
+  }
 
   function addToCart() {
     if (!inStock) return;
@@ -30,6 +69,7 @@
     });
     isCartOpen.set(true);
   }
+
 </script>
 
 <svelte:head>
@@ -155,6 +195,36 @@
           </div>
         {/if}
 
+        <!-- Included Components & Bill of Materials (BOM) -->
+        {#if activeParts.length > 0}
+          <div class="mt-6 p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 space-y-3">
+            <div class="flex items-center justify-between text-xs">
+              <div class="flex items-center gap-2 font-bold text-white uppercase tracking-wider">
+                <Layers size={15} class="text-orange-400" />
+                <span>Included Hardware Components & Parts ({activeParts.length})</span>
+              </div>
+              <span class="text-[10px] text-slate-500 font-mono">Sold as single kit</span>
+            </div>
+            <div class="space-y-2">
+              {#each activeParts as part}
+                <div class="p-2.5 rounded-xl bg-slate-950/80 border border-slate-800/60 flex items-center justify-between text-xs">
+                  <div class="min-w-0 pr-3">
+                    <div class="font-bold text-slate-200">{part.part_name}</div>
+                    {#if part.notes}
+                      <div class="text-[11px] text-slate-400 line-clamp-1">{part.notes}</div>
+                    {/if}
+                  </div>
+                  <div class="text-right flex-shrink-0 font-mono">
+                    <span class="px-2 py-0.5 rounded bg-slate-800 text-orange-400 text-[10px] font-bold">
+                      {part.quantity}x
+                    </span>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
         <!-- Stock Availability Indicator -->
         <div class="mt-6 p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 flex items-center justify-between text-xs">
           <div class="flex items-center gap-2">
@@ -213,7 +283,17 @@
             <span>Out of Stock</span>
           {/if}
         </button>
+
+        <button
+          type="button"
+          on:click={toggleWishlist}
+          class="p-4 rounded-xl border border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-rose-400 transition-colors"
+          title="Toggle Wishlist"
+        >
+          <Heart size={18} class={isInWishlist ? 'fill-rose-500 text-rose-500' : ''} />
+        </button>
       </div>
     </div>
   </div>
 </div>
+

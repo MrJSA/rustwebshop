@@ -1,11 +1,19 @@
+pub mod category;
+pub mod customer;
+pub mod menu;
 pub mod order;
+pub mod page;
 pub mod payment;
 pub mod product;
 pub mod settings;
 pub mod shipping;
 pub mod user;
 
+pub use category::*;
+pub use customer::*;
+pub use menu::*;
 pub use order::*;
+pub use page::*;
 pub use payment::*;
 pub use product::*;
 pub use settings::*;

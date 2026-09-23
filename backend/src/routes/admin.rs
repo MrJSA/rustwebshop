@@ -1,14 +1,16 @@
 use crate::models::{
-    AuthResponse, Claims, CreateProductRequest, CreateShippingRateRequest,
-    CreateShippingZoneRequest, CreateVariantRequest, DashboardStats, LoginRequest, Order,
-    OrderDetails, OrderItem, PaymentConfig, Product, ProductVariant, ProductWithVariants,
-    SalesDataPoint, ShippingRate, ShippingZone, ShippingZoneWithRates, StoreSettings,
-    UpdateOrderStatusRequest, UpdatePaymentConfigRequest, UpdateProductRequest,
-    UpdateStoreSettingsRequest,
+    AuthResponse, Category, Claims, CreateCategoryRequest, CreateNavigationItemRequest, CreatePartRequest, CreateProductRequest,
+    CreateProviderRequest, CreateShippingRateRequest, CreateShippingZoneRequest, CreateVariantRequest,
+    DashboardStats, LoginRequest, NavigationItem, Order, OrderDetails, OrderItem, PageContent,
+    PaymentConfig, Product, ProductPart, ProductVariant, ProductWithVariants, SalesDataPoint,
+    ShippingProvider, ShippingProviderWithZones, ShippingRate, ShippingZone, ShippingZoneWithRates,
+    StoreSettings, UpdateCategoryRequest, UpdateNavigationItemRequest, UpdateOrderStatusRequest, UpdatePageRequest,
+    UpdatePaymentConfigRequest, UpdateProductRequest, UpdateProviderRequest, UpdateShippingRateRequest,
+    UpdateShippingZoneRequest, UpdateStoreSettingsRequest,
 };
 use crate::services::document_generator::DocumentGenerator;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     http::{header::CONTENT_TYPE, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -25,11 +27,19 @@ pub fn admin_router() -> Router<PgPool> {
     let protected = Router::new()
         .route("/dashboard/stats", get(get_dashboard_stats))
         .route("/dashboard/sales-analytics", get(get_sales_analytics))
-        // Product & Variant Management
+        // Media Upload
+        .route("/media/upload", post(admin_upload_media))
+        // Product & Variant & Parts Management
         .route("/products", get(admin_list_products).post(admin_create_product))
         .route("/products/:id", put(admin_update_product).delete(admin_delete_product))
         .route("/products/:id/variants", post(admin_add_variant))
+        .route("/products/:id/parts", get(admin_get_product_parts).post(admin_add_product_part))
+        .route("/products/:id/parts/:part_id", delete(admin_delete_product_part))
+        .route("/parts/:part_id", put(admin_update_product_part))
         .route("/variants/:id", put(admin_update_variant).delete(admin_delete_variant))
+        // Categories Hierarchy Management
+        .route("/categories", get(admin_list_categories).post(admin_create_category))
+        .route("/categories/:id", put(admin_update_category).delete(admin_delete_category))
         // Logistics & Inventory Management
         .route("/logistics/inventory", get(get_logistics_inventory))
         .route("/logistics/inventory/:variant_id/stock", put(update_variant_stock))
@@ -37,15 +47,28 @@ pub fn admin_router() -> Router<PgPool> {
         .route("/orders", get(admin_list_orders))
         .route("/orders/:id", get(admin_get_order))
         .route("/orders/:id/status", put(admin_update_order_status))
+        .route("/orders/:id/refund", post(admin_refund_order))
+        .route("/orders/:id/cancel", post(admin_cancel_order))
         .route("/orders/:id/invoice", get(admin_get_order_invoice))
         .route("/orders/:id/packing-slip", get(admin_get_order_packing_slip))
         // Settings Management
         .route("/settings/payments", get(admin_get_payments))
         .route("/settings/payments/:provider", put(admin_update_payment))
         .route("/settings/shipping", get(admin_get_shipping))
+        .route("/settings/shipping/providers", get(admin_get_shipping_providers).post(admin_create_shipping_provider))
+        .route("/settings/shipping/providers/:id", put(admin_update_shipping_provider).delete(admin_delete_shipping_provider))
+        .route("/settings/shipping/providers/:id/zones", post(admin_create_provider_zone))
         .route("/settings/shipping/zones", post(admin_create_shipping_zone))
+        .route("/settings/shipping/zones/:id", put(admin_update_shipping_zone).delete(admin_delete_shipping_zone))
+        .route("/settings/shipping/zones/:id/rates", post(admin_create_zone_rate))
         .route("/settings/shipping/rates", post(admin_create_shipping_rate))
-        .route("/settings/shipping/rates/:id", delete(admin_delete_shipping_rate))
+        .route("/settings/shipping/rates/:id", put(admin_update_shipping_rate).delete(admin_delete_shipping_rate))
+        // CMS Policy Pages
+        .route("/pages", get(admin_list_pages))
+        .route("/pages/:slug", get(admin_get_page).put(admin_update_page))
+        // Navigation Menu
+        .route("/menu", get(admin_list_menu).post(admin_create_menu_item))
+        .route("/menu/:id", put(admin_update_menu_item).delete(admin_delete_menu_item))
         .route("/settings/system", get(admin_get_system_settings).put(admin_update_system_settings))
         .layer(axum::middleware::from_fn(crate::middleware::admin_auth_middleware));
 
@@ -53,6 +76,7 @@ pub fn admin_router() -> Router<PgPool> {
         .route("/auth/login", post(admin_login))
         .merge(protected)
 }
+
 
 // 1. Authentication
 async fn admin_login(
@@ -598,6 +622,21 @@ async fn admin_update_order_status(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateOrderStatusRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if payload.order_status.as_deref() == Some("shipped") {
+        let has_tracking = payload.tracking_number.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+        if !has_tracking {
+            let existing: Option<Option<String>> = sqlx::query_scalar("SELECT tracking_number FROM orders WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let already_tracked = existing.flatten().map(|s| !s.trim().is_empty()).unwrap_or(false);
+            if !already_tracked {
+                return Err((StatusCode::BAD_REQUEST, "A tracking number is required before marking an order as Shipped".to_string()));
+            }
+        }
+    }
+
     sqlx::query(
         r#"
         UPDATE orders
@@ -622,6 +661,32 @@ async fn admin_update_order_status(
     Ok(Json(json!({ "success": true })))
 }
 
+async fn admin_refund_order(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query("UPDATE orders SET payment_status = 'refunded', updated_at = NOW() WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true, "payment_status": "refunded" })))
+}
+
+async fn admin_cancel_order(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query("UPDATE orders SET order_status = 'cancelled', updated_at = NOW() WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true, "order_status": "cancelled" })))
+}
+
 async fn admin_get_order_invoice(
     State(pool): State<PgPool>,
     Path(id): Path<Uuid>,
@@ -644,7 +709,7 @@ async fn admin_get_order_invoice(
     .unwrap_or_default();
 
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, updated_at FROM store_settings WHERE id = 1"
+        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, updated_at FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
@@ -681,7 +746,7 @@ async fn admin_get_order_packing_slip(
     .unwrap_or_default();
 
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, updated_at FROM store_settings WHERE id = 1"
+        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, updated_at FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
@@ -838,7 +903,7 @@ async fn admin_delete_shipping_rate(
 // 8. System Settings (Debug & Deployment Toggles)
 async fn admin_get_system_settings(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, updated_at FROM store_settings WHERE id = 1"
+        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, updated_at FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
@@ -864,6 +929,9 @@ async fn admin_update_system_settings(
             support_email = COALESCE($7, support_email),
             company_address = COALESCE($8, company_address),
             vat_id = COALESCE($9, vat_id),
+            logo_url = COALESCE($10, logo_url),
+            phone = COALESCE($11, phone),
+            hero_config = COALESCE($12, hero_config),
             updated_at = NOW()
         WHERE id = 1
         "#
@@ -877,9 +945,572 @@ async fn admin_update_system_settings(
     .bind(payload.support_email)
     .bind(payload.company_address)
     .bind(payload.vat_id)
+    .bind(payload.logo_url)
+    .bind(payload.phone)
+    .bind(payload.hero_config)
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({ "success": true })))
 }
+
+// 9. Media Upload Handler
+async fn admin_upload_media(
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    tokio::fs::create_dir_all("uploads").await.ok();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    {
+        let file_name = field.file_name().unwrap_or("image.jpg").to_string();
+        let ext = file_name.rsplit('.').next().unwrap_or("jpg");
+        let unique_name = format!("{}.{}", Uuid::new_v4(), ext);
+        let path = format!("uploads/{}", unique_name);
+
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+        tokio::fs::write(&path, &data)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let url = format!("/uploads/{}", unique_name);
+        return Ok(Json(json!({ "url": url, "size_bytes": data.len() })));
+    }
+    Err((StatusCode::BAD_REQUEST, "No file provided in form".to_string()))
+}
+
+// 10. Product Parts / Bill of Materials (BOM)
+async fn admin_get_product_parts(
+    State(pool): State<PgPool>,
+    Path(product_id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let parts = sqlx::query_as::<_, ProductPart>(
+        "SELECT id, product_id, variant_id, part_name, part_sku, quantity, notes, created_at FROM product_parts WHERE product_id = $1 ORDER BY created_at ASC"
+    )
+    .bind(product_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(parts))
+}
+
+async fn admin_add_product_part(
+    State(pool): State<PgPool>,
+    Path(product_id): Path<Uuid>,
+    Json(payload): Json<CreatePartRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let part_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO product_parts (id, product_id, variant_id, part_name, part_sku, quantity, notes) VALUES ($1, $2, $3, $4, $5, $6, $7)"
+    )
+    .bind(part_id)
+    .bind(product_id)
+    .bind(payload.variant_id)
+    .bind(&payload.part_name)
+    .bind(&payload.part_sku)
+    .bind(payload.quantity)
+    .bind(&payload.notes)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((StatusCode::CREATED, Json(json!({ "id": part_id }))))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateProductPartRequest {
+    pub variant_id: Option<Uuid>,
+    pub part_name: String,
+    pub part_sku: Option<String>,
+    pub quantity: i32,
+    pub notes: Option<String>,
+}
+
+async fn admin_update_product_part(
+    State(pool): State<PgPool>,
+    Path(part_id): Path<Uuid>,
+    Json(payload): Json<UpdateProductPartRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query(
+        "UPDATE product_parts SET variant_id = $1, part_name = $2, part_sku = $3, quantity = $4, notes = $5 WHERE id = $6"
+    )
+    .bind(payload.variant_id)
+    .bind(&payload.part_name)
+    .bind(&payload.part_sku)
+    .bind(payload.quantity)
+    .bind(&payload.notes)
+    .bind(part_id)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn admin_delete_product_part(
+    State(pool): State<PgPool>,
+    Path((_product_id, part_id)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query("DELETE FROM product_parts WHERE id = $1")
+        .bind(part_id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+// 11. Hierarchical Shipping Providers & Zones Management
+async fn admin_get_shipping_providers(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let providers = sqlx::query_as::<_, ShippingProvider>(
+        "SELECT id, name, code, tracking_url_template, is_active, sort_order, created_at FROM shipping_providers ORDER BY sort_order ASC, name ASC"
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut result = Vec::new();
+    for p in providers {
+        let zones = sqlx::query_as::<_, ShippingZone>(
+            "SELECT id, provider_id, zone_name, country_codes, is_default, created_at FROM shipping_zones WHERE provider_id = $1 ORDER BY is_default DESC, zone_name ASC"
+        )
+        .bind(p.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+        let mut zones_with_rates = Vec::new();
+        for z in zones {
+            let rates = sqlx::query_as::<_, ShippingRate>(
+                "SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days FROM shipping_rates WHERE zone_id = $1 ORDER BY price_cents ASC"
+            )
+            .bind(z.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+
+            zones_with_rates.push(ShippingZoneWithRates { zone: z, rates });
+        }
+
+        result.push(ShippingProviderWithZones { provider: p, zones: zones_with_rates });
+    }
+
+    Ok(Json(result))
+}
+
+async fn admin_create_shipping_provider(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CreateProviderRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO shipping_providers (id, name, code, tracking_url_template, is_active, sort_order) VALUES ($1, $2, $3, $4, $5, $6)"
+    )
+    .bind(id)
+    .bind(&payload.name)
+    .bind(&payload.code)
+    .bind(payload.tracking_url_template.unwrap_or_else(|| "https://www.dhl.com/track?id={tracking_number}".to_string()))
+    .bind(payload.is_active.unwrap_or(true))
+    .bind(payload.sort_order.unwrap_or(0))
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+async fn admin_update_shipping_provider(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateProviderRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query(
+        r#"
+        UPDATE shipping_providers
+        SET 
+            name = COALESCE($1, name),
+            code = COALESCE($2, code),
+            tracking_url_template = COALESCE($3, tracking_url_template),
+            is_active = COALESCE($4, is_active),
+            sort_order = COALESCE($5, sort_order)
+        WHERE id = $6
+        "#
+    )
+    .bind(payload.name)
+    .bind(payload.code)
+    .bind(payload.tracking_url_template)
+    .bind(payload.is_active)
+    .bind(payload.sort_order)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn admin_delete_shipping_provider(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query("DELETE FROM shipping_providers WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn admin_create_provider_zone(
+    State(pool): State<PgPool>,
+    Path(provider_id): Path<Uuid>,
+    Json(payload): Json<CreateShippingZoneRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let zone_id = Uuid::new_v4();
+    let countries_json = serde_json::to_value(&payload.country_codes)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    sqlx::query(
+        "INSERT INTO shipping_zones (id, provider_id, zone_name, country_codes, is_default) VALUES ($1, $2, $3, $4, $5)"
+    )
+    .bind(zone_id)
+    .bind(provider_id)
+    .bind(&payload.zone_name)
+    .bind(countries_json)
+    .bind(payload.is_default.unwrap_or(false))
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((StatusCode::CREATED, Json(json!({ "id": zone_id }))))
+}
+
+async fn admin_update_shipping_zone(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateShippingZoneRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let countries_json = if let Some(codes) = payload.country_codes {
+        Some(serde_json::to_value(codes).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?)
+    } else {
+        None
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE shipping_zones
+        SET 
+            zone_name = COALESCE($1, zone_name),
+            country_codes = COALESCE($2, country_codes),
+            is_default = COALESCE($3, is_default),
+            provider_id = COALESCE($4, provider_id)
+        WHERE id = $5
+        "#
+    )
+    .bind(payload.zone_name)
+    .bind(countries_json)
+    .bind(payload.is_default)
+    .bind(payload.provider_id)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn admin_delete_shipping_zone(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query("DELETE FROM shipping_zones WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn admin_create_zone_rate(
+    State(pool): State<PgPool>,
+    Path(zone_id): Path<Uuid>,
+    Json(payload): Json<CreateShippingRateRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let rate_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO shipping_rates (id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#
+    )
+    .bind(rate_id)
+    .bind(zone_id)
+    .bind(&payload.name)
+    .bind(&payload.package_type)
+    .bind(payload.min_weight_g.unwrap_or(0))
+    .bind(payload.max_weight_g.unwrap_or(5000))
+    .bind(payload.price_cents)
+    .bind(&payload.estimated_delivery_days)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((StatusCode::CREATED, Json(json!({ "id": rate_id }))))
+}
+
+async fn admin_update_shipping_rate(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateShippingRateRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query(
+        r#"
+        UPDATE shipping_rates
+        SET 
+            name = COALESCE($1, name),
+            package_type = COALESCE($2, package_type),
+            min_weight_g = COALESCE($3, min_weight_g),
+            max_weight_g = COALESCE($4, max_weight_g),
+            price_cents = COALESCE($5, price_cents),
+            estimated_delivery_days = COALESCE($6, estimated_delivery_days)
+        WHERE id = $7
+        "#
+    )
+    .bind(payload.name)
+    .bind(payload.package_type)
+    .bind(payload.min_weight_g)
+    .bind(payload.max_weight_g)
+    .bind(payload.price_cents)
+    .bind(payload.estimated_delivery_days)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+// 12. CMS Policy Pages Management
+async fn admin_list_pages(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let pages = sqlx::query_as::<_, PageContent>(
+        "SELECT slug, title, content_markdown, is_published, updated_at FROM pages ORDER BY title ASC"
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(pages))
+}
+
+async fn admin_get_page(
+    State(pool): State<PgPool>,
+    Path(slug): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let page = sqlx::query_as::<_, PageContent>(
+        "SELECT slug, title, content_markdown, is_published, updated_at FROM pages WHERE slug = $1"
+    )
+    .bind(slug)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, "Page not found".to_string()))?;
+
+    Ok(Json(page))
+}
+
+async fn admin_update_page(
+    State(pool): State<PgPool>,
+    Path(slug): Path<String>,
+    Json(payload): Json<UpdatePageRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query(
+        r#"
+        UPDATE pages
+        SET 
+            title = $1,
+            content_markdown = $2,
+            is_published = COALESCE($3, is_published),
+            updated_at = NOW()
+        WHERE slug = $4
+        "#
+    )
+    .bind(&payload.title)
+    .bind(&payload.content_markdown)
+    .bind(payload.is_published)
+    .bind(&slug)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Asynchronously push update to storefront container in-memory cache
+    let slug_clone = slug.clone();
+    let title_clone = payload.title.clone();
+    let content_clone = payload.content_markdown.clone();
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let _ = client.post("http://storefront:3000/api/cache/page")
+            .json(&serde_json::json!({
+                "slug": slug_clone,
+                "title": title_clone,
+                "content_markdown": content_clone
+            }))
+            .timeout(std::time::Duration::from_millis(2000))
+            .send()
+            .await;
+    });
+
+    Ok(Json(json!({ "success": true })))
+}
+
+// 14. Categories Hierarchy Management
+async fn admin_list_categories(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let rows = sqlx::query_as::<_, Category>(
+        "SELECT id, parent_id, name, slug, description, display_order, created_at FROM categories ORDER BY display_order ASC, name ASC"
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(rows))
+}
+
+async fn admin_create_category(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CreateCategoryRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let id = Uuid::new_v4();
+    let slug = payload.slug.unwrap_or_else(|| {
+        payload.name.to_lowercase().replace(' ', "-").replace('&', "and")
+    });
+    sqlx::query(
+        "INSERT INTO categories (id, parent_id, name, slug, description, display_order) VALUES ($1, $2, $3, $4, $5, $6)"
+    )
+    .bind(id)
+    .bind(payload.parent_id)
+    .bind(&payload.name)
+    .bind(&slug)
+    .bind(payload.description.unwrap_or_default())
+    .bind(payload.display_order.unwrap_or(0))
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((StatusCode::CREATED, Json(json!({ "id": id, "slug": slug }))))
+}
+
+async fn admin_update_category(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateCategoryRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query(
+        "UPDATE categories SET parent_id = $1, name = $2, slug = $3, description = $4, display_order = $5 WHERE id = $6"
+    )
+    .bind(payload.parent_id)
+    .bind(&payload.name)
+    .bind(&payload.slug)
+    .bind(payload.description.unwrap_or_default())
+    .bind(payload.display_order.unwrap_or(0))
+    .bind(id)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn admin_delete_category(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query("DELETE FROM categories WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+// 13. Dynamic Navigation Menu Management
+async fn admin_list_menu(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let items = sqlx::query_as::<_, NavigationItem>(
+        "SELECT id, label, url, sort_order, is_active, created_at FROM navigation_items ORDER BY sort_order ASC, created_at ASC"
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(items))
+}
+
+async fn admin_create_menu_item(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CreateNavigationItemRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO navigation_items (id, label, url, sort_order, is_active) VALUES ($1, $2, $3, $4, $5)"
+    )
+    .bind(id)
+    .bind(&payload.label)
+    .bind(&payload.url)
+    .bind(payload.sort_order.unwrap_or(0))
+    .bind(payload.is_active.unwrap_or(true))
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+async fn admin_update_menu_item(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateNavigationItemRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query(
+        r#"
+        UPDATE navigation_items
+        SET 
+            label = COALESCE($1, label),
+            url = COALESCE($2, url),
+            sort_order = COALESCE($3, sort_order),
+            is_active = COALESCE($4, is_active)
+        WHERE id = $5
+        "#
+    )
+    .bind(payload.label)
+    .bind(payload.url)
+    .bind(payload.sort_order)
+    .bind(payload.is_active)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn admin_delete_menu_item(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query("DELETE FROM navigation_items WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+

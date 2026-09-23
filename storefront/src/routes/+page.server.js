@@ -9,23 +9,31 @@ export async function load({ fetch, url }) {
   if (subcategory) queryUrl += `subcategory=${encodeURIComponent(subcategory)}&`;
   if (search) queryUrl += `search=${encodeURIComponent(search)}&`;
 
+  let products = [];
   try {
     const res = await fetch(queryUrl);
     if (res.ok) {
-      const products = await res.json();
-      return {
-        products,
-        currentCategory: category,
-        currentSearch: search
-      };
+      products = await res.json();
     }
   } catch (e) {
     console.error('Failed to fetch products from backend:', e);
   }
 
+  let heroConfig = null;
+  try {
+    const sRes = await fetch(`${backendUrl}/api/v1/store/info`);
+    if (sRes.ok) {
+      const sData = await sRes.json();
+      heroConfig = sData.store?.hero_config || null;
+    }
+  } catch (e) {
+    console.error('Failed to load store hero config:', e);
+  }
+
   return {
-    products: [],
+    products,
     currentCategory: category,
-    currentSearch: search
+    currentSearch: search,
+    heroConfig
   };
 }

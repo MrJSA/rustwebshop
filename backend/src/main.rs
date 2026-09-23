@@ -56,12 +56,16 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = pool.expect("Unable to establish PostgreSQL database connection after retries");
 
+    // Ensure uploads directory exists
+    tokio::fs::create_dir_all("uploads").await.ok();
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
     let app = routes::create_router(pool)
+        .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
@@ -73,3 +77,4 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+

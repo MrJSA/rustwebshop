@@ -1,73 +1,212 @@
 <script>
   import '../app.css';
   import { cart, cartCount, cartSubtotal, isCartOpen } from '$lib/stores/cart.js';
-  import { ShoppingBag, X, Plus, Minus, ArrowRight, ShieldCheck, Box, ExternalLink, Search } from 'lucide-svelte';
+  import { customer } from '$lib/stores/customer.js';
+  import {
+    ShoppingBag,
+    X,
+    Plus,
+    Minus,
+    ArrowRight,
+    ShieldCheck,
+    Box,
+    Search,
+    User,
+    ChevronDown,
+    Heart,
+    MapPin,
+    Settings,
+    LogOut,
+    KeyRound,
+    LogIn
+  } from 'lucide-svelte';
 
   export let data;
   $: store = data.store || {};
   $: currencySymbol = store.currency_symbol || '€';
+  $: menuItems = data.menuItems || [];
+
+  let isAccountMenuOpen = false;
+  let headerSearch = '';
+
+  function toggleAccountMenu() {
+    isAccountMenuOpen = !isAccountMenuOpen;
+  }
+
+  function handleLogout() {
+    customer.logout();
+    isAccountMenuOpen = false;
+  }
 </script>
 
+<svelte:window on:click={(e) => {
+  if (!e.target.closest('#account-dropdown-container')) {
+    isAccountMenuOpen = false;
+  }
+}} />
+
 <div class="min-h-screen flex flex-col bg-slate-950 text-slate-100 selection:bg-orange-500 selection:text-white">
-  <!-- Top Announcement / Debug Bar -->
+  <!-- Top Announcement / Debug Bar (No admin button) -->
   {#if store.debug_mode}
-    <div class="bg-gradient-to-r from-orange-600 to-amber-600 px-4 py-1.5 text-center text-xs font-semibold tracking-wide text-white flex items-center justify-center gap-2 shadow-sm">
-      <span class="bg-white/20 px-1.5 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider">Debug Sandbox Active</span>
+    <div class="bg-gradient-to-r from-orange-600 to-amber-600 px-4 py-1 text-center text-xs font-semibold tracking-wide text-white flex items-center justify-center gap-2 shadow-sm">
+      <span class="bg-white/20 px-1.5 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider">Sandbox Active</span>
       <span>Simulated payment test mode enabled for Stripe, PayPal, Apple Pay, Google Pay & Amazon Pay.</span>
-      <a href="http://localhost:4000" target="_blank" class="underline ml-2 hover:text-orange-100 flex items-center gap-1">
-        Admin Portal <ExternalLink size={12} />
-      </a>
     </div>
   {/if}
 
-  <!-- Main Navigation Bar -->
-  <header class="sticky top-0 z-40 glass-nav">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between gap-4">
+  <!-- Main Sticky Header -->
+  <header class="sticky top-0 z-40 glass-nav border-b border-slate-900 shadow-xl">
+    <!-- Top Row: Logo, Search Bar, Account & Cart -->
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex items-center justify-between gap-4">
       <!-- Brand Logo -->
-      <a href="/" class="flex items-center gap-3 group">
-        <div class="w-11 h-11 rounded-xl bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center shadow-lg shadow-orange-600/30 group-hover:scale-105 transition-transform duration-200">
-          <span class="text-2xl select-none">🦀</span>
-        </div>
+      <a href="/" class="flex items-center gap-3 group flex-shrink-0">
+        {#if store.logo_url}
+          <img src={store.logo_url} alt={store.store_name || 'Logo'} class="h-10 max-w-[150px] object-contain rounded-xl" />
+        {:else}
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center shadow-lg shadow-orange-600/30 group-hover:scale-105 transition-transform duration-200">
+            <span class="text-2xl select-none">🦀</span>
+          </div>
+        {/if}
         <div>
-          <span class="text-xl font-extrabold tracking-tight bg-gradient-to-r from-white via-slate-100 to-slate-400 bg-clip-text text-transparent">
+          <span class="text-lg font-extrabold tracking-tight bg-gradient-to-r from-white via-slate-100 to-slate-400 bg-clip-text text-transparent">
             {store.store_name || 'RustCraft'}
           </span>
-          <div class="text-[10px] text-orange-400/90 font-mono font-semibold tracking-widest uppercase">
+          <div class="text-[9px] text-orange-400/90 font-mono font-semibold tracking-widest uppercase">
             Rust Powered &bull; ACID Fast
           </div>
         </div>
       </a>
 
-      <!-- Navigation Links -->
-      <nav class="hidden md:flex items-center gap-8 text-sm font-medium text-slate-300">
-        <a href="/" class="hover:text-orange-400 transition-colors">Catalog</a>
-        <a href="/?category=Hardware" class="hover:text-orange-400 transition-colors">Hardware</a>
-        <a href="/?category=Apparel" class="hover:text-orange-400 transition-colors">Apparel</a>
-        <a href="/?category=Software%20%26%20Books" class="hover:text-orange-400 transition-colors">Digital & Books</a>
-        <a href="/track" class="hover:text-orange-400 transition-colors flex items-center gap-1.5 text-slate-400">
-          <Box size={15} /> Track Order
-        </a>
-      </nav>
+      <!-- Searchbar in Header (Placed Above Menu) -->
+      <div class="flex-1 max-w-xl mx-2 hidden sm:block">
+        <form action="/" method="GET" class="relative flex items-center">
+          <input
+            type="text"
+            name="search"
+            bind:value={headerSearch}
+            placeholder="Search products by title, SKU, or category..."
+            class="w-full pl-10 pr-20 py-2 rounded-xl bg-slate-900/90 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500/30 text-xs shadow-inner"
+          />
+          <Search size={15} class="absolute left-3.5 text-slate-500 pointer-events-none" />
+          <button
+            type="submit"
+            class="absolute right-1 px-3 py-1 rounded-lg bg-orange-600 hover:bg-orange-500 text-white text-[11px] font-bold transition-all shadow-sm"
+          >
+            Search
+          </button>
+        </form>
+      </div>
 
-      <!-- Right Header Actions (Cart & Admin) -->
-      <div class="flex items-center gap-4">
-        <a 
-          href="http://localhost:4000" 
-          target="_blank" 
-          class="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900/60 hover:bg-slate-800 text-xs font-semibold text-slate-300 hover:text-white transition-colors"
-        >
-          <span>Admin Portal</span>
-          <ExternalLink size={13} class="text-orange-400" />
-        </a>
+      <!-- Right Header Actions (Account Dropdown + Cart) -->
+      <div class="flex items-center gap-3">
+        <!-- Account Dropdown Container -->
+        <div class="relative" id="account-dropdown-container">
+          <button
+            type="button"
+            on:click|stopPropagation={toggleAccountMenu}
+            class="p-2 sm:px-3 sm:py-2 rounded-xl bg-slate-900/80 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-200 hover:text-white transition-all flex items-center gap-2 group text-xs font-semibold"
+            aria-label="Account options"
+          >
+            <div class="w-6 h-6 rounded-full bg-slate-800 group-hover:bg-orange-500/20 text-slate-300 group-hover:text-orange-400 flex items-center justify-center transition-colors">
+              <User size={14} />
+            </div>
+            <span class="hidden md:inline text-xs font-medium text-slate-300 truncate max-w-[100px]">
+              {#if $customer && $customer.isLoggedIn}
+                {$customer.full_name || $customer.email.split('@')[0]}
+              {:else}
+                Account
+              {/if}
+            </span>
+            <ChevronDown size={13} class="text-slate-500 group-hover:text-slate-300 transition-transform {isAccountMenuOpen ? 'rotate-180' : ''}" />
+          </button>
+
+          <!-- Dropdown Menu -->
+          {#if isAccountMenuOpen}
+            <div
+              class="absolute right-0 mt-2 w-56 rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl py-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150"
+            >
+              {#if !$customer || !$customer.isLoggedIn}
+                <!-- Logged Out State: Only 2 options as requested -->
+                <div class="px-3 py-2 border-b border-slate-800/80 mb-1">
+                  <p class="text-[11px] font-semibold text-slate-400">Welcome Customer</p>
+                  <p class="text-xs text-slate-300">Sign in to view orders & wishlist</p>
+                </div>
+                <a
+                  href="/account/login"
+                  on:click={() => isAccountMenuOpen = false}
+                  class="flex items-center gap-2.5 px-4 py-2.5 text-xs text-slate-200 hover:bg-slate-800/80 hover:text-orange-400 transition-colors font-semibold"
+                >
+                  <LogIn size={15} class="text-orange-400" />
+                  <span>Login / Register</span>
+                </a>
+                <a
+                  href="/account/reset-password"
+                  on:click={() => isAccountMenuOpen = false}
+                  class="flex items-center gap-2.5 px-4 py-2.5 text-xs text-slate-300 hover:bg-slate-800/80 hover:text-white transition-colors"
+                >
+                  <KeyRound size={15} class="text-slate-400" />
+                  <span>Lost Password / Reset Password</span>
+                </a>
+              {:else}
+                <!-- Logged In State: Orders, Wishlist, Addresses, Account details, Logout -->
+                <div class="px-3 py-2 border-b border-slate-800/80 mb-1">
+                  <p class="text-xs font-bold text-white truncate">{$customer.full_name || 'Customer'}</p>
+                  <p class="text-[10px] text-slate-400 font-mono truncate">{$customer.email}</p>
+                </div>
+                <a
+                  href="/account/orders"
+                  on:click={() => isAccountMenuOpen = false}
+                  class="flex items-center gap-2.5 px-4 py-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-orange-400 transition-colors"
+                >
+                  <Box size={15} class="text-slate-400" />
+                  <span>Orders</span>
+                </a>
+                <a
+                  href="/account/wishlist"
+                  on:click={() => isAccountMenuOpen = false}
+                  class="flex items-center gap-2.5 px-4 py-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-rose-400 transition-colors"
+                >
+                  <Heart size={15} class="text-slate-400" />
+                  <span>Wishlist</span>
+                </a>
+                <a
+                  href="/account/addresses"
+                  on:click={() => isAccountMenuOpen = false}
+                  class="flex items-center gap-2.5 px-4 py-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-emerald-400 transition-colors"
+                >
+                  <MapPin size={15} class="text-slate-400" />
+                  <span>Addresses</span>
+                </a>
+                <a
+                  href="/account/details"
+                  on:click={() => isAccountMenuOpen = false}
+                  class="flex items-center gap-2.5 px-4 py-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-sky-400 transition-colors"
+                >
+                  <Settings size={15} class="text-slate-400" />
+                  <span>Account details</span>
+                </a>
+                <div class="border-t border-slate-800/80 my-1"></div>
+                <button
+                  type="button"
+                  on:click={handleLogout}
+                  class="w-full text-left flex items-center gap-2.5 px-4 py-2 text-xs text-rose-400 hover:bg-rose-500/10 transition-colors font-semibold"
+                >
+                  <LogOut size={15} />
+                  <span>Logout</span>
+                </button>
+              {/if}
+            </div>
+          {/if}
+        </div>
 
         <!-- Cart Button Trigger -->
         <button
           id="cart-trigger-btn"
           on:click={() => isCartOpen.set(true)}
-          class="relative p-2.5 rounded-xl bg-slate-900/80 hover:bg-slate-800 border border-slate-800 hover:border-orange-500/50 text-slate-200 hover:text-white transition-all shadow-md flex items-center gap-2 group"
+          class="relative p-2.5 sm:px-3.5 sm:py-2 rounded-xl bg-slate-900/80 hover:bg-slate-800 border border-slate-800 hover:border-orange-500/50 text-slate-200 hover:text-white transition-all shadow-md flex items-center gap-2 group"
           aria-label="View Shopping Cart"
         >
-          <ShoppingBag size={20} class="group-hover:text-orange-400 transition-colors" />
+          <ShoppingBag size={18} class="group-hover:text-orange-400 transition-colors" />
           <span class="hidden sm:inline text-xs font-bold font-mono">
             {($cartSubtotal / 100).toFixed(2)} {currencySymbol}
           </span>
@@ -79,6 +218,36 @@
         </button>
       </div>
     </div>
+
+    <!-- Mobile Search Bar (under top row for smaller devices) -->
+    <div class="px-4 pb-2.5 sm:hidden">
+      <form action="/" method="GET" class="relative flex items-center">
+        <input
+          type="text"
+          name="search"
+          placeholder="Search products..."
+          class="w-full pl-9 pr-16 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white text-xs"
+        />
+        <Search size={14} class="absolute left-3 text-slate-500" />
+        <button type="submit" class="absolute right-1 px-2.5 py-0.5 rounded bg-orange-600 text-white text-[11px] font-bold">
+          Search
+        </button>
+      </form>
+    </div>
+
+    <!-- Lower Row: Dynamic Customizable Navigation Menu -->
+    <nav class="border-t border-slate-900/80 bg-slate-950/60 backdrop-blur-md">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center gap-1 sm:gap-6 overflow-x-auto py-2 text-xs font-medium scrollbar-none">
+        {#each menuItems as item}
+          <a
+            href={item.url}
+            class="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-900 transition-all flex items-center gap-1.5 whitespace-nowrap"
+          >
+            <span>{item.label}</span>
+          </a>
+        {/each}
+      </div>
+    </nav>
   </header>
 
   <!-- Main Viewport -->
@@ -118,47 +287,41 @@
           <div class="flex-1 overflow-y-auto px-6 py-4 divide-y divide-slate-800/80">
             {#if $cart.length === 0}
               <div class="h-full flex flex-col items-center justify-center text-center py-16 text-slate-400">
-                <div class="w-16 h-16 rounded-2xl bg-slate-800/50 flex items-center justify-center mb-4">
-                  <ShoppingBag size={32} class="text-slate-600" />
+                <div class="w-16 h-16 rounded-full bg-slate-800/50 flex items-center justify-center mb-4 text-slate-500">
+                  <ShoppingBag size={32} />
                 </div>
-                <p class="text-base font-semibold text-slate-200">Your basket is empty</p>
-                <p class="text-xs text-slate-400 mt-1 max-w-xs">Discover our hot-swappable keyboards, apparel, and Rust guides in the catalog.</p>
-                <button
-                  on:click={() => isCartOpen.set(false)}
-                  class="mt-6 px-5 py-2.5 rounded-xl bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold shadow-lg shadow-orange-600/30 transition-all"
-                >
-                  Explore Products
-                </button>
+                <p class="text-sm font-semibold text-slate-300">Your cart is currently empty</p>
+                <p class="text-xs text-slate-500 mt-1 max-w-xs">Explore our mechanical keyboards, apparel, and software books.</p>
               </div>
             {:else}
               {#each $cart as item}
-                <div class="py-4 flex gap-4 items-center">
+                <div class="py-4 flex gap-4">
                   {#if item.image_url}
-                    <img src={item.image_url} alt={item.product_title} class="w-16 h-16 object-cover rounded-xl border border-slate-800 bg-slate-950 flex-shrink-0" />
+                    <img src={item.image_url} alt={item.product_title} class="w-16 h-16 rounded-xl object-cover bg-slate-950 border border-slate-800 flex-shrink-0" />
                   {:else}
-                    <div class="w-16 h-16 rounded-xl border border-slate-800 bg-slate-800/50 flex items-center justify-center text-xl flex-shrink-0">
+                    <div class="w-16 h-16 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-center text-2xl flex-shrink-0">
                       📦
                     </div>
                   {/if}
 
                   <div class="flex-1 min-w-0">
-                    <h4 class="text-sm font-bold text-white truncate">{item.product_title}</h4>
-                    <p class="text-xs text-slate-400 mt-0.5 truncate">{item.variant_title}</p>
-                    <div class="text-[11px] font-mono text-orange-400 mt-0.5">SKU: {item.sku}</div>
+                    <h3 class="text-xs font-bold text-white truncate">{item.product_title}</h3>
+                    <div class="text-[11px] text-slate-400 truncate mt-0.5">{item.variant_title}</div>
+                    <div class="text-[10px] font-mono text-orange-400/90 mt-0.5">SKU: {item.sku}</div>
 
-                    <div class="flex items-center justify-between mt-2.5">
-                      <div class="flex items-center border border-slate-700 rounded-lg overflow-hidden bg-slate-950">
+                    <div class="mt-2 flex items-center justify-between">
+                      <div class="flex items-center border border-slate-700 rounded-lg bg-slate-950 px-1 py-0.5">
                         <button
                           on:click={() => cart.updateQuantity(item.variant_id, item.quantity - 1)}
-                          class="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                          class="p-1 text-slate-400 hover:text-white transition-colors"
                           aria-label="Decrease quantity"
                         >
                           <Minus size={12} />
                         </button>
-                        <span class="px-2.5 py-1 text-xs font-semibold text-white font-mono">{item.quantity}</span>
+                        <span class="px-2 text-xs font-semibold font-mono">{item.quantity}</span>
                         <button
                           on:click={() => cart.updateQuantity(item.variant_id, item.quantity + 1)}
-                          class="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                          class="p-1 text-slate-400 hover:text-white transition-colors"
                           aria-label="Increase quantity"
                         >
                           <Plus size={12} />
@@ -166,9 +329,9 @@
                       </div>
 
                       <div class="text-right">
-                        <div class="text-sm font-bold text-white font-mono">
+                        <span class="text-xs font-mono font-bold text-white">
                           {((item.price_cents * item.quantity) / 100).toFixed(2)} {currencySymbol}
-                        </div>
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -177,26 +340,23 @@
             {/if}
           </div>
 
-          <!-- Cart Footer & Checkout Action -->
+          <!-- Cart Footer / Checkout -->
           {#if $cart.length > 0}
-            <div class="p-6 border-t border-slate-800 bg-slate-900/90 space-y-4">
-              <div class="space-y-1.5 text-sm">
-                <div class="flex justify-between text-slate-400">
-                  <span>Subtotal</span>
-                  <span class="font-mono text-white font-semibold">{($cartSubtotal / 100).toFixed(2)} {currencySymbol}</span>
-                </div>
-                <div class="flex justify-between text-slate-400 text-xs">
-                  <span>Taxes & Shipping</span>
-                  <span>Calculated at checkout</span>
-                </div>
+            <div class="p-6 border-t border-slate-800 bg-slate-950/60 space-y-4">
+              <div class="flex items-center justify-between text-sm">
+                <span class="text-slate-400">Subtotal:</span>
+                <span class="font-mono font-bold text-lg text-white">
+                  {($cartSubtotal / 100).toFixed(2)} {currencySymbol}
+                </span>
               </div>
+              <p class="text-[11px] text-slate-500">Taxes and shipping calculated at checkout.</p>
 
               <a
                 href="/checkout"
                 on:click={() => isCartOpen.set(false)}
-                class="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-xl shadow-orange-600/30 transition-all hover:scale-[1.01]"
+                class="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-orange-600/30 transition-all hover:scale-[1.01]"
               >
-                Proceed to Checkout
+                <span>Proceed to Secure Checkout</span>
                 <ArrowRight size={16} />
               </a>
 
@@ -211,29 +371,58 @@
     </div>
   {/if}
 
-  <!-- Footer -->
+  <!-- Footer with Policy Links & No Port Numbers -->
   <footer class="border-t border-slate-900 bg-slate-950 mt-auto">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 flex flex-col md:flex-row items-center justify-between gap-6">
-      <div class="flex items-center gap-3">
-        <span class="text-2xl select-none">🦀</span>
-        <div>
-          <span class="font-bold text-white text-sm">{store.store_name || 'RustCraft Store'}</span>
-          <p class="text-xs text-slate-400">Engineered with Axum, SQLx, PostgreSQL & SvelteKit.</p>
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-8 mb-10">
+        <!-- Col 1: Brand Info -->
+        <div class="md:col-span-1 space-y-3">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl select-none">🦀</span>
+            <span class="font-bold text-white text-sm">{store.store_name || 'RustCraft Gear'}</span>
+          </div>
+          <p class="text-xs text-slate-400 leading-relaxed">
+            High-performance hardware, accessories, and architecture eBooks backed by memory safety and row-locking concurrency.
+          </p>
+          <div class="text-[11px] text-slate-500">
+            &copy; 2026 {store.store_name || 'RustCraft'}. All rights reserved.
+          </div>
         </div>
-      </div>
 
-      <!-- Payment Gateways Accepted -->
-      <div class="flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
-        <span class="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-semibold">Stripe</span>
-        <span class="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-semibold">PayPal</span>
-        <span class="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-semibold">Apple Pay</span>
-        <span class="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-semibold">Google Pay</span>
-        <span class="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-semibold">Amazon Pay</span>
-      </div>
+        <!-- Col 2: Customer Service & Logistics -->
+        <div class="space-y-2">
+          <h4 class="text-xs font-bold text-white uppercase tracking-wider mb-3">Shipping & Service</h4>
+          <ul class="space-y-2 text-xs text-slate-400">
+            <li><a href="/policies/shipment-policy" class="hover:text-orange-400 transition-colors">Shipment Policy & Rates Table</a></li>
+            <li><a href="/policies/return-policy" class="hover:text-orange-400 transition-colors">Return & Cancellation Policy</a></li>
+            <li><a href="/track" class="hover:text-orange-400 transition-colors">Track Order Status</a></li>
+            <li><a href="/policies/contact" class="hover:text-orange-400 transition-colors">Contact Information</a></li>
+          </ul>
+        </div>
 
-      <div class="text-xs text-slate-400 text-center md:text-right">
-        <div>Port 8080 (Storefront) &bull; Port 4000 (Admin)</div>
-        <div class="mt-1">Deployment Mode: <span class="capitalize text-orange-400 font-mono font-semibold">{store.deployment_mode || 'Development'}</span></div>
+        <!-- Col 3: Legal & Regulatory Compliance -->
+        <div class="space-y-2">
+          <h4 class="text-xs font-bold text-white uppercase tracking-wider mb-3">Legal & Privacy</h4>
+          <ul class="space-y-2 text-xs text-slate-400">
+            <li><a href="/policies/legal-notice" class="hover:text-orange-400 transition-colors">Legal Notice (Impressum)</a></li>
+            <li><a href="/policies/terms-conditions" class="hover:text-orange-400 transition-colors">Terms and Conditions (AGB)</a></li>
+            <li><a href="/policies/privacy-policy" class="hover:text-orange-400 transition-colors">Privacy Policy (GDPR)</a></li>
+            <li><a href="/policies/cookie-policy" class="hover:text-orange-400 transition-colors">Cookie Policy</a></li>
+          </ul>
+        </div>
+
+        <!-- Col 4: Payment Methods Accepted -->
+        <div class="space-y-3">
+          <h4 class="text-xs font-bold text-white uppercase tracking-wider mb-3">Payment Methods</h4>
+          <p class="text-xs text-slate-400">Direct instant checkout via certified gateways:</p>
+          <div class="flex flex-wrap gap-2 text-xs">
+            <span class="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-semibold">Stripe</span>
+            <span class="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-semibold">PayPal</span>
+            <span class="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-semibold">Apple Pay</span>
+            <span class="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-semibold">Google Pay</span>
+            <span class="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-semibold">Amazon Pay</span>
+          </div>
+        </div>
       </div>
     </div>
   </footer>

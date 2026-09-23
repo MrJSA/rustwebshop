@@ -5,8 +5,20 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ShippingProvider {
+    pub id: Uuid,
+    pub name: String,
+    pub code: String,
+    pub tracking_url_template: String,
+    pub is_active: bool,
+    pub sort_order: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ShippingZone {
     pub id: Uuid,
+    pub provider_id: Option<Uuid>,
     pub zone_name: String,
     pub country_codes: JsonValue, // JSON array of country codes, e.g. ["DE", "FR"]
     pub is_default: bool,
@@ -32,6 +44,13 @@ pub struct ShippingZoneWithRates {
     pub rates: Vec<ShippingRate>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShippingProviderWithZones {
+    #[serde(flatten)]
+    pub provider: ShippingProvider,
+    pub zones: Vec<ShippingZoneWithRates>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct EstimateShippingRequest {
     pub country_code: String,
@@ -40,14 +59,42 @@ pub struct EstimateShippingRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct CreateProviderRequest {
+    pub name: String,
+    pub code: String,
+    pub tracking_url_template: Option<String>,
+    pub is_active: Option<bool>,
+    pub sort_order: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateProviderRequest {
+    pub name: Option<String>,
+    pub code: Option<String>,
+    pub tracking_url_template: Option<String>,
+    pub is_active: Option<bool>,
+    pub sort_order: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateShippingZoneRequest {
+    pub provider_id: Option<Uuid>,
     pub zone_name: String,
     pub country_codes: Vec<String>,
-    pub is_default: bool,
+    pub is_default: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateShippingZoneRequest {
+    pub zone_name: Option<String>,
+    pub country_codes: Option<Vec<String>>,
+    pub is_default: Option<bool>,
+    pub provider_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateShippingRateRequest {
+    pub zone_id: Option<Uuid>,
     pub name: String,
     pub package_type: String,
     pub min_weight_g: Option<i32>,
@@ -55,3 +102,14 @@ pub struct CreateShippingRateRequest {
     pub price_cents: i32,
     pub estimated_delivery_days: String,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateShippingRateRequest {
+    pub name: Option<String>,
+    pub package_type: Option<String>,
+    pub min_weight_g: Option<i32>,
+    pub max_weight_g: Option<i32>,
+    pub price_cents: Option<i32>,
+    pub estimated_delivery_days: Option<String>,
+}
+

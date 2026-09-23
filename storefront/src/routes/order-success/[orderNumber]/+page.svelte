@@ -103,7 +103,7 @@
     </div>
 
     <!-- Actions -->
-    <div class="pt-6 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4">
+    <div class="pt-6 border-t border-slate-800 flex items-center justify-between gap-4">
       <a
         href="/"
         class="w-full sm:w-auto px-6 py-3 rounded-xl bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold transition-all shadow-md flex items-center justify-center gap-2"
@@ -113,13 +113,13 @@
       </a>
 
       <a
-        href="http://localhost:4000"
-        target="_blank"
+        href="/track"
         class="text-xs text-slate-400 hover:text-white flex items-center gap-1.5 transition-colors"
       >
-        <span>View Packing Slip in Admin Dashboard</span>
-        <ExternalLink size={13} class="text-orange-400" />
+        <span>Track Shipping Progress</span>
+        <ArrowRight size={13} class="text-orange-400" />
       </a>
     </div>
   </div>
 </div>
+

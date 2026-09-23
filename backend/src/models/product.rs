@@ -69,6 +69,38 @@ pub struct UpdateProductRequest {
     pub is_active: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ProductPart {
+    pub id: Uuid,
+    pub product_id: Uuid,
+    pub variant_id: Option<Uuid>,
+    pub part_name: String,
+    pub part_sku: Option<String>,
+    pub quantity: i32,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePartRequest {
+    pub variant_id: Option<Uuid>,
+    pub part_name: String,
+    pub part_sku: Option<String>,
+    pub quantity: i32,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateVariantRequest {
+    pub sku: Option<String>,
+    pub title: Option<String>,
+    pub price_override_cents: Option<i32>,
+    pub attributes: Option<JsonValue>,
+    pub stock_quantity: Option<i32>,
+    pub low_stock_threshold: Option<i32>,
+    pub image_url: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateVariantRequest {
     pub sku: String,
@@ -84,3 +116,12 @@ pub struct CreateVariantRequest {
 pub struct UpdateStockRequest {
     pub quantity: i32,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductWithVariantsAndParts {
+    #[serde(flatten)]
+    pub product: Product,
+    pub variants: Vec<ProductVariant>,
+    pub parts: Vec<ProductPart>,
+}
+
