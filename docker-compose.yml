@@ -1,0 +1,74 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: shop_db
+      POSTGRES_USER: shop_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-local_dev_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - shop_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop_user -d shop_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://shop_user:${DB_PASSWORD:-local_dev_password}@db:5432/shop_db
+      PORT: 8000
+      RUST_LOG: info
+      JWT_SECRET: ${JWT_SECRET:-super_secret_rustwebshop_jwt_token_2026}
+    ports:
+      - "8081:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - shop_net
+
+  storefront:
+    build:
+      context: ./storefront
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      BACKEND_INTERNAL_URL: http://backend:8000
+      ORIGIN: http://localhost:8080
+    ports:
+      - "8080:3000"
+    depends_on:
+      - backend
+    networks:
+      - shop_net
+
+  admin:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      BACKEND_INTERNAL_URL: http://backend:8000
+      ORIGIN: http://localhost:4000
+    ports:
+      - "4000:4000"
+    depends_on:
+      - backend
+    networks:
+      - shop_net
+
+networks:
+  shop_net:
+    driver: bridge
+
+volumes:
+  pgdata:

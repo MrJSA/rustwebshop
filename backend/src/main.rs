@@ -1,0 +1,75 @@
+mod db;
+mod middleware;
+mod models;
+mod routes;
+mod services;
+
+use std::net::SocketAddr;
+use std::time::Duration;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
+use tracing::{error, info};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,backend=debug,tower_http=debug".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    info!("Starting Rust E-Commerce Backend Service...");
+
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://shop_user:local_dev_password@127.0.0.1:5432/shop_db".to_string()
+    });
+
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "8000".to_string())
+        .parse()
+        .unwrap_or(8000);
+
+    // Database connection with exponential retry loop for Docker orchestration
+    let mut pool = None;
+    let mut retry_count = 0;
+    while pool.is_none() && retry_count < 15 {
+        match db::init_db(&database_url).await {
+            Ok(p) => {
+                pool = Some(p);
+                break;
+            }
+            Err(e) => {
+                retry_count += 1;
+                error!(
+                    "Failed to connect to PostgreSQL (attempt {}/15): {}. Retrying in 2s...",
+                    retry_count, e
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+
+    let pool = pool.expect("Unable to establish PostgreSQL database connection after retries");
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let app = routes::create_router(pool)
+        .layer(cors)
+        .layer(TraceLayer::new_for_http());
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    info!("Axum Server listening on http://{}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
