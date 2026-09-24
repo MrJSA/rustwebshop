@@ -25,6 +25,27 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let migration_sql_3 = include_str!("../migrations/0003_extended_features.sql");
     sqlx::raw_sql(migration_sql_3).execute(&pool).await?;
 
+    let migration_sql_4 = include_str!("../migrations/0004_media_email_auth_extended.sql");
+    sqlx::raw_sql(migration_sql_4).execute(&pool).await?;
+
+    // Seed default admin user if none exists
+    let admin_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_users")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(0);
+    if admin_count == 0 {
+        if let Ok(hash) = bcrypt::hash("RustCraftAdmin2026!", 10) {
+            let _ = sqlx::query(
+                "INSERT INTO admin_users (username, password_hash, is_default) VALUES ($1, $2, TRUE) ON CONFLICT (username) DO NOTHING"
+            )
+            .bind("admin")
+            .bind(hash)
+            .execute(&pool)
+            .await;
+            info!("Default admin user created: username='admin'");
+        }
+    }
+
     info!("Schema migrations successfully applied!");
 
     Ok(pool)

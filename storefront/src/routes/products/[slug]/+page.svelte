@@ -13,7 +13,8 @@
     Minus,
     Box,
     Layers,
-    Heart
+    Heart,
+    Bell
   } from 'lucide-svelte';
 
   export let data;
@@ -24,6 +25,9 @@
   let selectedVariantIndex = 0;
   let quantity = 1;
   let isInWishlist = false;
+  let stockNotificationEmail = '';
+  let subscribingStock = false;
+  let stockNotificationSuccess = false;
 
   $: currentVariant = variants[selectedVariantIndex] || {};
   $: currentPriceCents = currentVariant.price_override_cents || product.base_price_cents;
@@ -70,6 +74,27 @@
     isCartOpen.set(true);
   }
 
+  async function subscribeStockNotification() {
+    if (!stockNotificationEmail || !stockNotificationEmail.includes('@')) return;
+    subscribingStock = true;
+    try {
+      const res = await fetch(`/api/v1/products/${product.id}/notify-stock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: stockNotificationEmail,
+          variant_id: currentVariant.id || null
+        })
+      });
+      if (res.ok) {
+        stockNotificationSuccess = true;
+      }
+    } catch (e) {
+      console.error('Failed to subscribe to stock notification:', e);
+    } finally {
+      subscribingStock = false;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -293,6 +318,38 @@
           <Heart size={18} class={isInWishlist ? 'fill-rose-500 text-rose-500' : ''} />
         </button>
       </div>
+
+      {#if !inStock && !isDigital}
+        <div class="mt-4 p-4 rounded-2xl bg-orange-950/20 border border-orange-500/30 space-y-2">
+          <div class="flex items-center gap-2 text-xs font-bold text-orange-400">
+            <Bell size={14} />
+            <span>Notify me when back in stock</span>
+          </div>
+          <p class="text-[11px] text-slate-400">Enter your email and our system will notify you the moment this item is restocked.</p>
+          {#if stockNotificationSuccess}
+            <div class="p-2.5 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-xs font-semibold">
+              ✓ You're on the waitlist! We will notify you once restocked.
+            </div>
+          {:else}
+            <form on:submit|preventDefault={subscribeStockNotification} class="flex gap-2">
+              <input
+                type="email"
+                bind:value={stockNotificationEmail}
+                placeholder="your.email@example.com"
+                required
+                class="flex-1 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white text-xs placeholder-slate-500 focus:outline-none focus:border-orange-500"
+              />
+              <button
+                type="submit"
+                disabled={subscribingStock}
+                class="px-4 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold text-xs transition-colors shadow-sm disabled:opacity-50"
+              >
+                {subscribingStock ? 'Joining...' : 'Notify Me'}
+              </button>
+            </form>
+          {/if}
+        </div>
+      {/if}
     </div>
   </div>
 </div>

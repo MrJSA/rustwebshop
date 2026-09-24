@@ -1,9 +1,10 @@
 use crate::models::{
-    CartItemInput, Category, CheckoutRequest, Claims, CustomerAddress, CustomerChangePasswordRequest, CustomerLoginRequest,
-    CustomerRegisterRequest, EstimateShippingRequest, NavigationItem, PageContent, Product,
-    ProductPart, ProductVariant, ProductWithVariants, PublicPaymentProviderInfo, ResetPasswordRequest,
-    SaveAddressRequest, ShippingProvider, ShippingProviderWithZones, ShippingRate, ShippingZone,
-    ShippingZoneWithRates, StoreSettings, ToggleWishlistRequest, UpdateCustomerProfileRequest,
+    CartItemInput, Category, CheckoutRequest, Claims, CreateStockNotificationRequest, CustomerAddress,
+    CustomerChangePasswordRequest, CustomerLoginRequest, CustomerRegisterRequest, EstimateShippingRequest,
+    NavigationItem, PageContent, Product, ProductPart, ProductVariant, ProductWithVariants,
+    PublicPaymentProviderInfo, ResetPasswordRequest, SaveAddressRequest, ShippingProvider,
+    ShippingProviderWithZones, ShippingRate, ShippingZone, ShippingZoneWithRates, StoreSettings,
+    StoreSettingsDTO, ToggleWishlistRequest, UpdateCustomerProfileRequest,
 };
 use crate::services::checkout::CheckoutService;
 use axum::{
@@ -36,7 +37,9 @@ pub fn public_router() -> Router<PgPool> {
         .route("/pages/:slug", get(public_get_page))
         .route("/shipping/providers", get(public_get_shipping_providers))
         .route("/products", get(list_products))
+        .route("/products/carousels", get(public_get_carousels))
         .route("/products/:slug", get(get_product_by_slug))
+        .route("/products/:id/notify-stock", post(public_subscribe_stock_notification))
         .route("/products/:slug/parts", get(public_get_product_parts))
         .route("/cart/validate", post(validate_cart))
         .route("/shipping/rates", get(get_shipping_rates))
@@ -46,6 +49,7 @@ pub fn public_router() -> Router<PgPool> {
         .route("/auth/customer/register", post(public_customer_register))
         .route("/auth/customer/login", post(public_customer_login))
         .route("/auth/customer/reset-password", post(public_customer_reset_password))
+        .route("/customer/verify", get(public_verify_customer_email))
         .route("/customer/change-password", post(public_customer_change_password))
         .route("/customer/profile", get(public_get_customer_profile).put(public_update_customer_profile))
         .route("/customer/orders", get(public_get_customer_orders))
@@ -57,11 +61,38 @@ pub fn public_router() -> Router<PgPool> {
 
 async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, updated_at FROM store_settings WHERE id = 1"
+        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, updated_at FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let store_dto = StoreSettingsDTO {
+        store_name: settings.store_name,
+        currency: settings.currency,
+        currency_symbol: settings.currency_symbol,
+        tax_rate_percent: settings.tax_rate_percent,
+        deployment_mode: settings.deployment_mode,
+        debug_mode: settings.debug_mode,
+        support_email: settings.support_email,
+        company_address: settings.company_address,
+        vat_id: settings.vat_id,
+        logo_url: settings.logo_url,
+        phone: settings.phone,
+        hero_config: settings.hero_config,
+        smtp_host: settings.smtp_host,
+        smtp_port: settings.smtp_port,
+        smtp_username: settings.smtp_username,
+        smtp_from_email: settings.smtp_from_email,
+        smtp_from_name: settings.smtp_from_name,
+        smtp_enabled: settings.smtp_enabled,
+        require_registered_checkout: settings.require_registered_checkout,
+        require_email_verification: settings.require_email_verification,
+        store_subtitle: settings.store_subtitle,
+        show_store_title: settings.show_store_title,
+        show_store_subtitle: settings.show_store_subtitle,
+        carousels_config: settings.carousels_config,
+    };
 
     let payment_providers = sqlx::query_as::<_, PaymentProviderRow>(
         "SELECT provider, display_name, is_enabled, is_sandbox, public_client_id, config_data FROM payment_configs WHERE is_enabled = true"
@@ -81,7 +112,7 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
     .collect::<Vec<_>>();
 
     Ok(Json(json!({
-        "store": settings,
+        "store": store_dto,
         "payment_providers": payment_providers
     })))
 }
@@ -267,8 +298,55 @@ async fn execute_checkout(
     State(pool): State<PgPool>,
     Json(payload): Json<CheckoutRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // 1. Check require_registered_checkout and require_email_verification
+    if let Ok(settings_row) = sqlx::query("SELECT require_registered_checkout, require_email_verification FROM store_settings WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+    {
+        let req_reg: bool = settings_row.get("require_registered_checkout");
+        let req_verify: bool = settings_row.get("require_email_verification");
+
+        if req_reg {
+            let cust_opt = sqlx::query("SELECT is_verified FROM customers WHERE email = $1")
+                .bind(&payload.customer_email)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+            match cust_opt {
+                None => {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        "Purchases are restricted to registered customers. Please log in or create an account to complete checkout.".to_string(),
+                    ));
+                }
+                Some(cust) => {
+                    let is_verified: bool = cust.get("is_verified");
+                    if req_verify && !is_verified {
+                        return Err((
+                            StatusCode::FORBIDDEN,
+                            "Your account email has not been verified yet. Please check your inbox and verify your email before placing an order.".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     match CheckoutService::execute_checkout(&pool, payload).await {
-        Ok(res) => Ok(Json(res)),
+        Ok(res) => {
+            // Trigger order created confirmation email
+            let pool_clone = pool.clone();
+            let order_num = res.order_number.clone();
+            let is_paid = res.payment_status == "paid" || res.payment_status == "authorized";
+            tokio::spawn(async move {
+                crate::services::email::send_order_created_notification(&pool_clone, &order_num).await;
+                if is_paid {
+                    crate::services::email::send_payment_received_notification(&pool_clone, &order_num).await;
+                }
+            });
+            Ok(Json(res))
+        }
         Err(err) => Err((StatusCode::BAD_REQUEST, err.to_string())),
     }
 }
@@ -342,13 +420,31 @@ async fn lookup_order(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MenuQuery {
+    pub location: Option<String>,
+}
+
 // 7. Dynamic Navigation Menu Handler
-async fn public_get_menu(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let items = sqlx::query_as::<_, NavigationItem>(
-        "SELECT id, label, url, sort_order, is_active, created_at FROM navigation_items WHERE is_active = true ORDER BY sort_order ASC, created_at ASC"
-    )
-    .fetch_all(&pool)
-    .await
+async fn public_get_menu(
+    State(pool): State<PgPool>,
+    Query(query): Query<MenuQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let loc = query.location.unwrap_or_else(|| "header".to_string());
+    let items = if loc == "all" {
+        sqlx::query_as::<_, NavigationItem>(
+            "SELECT id, location, label, url, sort_order, is_active, created_at FROM navigation_items WHERE is_active = true ORDER BY sort_order ASC, created_at ASC"
+        )
+        .fetch_all(&pool)
+        .await
+    } else {
+        sqlx::query_as::<_, NavigationItem>(
+            "SELECT id, location, label, url, sort_order, is_active, created_at FROM navigation_items WHERE is_active = true AND location = $1 ORDER BY sort_order ASC, created_at ASC"
+        )
+        .bind(loc)
+        .fetch_all(&pool)
+        .await
+    }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(items))
@@ -485,6 +581,19 @@ async fn public_customer_register(
     });
     let display_name = if !full_name.is_empty() { full_name.clone() } else { payload.email.split('@').next().unwrap_or("Customer").to_string() };
 
+    // Check if email verification is required
+    let require_verification: bool = sqlx::query_scalar("SELECT require_email_verification FROM store_settings WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(false);
+
+    let is_verified = !require_verification;
+    let verification_token = if require_verification {
+        Some(Uuid::new_v4().to_string())
+    } else {
+        None
+    };
+
     // Insert into users
     sqlx::query(
         "INSERT INTO users (id, username, email, password_hash, role) VALUES ($1, $2, $3, $4, 'customer') ON CONFLICT (email) DO NOTHING"
@@ -500,10 +609,10 @@ async fn public_customer_register(
     // Insert into customers
     sqlx::query(
         r#"
-        INSERT INTO customers (id, email, password_hash, first_name, last_name, display_name, preferred_currency)
-        VALUES ($1, $2, $3, $4, $5, $6, 'EUR')
+        INSERT INTO customers (id, email, password_hash, first_name, last_name, display_name, preferred_currency, is_verified, verification_token)
+        VALUES ($1, $2, $3, $4, $5, $6, 'EUR', $7, $8)
         ON CONFLICT (email) DO UPDATE
-        SET password_hash = $3, first_name = $4, last_name = $5, display_name = $6, updated_at = NOW()
+        SET password_hash = $3, first_name = $4, last_name = $5, display_name = $6, is_verified = $7, verification_token = $8, updated_at = NOW()
         "#
     )
     .bind(user_id)
@@ -512,9 +621,23 @@ async fn public_customer_register(
     .bind(&first_name)
     .bind(&last_name)
     .bind(&display_name)
+    .bind(is_verified)
+    .bind(&verification_token)
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::BAD_REQUEST, format!("Email already registered: {}", e)))?;
+
+    // Send verification email if required
+    if let Some(tok) = verification_token.clone() {
+        let pool_clone = pool.clone();
+        let email_copy = payload.email.clone();
+        let name_copy = display_name.clone();
+        tokio::spawn(async move {
+            if let Ok(settings) = sqlx::query_as::<_, StoreSettings>("SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, updated_at FROM store_settings WHERE id = 1").fetch_one(&pool_clone).await {
+                crate::services::email::send_verification_email(&settings, &email_copy, &name_copy, &tok, "http://localhost:8080").await;
+            }
+        });
+    }
 
     let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "super_secret_rustwebshop_jwt_token_2026".to_string());
     let claims = Claims {
@@ -531,7 +654,9 @@ async fn public_customer_register(
         "full_name": display_name,
         "first_name": first_name,
         "last_name": last_name,
-        "preferred_currency": "EUR"
+        "preferred_currency": "EUR",
+        "is_verified": is_verified,
+        "verification_pending": require_verification
     }))))
 }
 
@@ -541,14 +666,14 @@ async fn public_customer_login(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Check customers table first
     let cust_row = sqlx::query(
-        "SELECT id, email, password_hash, first_name, last_name, display_name, preferred_currency FROM customers WHERE email = $1"
+        "SELECT id, email, password_hash, first_name, last_name, display_name, preferred_currency, is_verified FROM customers WHERE email = $1"
     )
     .bind(&payload.email)
     .fetch_optional(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let (email, hash, first_name, last_name, display_name, preferred_currency) = if let Some(r) = cust_row {
+    let (email, hash, first_name, last_name, display_name, preferred_currency, is_verified) = if let Some(r) = cust_row {
         (
             r.get::<String, _>("email"),
             r.get::<String, _>("password_hash"),
@@ -556,6 +681,7 @@ async fn public_customer_login(
             r.get::<String, _>("last_name"),
             r.get::<String, _>("display_name"),
             r.get::<String, _>("preferred_currency"),
+            r.get::<bool, _>("is_verified"),
         )
     } else {
         let user_row = sqlx::query("SELECT id, username, email, password_hash FROM users WHERE email = $1 OR username = $1")
@@ -572,12 +698,26 @@ async fn public_customer_login(
             "".to_string(),
             user_row.get::<String, _>("username"),
             "EUR".to_string(),
+            true,
         )
     };
 
     let is_valid = bcrypt::verify(&payload.password, &hash).unwrap_or(false);
     if !is_valid {
         return Err((StatusCode::UNAUTHORIZED, "Invalid email or password".to_string()));
+    }
+
+    // Check verification status if required
+    let require_verification: bool = sqlx::query_scalar("SELECT require_email_verification FROM store_settings WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(false);
+
+    if require_verification && !is_verified {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Please verify your email address before logging in. Check your inbox for the activation link.".to_string(),
+        ));
     }
 
     let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "super_secret_rustwebshop_jwt_token_2026".to_string());
@@ -944,5 +1084,176 @@ async fn public_list_categories(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(rows))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifyQuery {
+    pub token: String,
+}
+
+async fn public_verify_customer_email(
+    State(pool): State<PgPool>,
+    Query(query): Query<VerifyQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let result = sqlx::query(
+        "UPDATE customers SET is_verified = true, verification_token = NULL, updated_at = NOW() WHERE verification_token = $1"
+    )
+    .bind(&query.token)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::BAD_REQUEST, "Invalid or expired verification token".to_string()));
+    }
+
+    Ok(Json(json!({ "success": true, "message": "Email verified successfully! You can now log in and place orders." })))
+}
+
+async fn public_subscribe_stock_notification(
+    State(pool): State<PgPool>,
+    Path(product_id): Path<Uuid>,
+    Json(payload): Json<CreateStockNotificationRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if payload.email.trim().is_empty() || !payload.email.contains('@') {
+        return Err((StatusCode::BAD_REQUEST, "Valid email address is required".to_string()));
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO stock_notifications (id, product_id, variant_id, customer_email)
+        VALUES ($1, $2, $3, $4)
+        "#
+    )
+    .bind(Uuid::new_v4())
+    .bind(product_id)
+    .bind(payload.variant_id)
+    .bind(&payload.email.trim().to_lowercase())
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true, "message": "You will be notified when this item is back in stock!" })))
+}
+
+async fn public_get_carousels(
+    State(pool): State<PgPool>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let config_val: serde_json::Value = sqlx::query_scalar("SELECT carousels_config FROM store_settings WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|_| json!({
+            "sections": [
+                { "id": "featured", "title": "Featured Gear", "enabled": true, "product_ids": [] },
+                { "id": "new", "title": "New Arrivals", "enabled": true, "days": 30 },
+                { "id": "bestsellers", "title": "Best Sellers", "enabled": true, "limit": 10 },
+                { "id": "catalog", "title": "In Stock Hardware & Gear", "enabled": true }
+            ]
+        }));
+
+    let sections = config_val.get("sections").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+    let mut carousels = Vec::new();
+
+    for sec in sections {
+        let enabled = sec.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        let sec_id = sec.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let title = sec.get("title").and_then(|v| v.as_str()).unwrap_or("Products");
+
+        let mut products: Vec<Product> = Vec::new();
+
+        match sec_id {
+            "featured" => {
+                let ids: Vec<Uuid> = sec.get("product_ids")
+                    .and_then(|arr| arr.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).filter_map(|s| Uuid::parse_str(s).ok()).collect())
+                    .unwrap_or_default();
+                if !ids.is_empty() {
+                    products = sqlx::query_as::<_, Product>(
+                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at FROM products WHERE is_active = true AND id = ANY($1)"
+                    )
+                    .bind(&ids)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap_or_default();
+                } else {
+                    products = sqlx::query_as::<_, Product>(
+                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at FROM products WHERE is_active = true ORDER BY created_at DESC LIMIT 10"
+                    )
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap_or_default();
+                }
+            }
+            "new" => {
+                let days = sec.get("days").and_then(|v| v.as_i64()).unwrap_or(30);
+                products = sqlx::query_as::<_, Product>(
+                    "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at FROM products WHERE is_active = true AND created_at >= NOW() - ($1 || ' days')::INTERVAL ORDER BY created_at DESC LIMIT 15"
+                )
+                .bind(days.to_string())
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
+            }
+            "bestsellers" => {
+                let limit = sec.get("limit").and_then(|v| v.as_i64()).unwrap_or(10);
+                products = sqlx::query_as::<_, Product>(
+                    r#"
+                    SELECT p.id, p.title, p.slug, p.description, p.product_type, p.category, p.subcategory,
+                           p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at
+                    FROM products p
+                    LEFT JOIN order_items oi ON oi.product_id = p.id
+                    WHERE p.is_active = true
+                    GROUP BY p.id
+                    ORDER BY COALESCE(SUM(oi.quantity), 0) DESC, p.created_at DESC
+                    LIMIT $1
+                    "#
+                )
+                .bind(limit)
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
+            }
+            "catalog" => {
+                products = sqlx::query_as::<_, Product>(
+                    r#"
+                    SELECT DISTINCT p.id, p.title, p.slug, p.description, p.product_type, p.category, p.subcategory,
+                           p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at
+                    FROM products p
+                    JOIN product_variants pv ON pv.product_id = p.id
+                    WHERE p.is_active = true AND (p.product_type = 'digital' OR pv.stock_quantity > 0)
+                    ORDER BY p.created_at DESC
+                    LIMIT 20
+                    "#
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
+            }
+            _ => {}
+        }
+
+        let mut items_with_variants = Vec::new();
+        for product in products {
+            let variants = sqlx::query_as::<_, ProductVariant>(
+                "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
+            )
+            .bind(product.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+
+            items_with_variants.push(ProductWithVariants { product, variants });
+        }
+
+        carousels.push(json!({
+            "id": sec_id,
+            "title": title,
+            "items": items_with_variants
+        }));
+    }
+
+    Ok(Json(carousels))
 }
 

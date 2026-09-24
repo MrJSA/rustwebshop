@@ -13,6 +13,8 @@ pub struct Customer {
     pub display_name: String,
     pub preferred_currency: String,
     pub phone: String,
+    pub is_verified: bool,
+    pub verification_token: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -26,6 +28,7 @@ pub struct CustomerProfileDTO {
     pub display_name: String,
     pub preferred_currency: String,
     pub phone: String,
+    pub is_verified: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,4 +119,5 @@ pub struct CustomerAuthResponse {
     pub first_name: String,
     pub last_name: String,
     pub preferred_currency: String,
+    pub is_verified: bool,
 }

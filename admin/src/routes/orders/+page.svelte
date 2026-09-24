@@ -148,12 +148,33 @@
     }
   }
 
-  // Open PDF / Printable slip in dedicated printable window
-  function downloadSlip(type) {
-    const url = `/api/v1/admin/orders/${selectedOrder.id}/${type}`;
-    const win = window.open(url, '_blank');
-    if (win) {
-      win.focus();
+  // Open PDF / Printable slip with authentication token
+  async function downloadSlip(type) {
+    const token = localStorage.getItem('admin_token') || '';
+    const endpoint = `/api/v1/admin/orders/${selectedOrder.id}/${type}?token=${encodeURIComponent(token)}`;
+    try {
+      const res = await fetch(endpoint, {
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) }
+      });
+      if (!res.ok) {
+        // Fallback open with query token
+        window.open(endpoint, '_blank');
+        return;
+      }
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const win = window.open(objectUrl, '_blank');
+      if (!win) {
+        const a = document.createElement('a');
+        a.href = objectUrl;
+        a.download = `${type}-${selectedOrder.order_number}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+    } catch (e) {
+      window.open(endpoint, '_blank');
     }
   }
 

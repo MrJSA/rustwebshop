@@ -10,6 +10,7 @@ pub struct NavigationItem {
     pub url: String,
     pub sort_order: i32,
     pub is_active: bool,
+    pub location: String, // 'header' or 'footer'
     pub created_at: DateTime<Utc>,
 }
 
@@ -19,6 +20,7 @@ pub struct CreateNavigationItemRequest {
     pub url: String,
     pub sort_order: Option<i32>,
     pub is_active: Option<bool>,
+    pub location: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,4 +29,5 @@ pub struct UpdateNavigationItemRequest {
     pub url: Option<String>,
     pub sort_order: Option<i32>,
     pub is_active: Option<bool>,
+    pub location: Option<String>,
 }

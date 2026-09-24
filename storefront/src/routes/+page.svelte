@@ -1,11 +1,7 @@
 <script>
-  import { cart, isCartOpen } from "$lib/stores/cart.js";
+  import ProductCard from "$lib/components/ProductCard.svelte";
   import {
-    Search,
     ArrowRight,
-    Download,
-    Layers,
-    AlertTriangle,
     ChevronLeft,
     ChevronRight,
     Sparkles
@@ -13,7 +9,9 @@
 
   export let data;
   $: products = data.products || [];
+  $: carousels = data.carousels || [];
   $: currentCategory = data.currentCategory || "";
+  $: currentSearch = data.currentSearch || "";
   $: heroConfig = data.heroConfig || {
     layout: "split",
     carousel_items: [
@@ -38,7 +36,9 @@
       {
         id: "b1",
         title: "Mechanical Keyboards",
-        subtitle: "From 189.00 €",
+        subtitle: "Tactile Switches & Aluminum",
+        price: "189.00 €",
+        show_price: true,
         image_url: "https://images.unsplash.com/photo-1587829741301-dc798b83add3?auto=format&fit=crop&w=600&q=80",
         link_url: "/products/rust-mechanical-keyboard",
         bg_color: "#ea580c"
@@ -46,7 +46,9 @@
       {
         id: "b2",
         title: "Heavyweight Hoodies",
-        subtitle: "From 79.00 €",
+        subtitle: "480 GSM Organic Cotton",
+        price: "79.00 €",
+        show_price: true,
         image_url: "https://images.unsplash.com/photo-1556905055-8f358a7a47b2?auto=format&fit=crop&w=600&q=80",
         link_url: "/products/rustacean-heavyweight-hoodie",
         bg_color: "#0284c7"
@@ -54,7 +56,9 @@
       {
         id: "b3",
         title: "Architecture Guide",
-        subtitle: "From 29.00 €",
+        subtitle: "Zero-Cost Concurrency eBook",
+        price: "29.00 €",
+        show_price: true,
         image_url: "https://images.unsplash.com/photo-1532012164546-f432f2e37b73?auto=format&fit=crop&w=600&q=80",
         link_url: "/products/zero-cost-abstractions-guide",
         bg_color: "#16a34a"
@@ -62,7 +66,9 @@
       {
         id: "b4",
         title: "Aviator Coiled Cables",
-        subtitle: "From 34.00 €",
+        subtitle: "Double-Sleeved USB-C",
+        price: "34.00 €",
+        show_price: true,
         image_url: "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=600&q=80",
         link_url: "/products/rust-mechanical-keyboard",
         bg_color: "#7c3aed"
@@ -84,6 +90,14 @@
     if (carouselItems.length === 0) return;
     activeSlide = (activeSlide - 1 + carouselItems.length) % carouselItems.length;
   }
+
+  function scrollCarousel(sectionId, direction) {
+    const el = document.getElementById(`carousel-${sectionId}`);
+    if (el) {
+      const scrollAmount = 480;
+      el.scrollBy({ left: direction * scrollAmount, behavior: 'smooth' });
+    }
+  }
 </script>
 
 <svelte:head>
@@ -91,8 +105,8 @@
 </svelte:head>
 
 <!-- Dynamic Hero Showcase -->
-{#if heroConfig && carouselItems.length > 0}
-  <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-8">
+{#if !currentCategory && !currentSearch && heroConfig && carouselItems.length > 0}
+  <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-6">
     {#if heroConfig.layout === 'carousel'}
       <!-- Option A: Full-Width Widescreen Carousel (8BitDo style) -->
       <div class="relative rounded-3xl overflow-hidden shadow-2xl bg-slate-950 border border-slate-800/80 aspect-[21/9] min-h-[380px] max-h-[560px]">
@@ -167,7 +181,7 @@
       <!-- Option B: Split Hero (60% Carousel + 40% 4 Featured Product Buttons, 8BitMods style) -->
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
         <!-- Left: 60% Width Carousel Slider (7 cols on lg) -->
-        <div class="lg:col-span-7 relative rounded-3xl overflow-hidden shadow-2xl bg-slate-950 border border-slate-800/80 min-h-[380px] lg:min-h-[460px]">
+        <div class="lg:col-span-7 relative rounded-3xl overflow-hidden shadow-2xl bg-slate-950 border border-slate-800/80 min-h-[360px] lg:min-h-[440px]">
           {#each carouselItems as item, idx}
             <div
               class="absolute inset-0 transition-opacity duration-700 ease-in-out {idx === activeSlide ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}"
@@ -230,37 +244,52 @@
           {/if}
         </div>
 
-        <!-- Right: 40% Width 4 Featured Product Buttons (5 cols on lg) -->
+        <!-- Right: 40% Width 4 Featured Product Buttons (8BitMods Depth & Floating Product Style) -->
         <div class="lg:col-span-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
           {#if heroConfig.featured_buttons && heroConfig.featured_buttons.length > 0}
             {#each heroConfig.featured_buttons as btn}
               <a
                 href={btn.link_url || '/'}
-                class="group relative rounded-2xl overflow-hidden p-5 flex flex-col justify-between shadow-xl transition-all duration-300 hover:scale-[1.02] hover:shadow-2xl border border-white/10"
+                class="group relative rounded-2xl overflow-hidden p-4 sm:p-5 flex flex-col justify-between shadow-xl transition-all duration-300 hover:scale-[1.02] hover:shadow-2xl border border-white/15 min-h-[170px]"
                 style="background-color: {btn.bg_color || '#ea580c'};"
               >
-                <!-- Image Accent -->
+                <!-- Depth Gradient & Highlights -->
+                <div class="absolute inset-0 bg-gradient-to-br from-white/15 via-transparent to-black/30 pointer-events-none"></div>
+
+                <!-- Floating Product Image with Depth Layering -->
                 {#if btn.image_url}
-                  <div class="absolute right-[-10px] bottom-[-10px] w-28 h-28 opacity-30 group-hover:opacity-45 group-hover:scale-110 transition-all duration-500 overflow-hidden pointer-events-none rounded-xl">
-                    <img src={btn.image_url} alt="" class="w-full h-full object-cover" />
+                  <div class="absolute right-2 top-2 sm:right-3 sm:top-3 w-24 h-24 sm:w-28 sm:h-28 z-10 transition-all duration-300 group-hover:scale-110 group-hover:-translate-y-1">
+                    <img
+                      src={btn.image_url}
+                      alt={btn.title}
+                      class="w-full h-full object-contain drop-shadow-[0_12px_16px_rgba(0,0,0,0.5)]"
+                    />
                   </div>
                 {/if}
 
-                <div class="relative z-10">
-                  <span class="text-[10px] uppercase font-bold tracking-widest text-white/80 block">
-                    Featured
-                  </span>
-                  <h3 class="text-base font-extrabold text-white leading-tight mt-1 group-hover:underline">
+                <!-- Text Header (No "Featured" badge) -->
+                <div class="relative z-20 max-w-[65%]">
+                  <h3 class="text-sm sm:text-base font-black text-white leading-tight drop-shadow group-hover:underline">
                     {btn.title}
                   </h3>
+                  {#if btn.subtitle}
+                    <p class="text-[11px] text-white/80 font-medium mt-1 leading-snug drop-shadow line-clamp-2">
+                      {btn.subtitle}
+                    </p>
+                  {/if}
                 </div>
 
-                <div class="relative z-10 mt-6 flex items-center justify-between">
-                  <span class="text-xs font-mono font-bold text-white/90">
-                    {btn.subtitle}
-                  </span>
-                  <div class="w-7 h-7 rounded-lg bg-white/20 group-hover:bg-white text-white group-hover:text-slate-950 flex items-center justify-center transition-colors">
-                    <ArrowRight size={14} />
+                <!-- Bottom Row: Price & Action -->
+                <div class="relative z-20 mt-4 flex items-center justify-between">
+                  <div>
+                    {#if btn.show_price !== false && btn.price}
+                      <span class="inline-block text-[11px] sm:text-xs font-mono font-black text-white bg-black/30 backdrop-blur-sm px-2 py-0.5 rounded-md border border-white/10 shadow-sm">
+                        {btn.price}
+                      </span>
+                    {/if}
+                  </div>
+                  <div class="w-7 h-7 rounded-lg bg-white/20 group-hover:bg-white text-white group-hover:text-slate-950 flex items-center justify-center transition-colors shadow">
+                    <ArrowRight size={13} />
                   </div>
                 </div>
               </a>
@@ -272,126 +301,109 @@
   </section>
 {/if}
 
-<!-- Product Catalog Grid -->
-<section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
-  <div class="flex items-center justify-between mb-8">
-    <div>
-      <h2 class="text-2xl font-bold text-white tracking-tight">
-        {currentCategory ? currentCategory : "Product Catalog"}
-      </h2>
-      <p class="text-xs text-slate-400 mt-1">
-        Showing {products.length} products available for immediate dispatch
-      </p>
-    </div>
-  </div>
+<!-- Homepage Mode: Dynamic 5-per-row Carousels Sections -->
+{#if !currentCategory && !currentSearch && carousels && carousels.length > 0}
+  <div class="space-y-6 pb-12">
+    {#each carousels as section}
+      {#if section.items && section.items.length > 0}
+        <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h2 class="text-xl sm:text-2xl font-black text-white tracking-tight flex items-center gap-2">
+                <span class="w-2 h-5 rounded-full bg-orange-500"></span>
+                {section.title}
+              </h2>
+              <span class="text-[11px] text-slate-400 ml-4 font-mono">{section.items.length} items</span>
+            </div>
 
-  {#if products.length === 0}
-    <div class="text-center py-20 bg-slate-900/40 rounded-3xl border border-slate-800/80">
-      <div class="text-4xl mb-3">🔍</div>
-      <h3 class="text-lg font-bold text-white">No products match your filter</h3>
-      <p class="text-xs text-slate-400 mt-1">
-        Try resetting the category filter or searching for another term.
-      </p>
-      <a
-        href="/"
-        class="inline-block mt-4 px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold"
-      >
-        Reset Filters
-      </a>
-    </div>
-  {:else}
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-      {#each products as item}
-        <div
-          class="group relative rounded-2xl bg-slate-900/60 border border-slate-800/80 hover:border-orange-500/40 transition-all duration-300 flex flex-col overflow-hidden hover:shadow-2xl hover:shadow-orange-950/20"
-        >
-          <!-- Thumbnail Container -->
-          <a
-            href="/products/{item.slug}"
-            class="relative aspect-square overflow-hidden bg-slate-950 block"
-          >
-            {#if item.image_url}
-              <img
-                src={item.image_url}
-                alt={item.title}
-                class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out"
-                loading="lazy"
-              />
-            {:else}
-              <div class="w-full h-full flex items-center justify-center text-4xl text-slate-700">
-                📦
+            <!-- Scroll arrows if carousel has more than 5 items -->
+            {#if section.items.length > 5}
+              <div class="flex items-center gap-1.5">
+                <button
+                  on:click={() => scrollCarousel(section.id, -1)}
+                  class="p-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 transition-colors shadow-sm"
+                  aria-label="Scroll left"
+                >
+                  <ChevronLeft size={16} />
+                </button>
+                <button
+                  on:click={() => scrollCarousel(section.id, 1)}
+                  class="p-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 transition-colors shadow-sm"
+                  aria-label="Scroll right"
+                >
+                  <ChevronRight size={16} />
+                </button>
               </div>
             {/if}
-
-            <!-- Badges -->
-            <div class="absolute top-3 left-3 flex flex-col gap-1.5 z-10">
-              {#if item.product_type === "digital"}
-                <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold bg-sky-500/90 text-white backdrop-blur-md shadow-sm">
-                  <Download size={11} /> Digital Download
-                </span>
-              {:else}
-                <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold bg-slate-900/80 text-slate-300 border border-slate-700 backdrop-blur-md shadow-sm">
-                  Physical Unit
-                </span>
-              {/if}
-
-              {#if item.variants && item.variants.some((v) => v.stock_quantity > 0 && v.stock_quantity <= v.low_stock_threshold && item.product_type === "physical")}
-                <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold bg-amber-500 text-slate-950 shadow-sm animate-pulse">
-                  <AlertTriangle size={11} /> Low Stock
-                </span>
-              {/if}
-            </div>
-
-            <!-- Category Pill -->
-            <div class="absolute bottom-3 left-3 z-10">
-              <span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-950/80 text-orange-400 border border-slate-800">
-                {item.subcategory || item.category}
-              </span>
-            </div>
-          </a>
-
-          <!-- Details & Options -->
-          <div class="p-5 flex-1 flex flex-col justify-between">
-            <div>
-              <a href="/products/{item.slug}" class="block group-hover:text-orange-400 transition-colors">
-                <h3 class="text-base font-bold text-white leading-snug line-clamp-2">
-                  {item.title}
-                </h3>
-              </a>
-
-              <p class="text-xs text-slate-400 mt-2 line-clamp-2 leading-relaxed">
-                {item.description}
-              </p>
-
-              {#if item.variants && item.variants.length > 0}
-                <div class="mt-3 flex items-center gap-2 text-xs text-slate-400">
-                  <Layers size={13} class="text-slate-500" />
-                  <span>
-                    {item.variants.length} {item.variants.length === 1 ? "Option" : "Options & Colors"}
-                  </span>
-                </div>
-              {/if}
-            </div>
-
-            <div class="mt-5 pt-4 border-t border-slate-800/80 flex items-center justify-between">
-              <div>
-                <span class="text-[10px] text-slate-400 block uppercase font-mono tracking-wider">From</span>
-                <span class="text-lg font-black text-white font-mono">
-                  {(item.base_price_cents / 100).toFixed(2)} €
-                </span>
-              </div>
-
-              <a
-                href="/products/{item.slug}"
-                class="px-3.5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold transition-all shadow-md shadow-orange-600/20 flex items-center gap-1.5"
-              >
-                <span>Select</span>
-                <ArrowRight size={13} />
-              </a>
-            </div>
           </div>
-        </div>
-      {/each}
+
+          {#if section.items.length <= 5}
+            <!-- 5 products per row, centered layout -->
+            <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3.5 sm:gap-4 justify-center">
+              {#each section.items as itemWithV}
+                <ProductCard item={itemWithV.product || itemWithV} variants={itemWithV.variants} />
+              {/each}
+            </div>
+          {:else}
+            <!-- Smooth scrollable horizontal carousel -->
+            <div
+              id="carousel-{section.id}"
+              class="flex gap-3.5 sm:gap-4 overflow-x-auto scrollbar-none snap-x snap-mandatory scroll-smooth pb-3"
+            >
+              {#each section.items as itemWithV}
+                <div class="w-[210px] sm:w-[230px] flex-shrink-0 snap-start">
+                  <ProductCard item={itemWithV.product || itemWithV} variants={itemWithV.variants} />
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </section>
+      {/if}
+    {/each}
+  </div>
+{:else}
+  <!-- Filtered Search / Category Results Grid -->
+  <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <h2 class="text-xl sm:text-2xl font-black text-white tracking-tight flex items-center gap-2">
+          <span class="w-2 h-5 rounded-full bg-orange-500"></span>
+          {currentCategory ? currentCategory : (currentSearch ? `Search: "${currentSearch}"` : "All Products")}
+        </h2>
+        <p class="text-xs text-slate-400 mt-1">
+          Showing {products.length} products available for immediate dispatch
+        </p>
+      </div>
+      {#if currentCategory || currentSearch}
+        <a
+          href="/"
+          class="text-xs text-orange-400 hover:text-orange-300 font-semibold"
+        >
+          &larr; Back to Overview
+        </a>
+      {/if}
     </div>
-  {/if}
-</section>
+
+    {#if products.length === 0}
+      <div class="text-center py-20 bg-slate-900/40 rounded-3xl border border-slate-800/80">
+        <div class="text-4xl mb-3">🔍</div>
+        <h3 class="text-lg font-bold text-white">No products match your filter</h3>
+        <p class="text-xs text-slate-400 mt-1">
+          Try resetting the category filter or searching for another term.
+        </p>
+        <a
+          href="/"
+          class="inline-block mt-4 px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold"
+        >
+          Reset Filters
+        </a>
+      </div>
+    {:else}
+      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3.5 sm:gap-4">
+        {#each products as itemWithV}
+          <ProductCard item={itemWithV.product || itemWithV} variants={itemWithV.variants} />
+        {/each}
+      </div>
+    {/if}
+  </section>
+{/if}

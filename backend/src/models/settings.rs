@@ -17,6 +17,20 @@ pub struct StoreSettings {
     pub logo_url: String,
     pub phone: String,
     pub hero_config: serde_json::Value,
+    pub smtp_host: String,
+    pub smtp_port: i32,
+    pub smtp_username: String,
+    pub smtp_password: String,
+    pub smtp_encryption: String,
+    pub smtp_from_email: String,
+    pub smtp_from_name: String,
+    pub smtp_enabled: bool,
+    pub require_registered_checkout: bool,
+    pub require_email_verification: bool,
+    pub store_subtitle: String,
+    pub show_store_title: bool,
+    pub show_store_subtitle: bool,
+    pub carousels_config: serde_json::Value,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -34,6 +48,18 @@ pub struct StoreSettingsDTO {
     pub logo_url: String,
     pub phone: String,
     pub hero_config: serde_json::Value,
+    pub smtp_host: String,
+    pub smtp_port: i32,
+    pub smtp_username: String,
+    pub smtp_from_email: String,
+    pub smtp_from_name: String,
+    pub smtp_enabled: bool,
+    pub require_registered_checkout: bool,
+    pub require_email_verification: bool,
+    pub store_subtitle: String,
+    pub show_store_title: bool,
+    pub show_store_subtitle: bool,
+    pub carousels_config: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +76,25 @@ pub struct UpdateStoreSettingsRequest {
     pub logo_url: Option<String>,
     pub phone: Option<String>,
     pub hero_config: Option<serde_json::Value>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<i32>,
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
+    pub smtp_encryption: Option<String>,
+    pub smtp_from_email: Option<String>,
+    pub smtp_from_name: Option<String>,
+    pub smtp_enabled: Option<bool>,
+    pub require_registered_checkout: Option<bool>,
+    pub require_email_verification: Option<bool>,
+    pub store_subtitle: Option<String>,
+    pub show_store_title: Option<bool>,
+    pub show_store_subtitle: Option<bool>,
+    pub carousels_config: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TestEmailRequest {
+    pub recipient_email: String,
 }
 
 #[derive(Debug, Serialize)]

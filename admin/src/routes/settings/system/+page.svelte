@@ -1,4 +1,5 @@
 <script>
+  import MediaPickerModal from '$lib/components/MediaPickerModal.svelte';
   import {
     Sliders,
     Save,
@@ -15,7 +16,10 @@
     Phone,
     Mail,
     Building,
-    Eye
+    Eye,
+    FolderOpen,
+    ArrowUp,
+    ArrowDown
   } from 'lucide-svelte';
 
   export let data;
@@ -24,8 +28,13 @@
 
   let isSaving = false;
   let successNotice = '';
-  let isUploadingLogo = false;
-  let logoUploadSavings = '';
+  let showMediaPicker = false;
+  let mediaPickerTarget = null; // callback or field identifier
+
+  // Branding toggles
+  let showStoreTitle = settings.show_store_title !== undefined ? Boolean(settings.show_store_title) : true;
+  let showStoreSubtitle = settings.show_store_subtitle !== undefined ? Boolean(settings.show_store_subtitle) : true;
+  let storeSubtitle = settings.store_subtitle || 'Rust Powered • ACID Fast';
 
   // Ensure hero_config has valid structure
   let heroConfig = settings.hero_config && typeof settings.hero_config === 'object'
@@ -40,71 +49,28 @@
   if (!heroConfig.carousel_items) heroConfig.carousel_items = [];
   if (!heroConfig.featured_buttons) heroConfig.featured_buttons = [];
 
-  // Compression toggle
-  let compressImage = true;
+  // Ensure carousels_config
+  let carouselsConfig = settings.carousels_config && typeof settings.carousels_config === 'object' && settings.carousels_config.sections
+    ? settings.carousels_config
+    : {
+        sections: [
+          { id: 'featured', title: 'Featured Gear', enabled: true, product_ids: [] },
+          { id: 'new', title: 'New Arrivals', enabled: true, days: 30 },
+          { id: 'bestsellers', title: 'Best Sellers', enabled: true, limit: 10 },
+          { id: 'catalog', title: 'In Stock Hardware & Gear', enabled: true }
+        ]
+      };
 
-  async function handleLogoUpload(event) {
-    const file = event.target.files && event.target.files[0];
-    if (!file) return;
+  function openPicker(target) {
+    mediaPickerTarget = target;
+    showMediaPicker = true;
+  }
 
-    isUploadingLogo = true;
-    logoUploadSavings = '';
-
-    try {
-      let fileToUpload = file;
-      const originalSize = file.size;
-
-      if (compressImage && file.type.startsWith('image/')) {
-        const bitmap = await createImageBitmap(file);
-        const canvas = document.createElement('canvas');
-        const maxDim = 800;
-        let width = bitmap.width;
-        let height = bitmap.height;
-
-        if (width > maxDim || height > maxDim) {
-          if (width > height) {
-            height = Math.round((height * maxDim) / width);
-            width = maxDim;
-          } else {
-            width = Math.round((width * maxDim) / height);
-            height = maxDim;
-          }
-        }
-
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(bitmap, 0, 0, width, height);
-
-        const blob = await new Promise((resolve) => {
-          canvas.toBlob((b) => resolve(b), 'image/webp', 0.85);
-        });
-
-        if (blob) {
-          fileToUpload = new File([blob], 'shop_logo.webp', { type: 'image/webp' });
-          const savedPercent = Math.round((1 - blob.size / originalSize) * 100);
-          logoUploadSavings = `Compressed: ${(originalSize / 1024).toFixed(0)}KB → ${(blob.size / 1024).toFixed(0)}KB (-${savedPercent}%)`;
-        }
-      }
-
-      const formData = new FormData();
-      formData.append('file', fileToUpload);
-
-      const res = await fetch('/api/v1/admin/media/upload', {
-        method: 'POST',
-        headers: { 'X-Dev-Mode': 'true' },
-        body: formData
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        settings.logo_url = data.url;
-      }
-    } catch (e) {
-      console.error('Logo upload failed:', e);
-      alert('Failed to upload logo.');
-    } finally {
-      isUploadingLogo = false;
+  function handleMediaSelected(url) {
+    if (mediaPickerTarget === 'logo') {
+      settings.logo_url = url;
+    } else if (typeof mediaPickerTarget === 'function') {
+      mediaPickerTarget(url);
     }
   }
 
@@ -139,40 +105,46 @@
     const prod = products.find((p) => p.id === productId);
     if (!prod) return;
     heroConfig.featured_buttons[idx].title = prod.title;
-    heroConfig.featured_buttons[idx].subtitle = `From ${(prod.base_price_cents / 100).toFixed(2)} €`;
+    heroConfig.featured_buttons[idx].subtitle = prod.description ? prod.description.substring(0, 36) + '...' : 'Precision engineered';
+    heroConfig.featured_buttons[idx].price = `${(prod.base_price_cents / 100).toFixed(2)} €`;
+    heroConfig.featured_buttons[idx].show_price = true;
     heroConfig.featured_buttons[idx].image_url = prod.image_url;
     heroConfig.featured_buttons[idx].link_url = `/products/${prod.slug}`;
+  }
+
+  function moveCarouselSection(index, direction) {
+    const targetIdx = index + direction;
+    if (targetIdx < 0 || targetIdx >= carouselsConfig.sections.length) return;
+    const temp = carouselsConfig.sections[index];
+    carouselsConfig.sections[index] = carouselsConfig.sections[targetIdx];
+    carouselsConfig.sections[targetIdx] = temp;
+    carouselsConfig = { ...carouselsConfig };
   }
 
   async function handleSaveSettings() {
     isSaving = true;
     successNotice = '';
+    const token = localStorage.getItem('admin_token');
 
     try {
       const res = await fetch('/api/v1/admin/settings/system', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true'
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({
-          store_name: settings.store_name,
-          deployment_mode: settings.deployment_mode,
-          debug_mode: settings.debug_mode,
-          currency: settings.currency,
-          currency_symbol: settings.currency_symbol,
-          tax_rate_percent: Number(settings.tax_rate_percent),
-          support_email: settings.support_email,
-          phone: settings.phone,
-          company_address: settings.company_address,
-          vat_id: settings.vat_id,
-          logo_url: settings.logo_url,
-          hero_config: heroConfig
+          ...settings,
+          show_store_title: showStoreTitle,
+          show_store_subtitle: showStoreSubtitle,
+          store_subtitle: storeSubtitle,
+          hero_config: heroConfig,
+          carousels_config: carouselsConfig
         })
       });
 
       if (res.ok) {
-        successNotice = 'Shop identity, logo, hero showcase & system settings saved successfully!';
+        successNotice = 'Shop identity, logo, hero showcase & carousels saved successfully!';
         setTimeout(() => successNotice = '', 4000);
       }
     } catch (e) {
@@ -193,10 +165,10 @@
     <div>
       <h1 class="text-2xl font-black text-white tracking-tight flex items-center gap-2.5">
         <Sliders size={24} class="text-orange-500" />
-        Shop Identity, Hero Showcase & System
+        Shop Identity, Branding & Showcase Layouts
       </h1>
       <p class="text-xs text-slate-400 mt-1">
-        Configure shop branding, logo uploads, 8BitDo/8BitMods-style homepage showcase layouts, and company legal info.
+        Configure shop branding, logo uploads, 8BitDo/8BitMods-style hero layouts, and 5-per-row product carousels.
       </p>
     </div>
 
@@ -218,38 +190,37 @@
   {/if}
 
   <form on:submit|preventDefault={handleSaveSettings} class="space-y-6">
-    <!-- Card 1: Shop Logo & Branding -->
-    <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
+    <!-- Card 1: Shop Logo & Header Identity -->
+    <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-5">
       <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
         <Building size={18} class="text-orange-400" />
-        <span>Shop Logo & Header Identity</span>
+        <span>Shop Logo & Header Branding</span>
       </h2>
 
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-6 items-center">
-        <!-- Logo Upload Box -->
+        <!-- Logo Upload / Picker Box -->
         <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3 text-xs">
-          <div class="flex items-center justify-between">
-            <span class="font-semibold text-slate-300">Upload Shop Logo (Image onto Server)</span>
-            <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-orange-400 font-semibold">
-              <input type="checkbox" bind:checked={compressImage} class="rounded accent-orange-500" />
-              <span>Compress (WebP)</span>
-            </label>
-          </div>
+          <span class="font-semibold text-slate-300 block">Shop Logo Image</span>
 
-          <div class="flex items-center gap-3">
-            <input type="file" accept="image/*" on:change={handleLogoUpload} class="text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:bg-slate-800 file:text-white" />
-            {#if isUploadingLogo}
-              <span class="text-xs text-orange-400 animate-pulse font-mono">Uploading...</span>
-            {/if}
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              on:click={() => openPicker('logo')}
+              class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors border border-slate-700"
+            >
+              <FolderOpen size={14} class="text-orange-400" />
+              <span>Choose from Media Library</span>
+            </button>
           </div>
-
-          {#if logoUploadSavings}
-            <div class="text-[11px] text-emerald-400 font-mono">{logoUploadSavings}</div>
-          {/if}
 
           <div>
-            <label class="block text-slate-400 mb-1 text-[11px]">Logo URL</label>
-            <input type="text" bind:value={settings.logo_url} placeholder="/uploads/... or https://..." class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 font-mono text-xs focus:outline-none focus:border-orange-500" />
+            <label class="block text-slate-400 mb-1 text-[11px]">Logo URL / Path</label>
+            <input
+              type="text"
+              bind:value={settings.logo_url}
+              placeholder="/uploads/... or https://..."
+              class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 font-mono text-xs focus:outline-none focus:border-orange-500"
+            />
           </div>
         </div>
 
@@ -257,14 +228,43 @@
         <div class="p-6 rounded-xl bg-slate-950 border border-slate-800 flex flex-col items-center justify-center space-y-2">
           <span class="text-xs font-semibold text-slate-400">Header Preview</span>
           {#if settings.logo_url}
-            <img src={settings.logo_url} alt="Shop Logo Preview" class="h-12 max-w-[200px] object-contain rounded-lg p-1 bg-slate-900 border border-slate-800 shadow" />
+            <img src={settings.logo_url} alt="Shop Logo Preview" class="h-14 max-w-[220px] object-contain rounded-lg p-1 bg-slate-900 border border-slate-800 shadow" />
           {:else}
             <div class="h-12 px-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center gap-2 text-slate-400 text-xs font-bold">
               <span>🦀</span>
               <span>{settings.store_name || 'RustCraft'}</span>
             </div>
           {/if}
-          <span class="text-[10px] text-slate-500">Displayed in storefront top navigation and invoices</span>
+          <span class="text-[10px] text-slate-500">Rendered in header navigation and order PDF documents</span>
+        </div>
+      </div>
+
+      <!-- Header Title & Subtitle Toggles -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 border-t border-slate-800 text-xs">
+        <div class="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80 flex items-center justify-between">
+          <div>
+            <span class="font-bold text-white block">Display Store Name in Header</span>
+            <p class="text-[11px] text-slate-400">If disabled, logo is enlarged and menu centers.</p>
+          </div>
+          <input type="checkbox" bind:checked={showStoreTitle} class="accent-orange-500 w-4 h-4 ml-2" />
+        </div>
+
+        <div class="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80 flex items-center justify-between">
+          <div>
+            <span class="font-bold text-white block">Display Subtitle in Header</span>
+            <p class="text-[11px] text-slate-400">Toggle the header badge tagline.</p>
+          </div>
+          <input type="checkbox" bind:checked={showStoreSubtitle} class="accent-orange-500 w-4 h-4 ml-2" />
+        </div>
+
+        <div class="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80">
+          <label class="font-bold text-white block mb-1">Custom Header Subtitle</label>
+          <input
+            type="text"
+            bind:value={storeSubtitle}
+            placeholder="Rust Powered • ACID Fast"
+            class="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"
+          />
         </div>
       </div>
     </div>
@@ -277,7 +277,7 @@
           <span>Homepage Hero Showcase Layout</span>
         </h2>
         <p class="text-xs text-slate-400 mt-2">
-          Choose the hero layout displayed at the top of the user store front:
+          Choose between full-width widescreen item carousel or split hero with floating product buttons:
         </p>
       </div>
 
@@ -315,7 +315,7 @@
             <span class="font-bold text-white text-sm">Split Hero (60% Slider + 40% 4 Featured Buttons)</span>
           </div>
           <p class="text-xs text-slate-400 leading-relaxed">
-            60% width carousel on the left + 40% width grid of 4 product feature buttons on the right with custom colors (similar to <strong>8bitmods.com</strong>).
+            60% width carousel on the left + 40% width grid of 4 product feature buttons on the right with depth and floating images (similar to <strong>8bitmods.com</strong>).
           </p>
         </label>
       </div>
@@ -328,7 +328,7 @@
               <Sparkles size={16} class="text-orange-400" />
               <span>Carousel Slides</span>
             </h3>
-            <p class="text-xs text-slate-400">Configure slides shown in the carousel:</p>
+            <p class="text-xs text-slate-400">Configure slides shown in the hero carousel:</p>
           </div>
           <button
             type="button"
@@ -346,21 +346,19 @@
               <div class="flex items-center justify-between">
                 <span class="font-bold text-orange-400">Slide #{idx + 1}</span>
                 <div class="flex items-center gap-2">
-                  <!-- Auto-fill from Product -->
                   <select
                     on:change={(e) => applyProductToSlide(idx, e.target.value)}
-                    class="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300 text-[11px]"
+                    class="px-2.5 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300 text-[11px]"
                   >
-                    <option value="">-- Copy from Product --</option>
-                    {#each products as p}
-                      <option value={p.id}>{p.title}</option>
+                    <option value="">Auto-fill from Product...</option>
+                    {#each products as prod}
+                      <option value={prod.id}>{prod.title}</option>
                     {/each}
                   </select>
                   <button
                     type="button"
                     on:click={() => removeCarouselSlide(idx)}
-                    class="p-1 text-slate-500 hover:text-rose-400"
-                    title="Remove Slide"
+                    class="p-1 rounded text-slate-400 hover:text-rose-400"
                   >
                     <Trash2 size={14} />
                   </button>
@@ -373,24 +371,22 @@
                   <input type="text" bind:value={slide.title} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white" />
                 </div>
                 <div>
-                  <label class="block text-slate-400 mb-1">Button Text</label>
-                  <input type="text" bind:value={slide.button_text} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white" />
-                </div>
-              </div>
-
-              <div>
-                <label class="block text-slate-400 mb-1">Subtitle / Summary</label>
-                <input type="text" bind:value={slide.subtitle} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white" />
-              </div>
-
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label class="block text-slate-400 mb-1">Image URL</label>
-                  <input type="text" bind:value={slide.image_url} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-[11px]" />
-                </div>
-                <div>
                   <label class="block text-slate-400 mb-1">Target Link URL</label>
                   <input type="text" bind:value={slide.link_url} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-[11px]" />
+                </div>
+                <div class="sm:col-span-2">
+                  <label class="block text-slate-400 mb-1">Slide Subtitle</label>
+                  <input type="text" bind:value={slide.subtitle} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white" />
+                </div>
+                <div class="sm:col-span-2 flex items-center gap-2">
+                  <input type="text" bind:value={slide.image_url} placeholder="Image URL" class="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-[11px]" />
+                  <button
+                    type="button"
+                    on:click={() => openPicker((url) => slide.image_url = url)}
+                    class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"
+                  >
+                    Pick
+                  </button>
                 </div>
               </div>
             </div>
@@ -398,32 +394,31 @@
         </div>
       </div>
 
-      <!-- Option B: 4 Featured Buttons Configuration (Visible if Split mode) -->
+      <!-- Option B: 4 Featured Buttons Configuration -->
       {#if heroConfig.layout === 'split'}
         <div class="space-y-4 pt-4 border-t border-slate-800">
-          <div>
-            <h3 class="text-sm font-bold text-white flex items-center gap-2">
-              <Layers size={16} class="text-sky-400" />
-              <span>4 Featured Product Buttons (8BitMods style)</span>
-            </h3>
-            <p class="text-xs text-slate-400">
-              Customize the 4 interactive product feature buttons and their specific background colors:
-            </p>
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                <Layers size={16} class="text-orange-400" />
+                <span>8BitMods-Style 4 Featured Product Buttons</span>
+              </h3>
+              <p class="text-xs text-slate-400">Configure the 4 buttons on the right with floating depth images:</p>
+            </div>
           </div>
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {#each heroConfig.featured_buttons as btn, idx}
               <div class="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3 text-xs">
                 <div class="flex items-center justify-between">
-                  <span class="font-bold text-white">Button #{idx + 1}</span>
-                  <!-- Quick Product Selector -->
+                  <span class="font-bold text-orange-400">Button #{idx + 1}</span>
                   <select
                     on:change={(e) => applyProductToButton(idx, e.target.value)}
-                    class="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300 text-[11px]"
+                    class="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300 text-[10px]"
                   >
-                    <option value="">-- Auto-fill Product --</option>
-                    {#each products as p}
-                      <option value={p.id}>{p.title}</option>
+                    <option value="">Auto-fill...</option>
+                    {#each products as prod}
+                      <option value={prod.id}>{prod.title}</option>
                     {/each}
                   </select>
                 </div>
@@ -431,31 +426,39 @@
                 <div class="grid grid-cols-2 gap-2">
                   <div>
                     <label class="block text-slate-400 mb-1">Title</label>
-                    <input type="text" bind:value={btn.title} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white" />
+                    <input type="text" bind:value={btn.title} class="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white" />
                   </div>
                   <div>
-                    <label class="block text-slate-400 mb-1">Subtitle / Price</label>
-                    <input type="text" bind:value={btn.subtitle} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white" />
+                    <label class="block text-slate-400 mb-1">Subtitle</label>
+                    <input type="text" bind:value={btn.subtitle} class="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white" />
                   </div>
-                </div>
-
-                <div class="grid grid-cols-2 gap-2 items-center">
+                  <div>
+                    <label class="block text-slate-400 mb-1">Price Text</label>
+                    <input type="text" bind:value={btn.price} placeholder="189.00 €" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono" />
+                  </div>
                   <div>
                     <label class="block text-slate-400 mb-1">Button Color</label>
                     <div class="flex items-center gap-2">
-                      <input type="color" bind:value={btn.bg_color} class="w-8 h-8 rounded-lg cursor-pointer bg-transparent border border-slate-700" />
-                      <input type="text" bind:value={btn.bg_color} class="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-[11px]" />
+                      <input type="color" bind:value={btn.bg_color} class="w-8 h-8 rounded border-0 cursor-pointer bg-transparent" />
+                      <input type="text" bind:value={btn.bg_color} class="w-full px-2 py-1 rounded bg-slate-900 border border-slate-800 text-white font-mono text-[11px]" />
                     </div>
                   </div>
-                  <div>
-                    <label class="block text-slate-400 mb-1">Target Link</label>
-                    <input type="text" bind:value={btn.link_url} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-[11px]" />
+                  <div class="col-span-2">
+                    <label class="flex items-center gap-1.5 cursor-pointer text-slate-300 text-[11px]">
+                      <input type="checkbox" bind:checked={btn.show_price} class="accent-orange-500" />
+                      <span>Show Price Badge on Button</span>
+                    </label>
                   </div>
-                </div>
-
-                <div>
-                  <label class="block text-slate-400 mb-1">Picture URL</label>
-                  <input type="text" bind:value={btn.image_url} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-[11px]" />
+                  <div class="col-span-2 flex items-center gap-2">
+                    <input type="text" bind:value={btn.image_url} placeholder="Floating product image URL" class="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-[11px]" />
+                    <button
+                      type="button"
+                      on:click={() => openPicker((url) => btn.image_url = url)}
+                      class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"
+                    >
+                      Pick
+                    </button>
+                  </div>
                 </div>
               </div>
             {/each}
@@ -464,129 +467,74 @@
       {/if}
     </div>
 
-    <!-- Card 3: Store Profile & Legal Information -->
+    <!-- Card 3: 5-Item Responsive Product Carousels Ordering & Config -->
     <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
-      <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
-        <Building size={18} class="text-orange-400" />
-        <span>Legal Entity, Address, Email & Tax Settings</span>
-      </h2>
-
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-800">
         <div>
-          <label for="admin-store-name" class="block font-semibold text-slate-400 mb-1">Store / Legal Entity Name</label>
-          <input
-            id="admin-store-name"
-            type="text"
-            bind:value={settings.store_name}
-            required
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
-          />
-        </div>
-
-        <div>
-          <label for="admin-support-email" class="block font-semibold text-slate-400 mb-1">Official Support Email</label>
-          <input
-            id="admin-support-email"
-            type="email"
-            bind:value={settings.support_email}
-            required
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
-          />
-        </div>
-
-        <div>
-          <label for="admin-phone" class="block font-semibold text-slate-400 mb-1">Customer Service Telephone</label>
-          <input
-            id="admin-phone"
-            type="text"
-            bind:value={settings.phone}
-            placeholder="+49 (0) 30 123456-78"
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-          />
-        </div>
-
-        <div>
-          <label for="admin-vat-id" class="block font-semibold text-slate-400 mb-1">Company VAT Registration ID</label>
-          <input
-            id="admin-vat-id"
-            type="text"
-            bind:value={settings.vat_id}
-            required
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-          />
-        </div>
-
-        <div>
-          <label for="admin-tax-rate" class="block font-semibold text-slate-400 mb-1">Standard Sales Tax / VAT (%)</label>
-          <input
-            id="admin-tax-rate"
-            type="number"
-            step="0.01"
-            bind:value={settings.tax_rate_percent}
-            required
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-          />
-        </div>
-
-        <div>
-          <label for="admin-currency" class="block font-semibold text-slate-400 mb-1">Default Base Currency</label>
-          <select bind:value={settings.currency} class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-bold focus:outline-none focus:border-orange-500">
-            <option value="EUR">EUR (€)</option>
-            <option value="USD">USD ($)</option>
-            <option value="GBP">GBP (£)</option>
-            <option value="CHF">CHF (Fr.)</option>
-          </select>
-        </div>
-
-        <div class="sm:col-span-2">
-          <label for="admin-company-address" class="block font-semibold text-slate-400 mb-1">Official Company Address (Rendered on Packing Slips & Tax Invoices)</label>
-          <input
-            id="admin-company-address"
-            type="text"
-            bind:value={settings.company_address}
-            required
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
-          />
+          <h2 class="text-base font-bold text-white flex items-center gap-2">
+            <Layers size={18} class="text-orange-400" />
+            <span>Storefront Product Carousels Ordering & Rules</span>
+          </h2>
+          <p class="text-xs text-slate-400 mt-1">
+            Display 5 products per row (centered if &le; 5, smooth horizontal carousel if &gt; 5). Reorder or toggle sections:
+          </p>
         </div>
       </div>
-    </div>
 
-    <!-- Card 4: Operational Environment & Mode Toggles -->
-    <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-6">
-      <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
-        <Terminal size={18} class="text-orange-400" />
-        <span>Operational Environment & Mode Toggles</span>
-      </h2>
+      <div class="space-y-3">
+        {#each carouselsConfig.sections as sec, idx}
+          <div class="p-4 rounded-xl bg-slate-950 border border-slate-800/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs">
+            <div class="flex items-center gap-3">
+              <div class="flex flex-col gap-1">
+                <button
+                  type="button"
+                  disabled={idx === 0}
+                  on:click={() => moveCarouselSection(idx, -1)}
+                  class="p-1 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white disabled:opacity-20"
+                >
+                  <ArrowUp size={12} />
+                </button>
+                <button
+                  type="button"
+                  disabled={idx === carouselsConfig.sections.length - 1}
+                  on:click={() => moveCarouselSection(idx, 1)}
+                  class="p-1 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white disabled:opacity-20"
+                >
+                  <ArrowDown size={12} />
+                </button>
+              </div>
 
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
-        <div>
-          <label for="admin-deployment-mode" class="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">
-            Deployment Mode
-          </label>
-          <select
-            id="admin-deployment-mode"
-            bind:value={settings.deployment_mode}
-            class="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-orange-500"
-          >
-            <option value="development">development (Local Testing)</option>
-            <option value="staging">staging (Pre-Production Sandbox)</option>
-            <option value="demo">demo (Showcase Mode)</option>
-            <option value="production">production (Live Operational Store)</option>
-          </select>
-        </div>
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-white text-sm">{sec.title}</span>
+                  <span class="px-2 py-0.5 rounded bg-slate-900 font-mono text-[10px] text-orange-400">ID: {sec.id}</span>
+                </div>
+                {#if sec.id === 'new'}
+                  <div class="mt-1 flex items-center gap-2 text-slate-400">
+                    <span>Products added within last</span>
+                    <input type="number" bind:value={sec.days} class="w-16 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-white font-mono" />
+                    <span>days</span>
+                  </div>
+                {:else if sec.id === 'bestsellers'}
+                  <div class="mt-1 flex items-center gap-2 text-slate-400">
+                    <span>Limit to top</span>
+                    <input type="number" bind:value={sec.limit} class="w-16 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-white font-mono" />
+                    <span>best-selling products</span>
+                  </div>
+                {:else if sec.id === 'catalog'}
+                  <p class="text-[11px] text-slate-400 mt-1">Automatically shows all in-stock products.</p>
+                {/if}
+              </div>
+            </div>
 
-        <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col justify-between">
-          <div class="flex items-center justify-between">
-            <span class="text-xs font-bold text-white uppercase tracking-wider">Debug Engine Mode</span>
-            <label class="relative inline-flex items-center cursor-pointer">
-              <input type="checkbox" bind:checked={settings.debug_mode} class="sr-only peer" />
-              <div class="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-600"></div>
-            </label>
+            <div class="flex items-center gap-4">
+              <label class="flex items-center gap-2 cursor-pointer font-semibold text-slate-300">
+                <span>Enabled</span>
+                <input type="checkbox" bind:checked={sec.enabled} class="accent-orange-500 w-4 h-4" />
+              </label>
+            </div>
           </div>
-          <div class="mt-3 text-[11px] font-mono font-semibold {settings.debug_mode ? 'text-emerald-400' : 'text-slate-500'}">
-            Status: {settings.debug_mode ? 'ACTIVE (Testing Enabled)' : 'OFF (Strict Live Handling)'}
-          </div>
-        </div>
+        {/each}
       </div>
     </div>
 
@@ -603,3 +551,10 @@
     </div>
   </form>
 </div>
+
+<!-- Reusable Media Picker Modal -->
+<MediaPickerModal
+  open={showMediaPicker}
+  onSelect={handleMediaSelected}
+  onClose={() => showMediaPicker = false}
+/>

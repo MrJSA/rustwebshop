@@ -24,7 +24,8 @@
   export let data;
   $: store = data.store || {};
   $: currencySymbol = store.currency_symbol || '€';
-  $: menuItems = data.menuItems || [];
+  $: headerMenu = data.headerMenu || data.menuItems || [];
+  $: footerMenu = data.footerMenu || [];
 
   let isAccountMenuOpen = false;
   let headerSearch = '';
@@ -54,27 +55,36 @@
     </div>
   {/if}
 
-  <!-- Main Sticky Header -->
-  <header class="sticky top-0 z-40 glass-nav border-b border-slate-900 shadow-xl">
+  <!-- Main Sticky Header with Glassmorphism -->
+  <header class="sticky top-0 z-40 bg-slate-950/85 backdrop-blur-md border-b border-slate-900 shadow-xl transition-all">
     <!-- Top Row: Logo, Search Bar, Account & Cart -->
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex items-center justify-between gap-4">
-      <!-- Brand Logo -->
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between gap-4">
+      <!-- Brand Logo & Optional Title -->
       <a href="/" class="flex items-center gap-3 group flex-shrink-0">
         {#if store.logo_url}
-          <img src={store.logo_url} alt={store.store_name || 'Logo'} class="h-10 max-w-[150px] object-contain rounded-xl" />
+          <img
+            src={store.logo_url}
+            alt={store.store_name || 'Logo'}
+            class="{store.show_store_title === false ? 'h-14 max-w-[240px] -my-1' : 'h-10 max-w-[160px]'} object-contain rounded-xl transition-all duration-300"
+          />
         {:else}
-          <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center shadow-lg shadow-orange-600/30 group-hover:scale-105 transition-transform duration-200">
-            <span class="text-2xl select-none">🦀</span>
+          <div class="{store.show_store_title === false ? 'w-12 h-12' : 'w-10 h-10'} rounded-xl bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center shadow-lg shadow-orange-600/30 group-hover:scale-105 transition-transform duration-200">
+            <span class="{store.show_store_title === false ? 'text-3xl' : 'text-2xl'} select-none">🦀</span>
           </div>
         {/if}
-        <div>
-          <span class="text-lg font-extrabold tracking-tight bg-gradient-to-r from-white via-slate-100 to-slate-400 bg-clip-text text-transparent">
-            {store.store_name || 'RustCraft'}
-          </span>
-          <div class="text-[9px] text-orange-400/90 font-mono font-semibold tracking-widest uppercase">
-            Rust Powered &bull; ACID Fast
+
+        {#if store.show_store_title !== false}
+          <div>
+            <span class="text-lg font-extrabold tracking-tight bg-gradient-to-r from-white via-slate-100 to-slate-400 bg-clip-text text-transparent">
+              {store.store_name || 'RustCraft'}
+            </span>
+            {#if store.show_store_subtitle !== false}
+              <div class="text-[9px] text-orange-400/90 font-mono font-semibold tracking-widest uppercase">
+                {store.store_subtitle || 'Rust Powered • ACID Fast'}
+              </div>
+            {/if}
           </div>
-        </div>
+        {/if}
       </a>
 
       <!-- Searchbar in Header (Placed Above Menu) -->
@@ -237,8 +247,8 @@
 
     <!-- Lower Row: Dynamic Customizable Navigation Menu -->
     <nav class="border-t border-slate-900/80 bg-slate-950/60 backdrop-blur-md">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center gap-1 sm:gap-6 overflow-x-auto py-2 text-xs font-medium scrollbar-none">
-        {#each menuItems as item}
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center {store.show_store_title === false ? 'justify-center' : 'justify-start'} gap-1 sm:gap-6 overflow-x-auto py-2 text-xs font-medium scrollbar-none">
+        {#each headerMenu as item}
           <a
             href={item.url}
             class="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-900 transition-all flex items-center gap-1.5 whitespace-nowrap"
@@ -389,14 +399,20 @@
           </div>
         </div>
 
-        <!-- Col 2: Customer Service & Logistics -->
+        <!-- Col 2: Navigation & Policies -->
         <div class="space-y-2">
-          <h4 class="text-xs font-bold text-white uppercase tracking-wider mb-3">Shipping & Service</h4>
+          <h4 class="text-xs font-bold text-white uppercase tracking-wider mb-3">Shipping & Links</h4>
           <ul class="space-y-2 text-xs text-slate-400">
-            <li><a href="/policies/shipment-policy" class="hover:text-orange-400 transition-colors">Shipment Policy & Rates Table</a></li>
-            <li><a href="/policies/return-policy" class="hover:text-orange-400 transition-colors">Return & Cancellation Policy</a></li>
-            <li><a href="/track" class="hover:text-orange-400 transition-colors">Track Order Status</a></li>
-            <li><a href="/policies/contact" class="hover:text-orange-400 transition-colors">Contact Information</a></li>
+            {#if footerMenu.length > 0}
+              {#each footerMenu as fItem}
+                <li><a href={fItem.url} class="hover:text-orange-400 transition-colors">{fItem.label}</a></li>
+              {/each}
+            {:else}
+              <li><a href="/policies/shipment-policy" class="hover:text-orange-400 transition-colors">Shipment Policy & Rates Table</a></li>
+              <li><a href="/policies/return-policy" class="hover:text-orange-400 transition-colors">Return & Cancellation Policy</a></li>
+              <li><a href="/track" class="hover:text-orange-400 transition-colors">Track Order Status</a></li>
+              <li><a href="/policies/contact" class="hover:text-orange-400 transition-colors">Contact Information</a></li>
+            {/if}
           </ul>
         </div>
 

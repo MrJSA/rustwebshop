@@ -28,6 +28,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:-super_secret_rustwebshop_jwt_token_2026}
     ports:
       - "8081:8000"
+    volumes:
+      - uploads_data:/app/uploads
     depends_on:
       db:
         condition: service_healthy
@@ -43,6 +45,7 @@ services:
       PORT: 3000
       BACKEND_INTERNAL_URL: http://backend:8000
       ORIGIN: http://localhost:8080
+      BODY_SIZE_LIMIT: 50M
     ports:
       - "8080:3000"
     depends_on:
@@ -59,6 +62,7 @@ services:
       PORT: 4000
       BACKEND_INTERNAL_URL: http://backend:8000
       ORIGIN: http://localhost:4000
+      BODY_SIZE_LIMIT: 50M
     ports:
       - "4000:4000"
     depends_on:
@@ -72,3 +76,4 @@ networks:
 
 volumes:
   pgdata:
+  uploads_data:

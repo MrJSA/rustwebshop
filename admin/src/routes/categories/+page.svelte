@@ -1,5 +1,6 @@
 <script>
-  import { FolderTree, Plus, Edit2, Trash2, ChevronRight, ChevronDown, Folder, FolderPlus, Save, CheckCircle2 } from 'lucide-svelte';
+  import CategoryTreeNode from '$lib/components/CategoryTreeNode.svelte';
+  import { FolderTree, Plus, FolderPlus, CheckCircle2, X } from 'lucide-svelte';
 
   export let data;
   let categories = data.categories || [];
@@ -16,18 +17,24 @@
   let description = '';
   let displayOrder = 1;
 
-  // Build tree from flat categories array
   $: rootCategories = categories
     .filter((c) => !c.parent_id)
     .sort((a, b) => a.display_order - b.display_order);
 
-  function getChildren(pid) {
-    return categories
-      .filter((c) => c.parent_id === pid)
+  function buildHierarchicalOptions(pid = null, prefix = '') {
+    let result = [];
+    const directChildren = categories
+      .filter(c => c.parent_id === pid)
       .sort((a, b) => a.display_order - b.display_order);
+
+    for (const child of directChildren) {
+      if (modalMode === 'edit' && child.id === editId) continue;
+      result.push({ id: child.id, label: `${prefix}${prefix ? '↳ ' : ''}${child.name}` });
+      result = result.concat(buildHierarchicalOptions(child.id, prefix + '  '));
+    }
+    return result;
   }
 
-  // Open Create Root Category
   function openCreateRoot() {
     modalMode = 'create';
     editId = null;
@@ -39,7 +46,6 @@
     isModalOpen = true;
   }
 
-  // Open Create Subcategory
   function openCreateSub(parent) {
     modalMode = 'create';
     editId = null;
@@ -47,11 +53,11 @@
     name = '';
     slug = '';
     description = '';
-    displayOrder = (getChildren(parent.id).length + 1) * 10;
+    const siblings = categories.filter(c => c.parent_id === parent.id);
+    displayOrder = (siblings.length + 1) * 10;
     isModalOpen = true;
   }
 
-  // Open Edit Category
   function openEdit(category) {
     modalMode = 'edit';
     editId = category.id;
@@ -65,8 +71,9 @@
 
   async function reloadCategories() {
     try {
+      const token = localStorage.getItem('admin_token');
       const res = await fetch('/api/v1/admin/categories', {
-        headers: { 'X-Dev-Mode': 'true' }
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) }
       });
       if (res.ok) {
         categories = await res.json();
@@ -79,14 +86,18 @@
   async function handleSave() {
     isSaving = true;
     const finalSlug = slug.trim() || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const token = localStorage.getItem('admin_token');
 
     try {
       if (modalMode === 'create') {
         const res = await fetch('/api/v1/admin/categories', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Dev-Mode': 'true' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {})
+          },
           body: JSON.stringify({
-            parent_id: parentId,
+            parent_id: parentId || null,
             name,
             slug: finalSlug,
             description,
@@ -102,9 +113,12 @@
       } else {
         const res = await fetch(`/api/v1/admin/categories/${editId}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json', 'X-Dev-Mode': 'true' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {})
+          },
           body: JSON.stringify({
-            parent_id: parentId,
+            parent_id: parentId || null,
             name,
             slug: finalSlug,
             description,
@@ -126,11 +140,12 @@
   }
 
   async function handleDelete(category) {
-    if (!confirm(`Are you sure you want to delete category "${category.name}" and any child categories?`)) return;
+    if (!confirm(`Are you sure you want to delete category "${category.name}" and all its child categories?`)) return;
+    const token = localStorage.getItem('admin_token');
     try {
       const res = await fetch(`/api/v1/admin/categories/${category.id}`, {
         method: 'DELETE',
-        headers: { 'X-Dev-Mode': 'true' }
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) }
       });
       if (res.ok) {
         await reloadCategories();
@@ -151,10 +166,10 @@
     <div>
       <h1 class="text-2xl font-black text-white tracking-tight flex items-center gap-2.5">
         <FolderTree size={24} class="text-orange-500" />
-        Categories & Hierarchy Tree
+        Categories & Arbitrary Depth Hierarchy
       </h1>
       <p class="text-xs text-slate-400 mt-1">
-        Define nested categories for the storefront navigation, catalog filters, and product assignments.
+        Support unlimited nesting (Category &rarr; Subcategory &rarr; Sub-Subcategory &rarr; ...).
       </p>
     </div>
 
@@ -181,170 +196,106 @@
         No categories found. Click "Add Root Category" to begin building your tree.
       </div>
     {:else}
-      <div class="space-y-3">
+      <div class="space-y-2">
         {#each rootCategories as root}
-          {@const children = getChildren(root.id)}
-          <div class="border border-slate-800/80 rounded-2xl bg-slate-950/60 overflow-hidden">
-            <!-- Root Category Header -->
-            <div class="p-4 bg-slate-900/60 flex items-center justify-between gap-3">
-              <div class="flex items-center gap-3">
-                <div class="p-2 rounded-xl bg-orange-500/10 border border-orange-500/20 text-orange-400">
-                  <Folder size={18} />
-                </div>
-                <div>
-                  <div class="flex items-center gap-2">
-                    <span class="text-sm font-bold text-white">{root.name}</span>
-                    <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
-                      /{root.slug}
-                    </span>
-                    <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 text-slate-500">
-                      Order: {root.display_order}
-                    </span>
-                  </div>
-                  {#if root.description}
-                    <p class="text-xs text-slate-400 mt-0.5">{root.description}</p>
-                  {/if}
-                </div>
-              </div>
-
-              <!-- Actions -->
-              <div class="flex items-center gap-2">
-                <button
-                  on:click={() => openCreateSub(root)}
-                  class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors border border-slate-700"
-                  title="Add child category under {root.name}"
-                >
-                  <Plus size={13} class="text-orange-400" />
-                  <span>Subcategory</span>
-                </button>
-                <button
-                  on:click={() => openEdit(root)}
-                  class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
-                  title="Edit category"
-                >
-                  <Edit2 size={14} />
-                </button>
-                <button
-                  on:click={() => handleDelete(root)}
-                  class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 transition-colors"
-                  title="Delete category"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            </div>
-
-            <!-- Subcategories Child List -->
-            {#if children.length > 0}
-              <div class="p-3 pl-8 sm:pl-12 bg-slate-950/40 divide-y divide-slate-800/40 border-t border-slate-800/60">
-                {#each children as sub}
-                  <div class="py-2.5 flex items-center justify-between gap-3 group">
-                    <div class="flex items-center gap-2.5">
-                      <div class="w-1.5 h-1.5 rounded-full bg-orange-500"></div>
-                      <span class="text-xs font-semibold text-slate-200 group-hover:text-white transition-colors">
-                        {sub.name}
-                      </span>
-                      <span class="text-[10px] font-mono text-slate-500">/{sub.slug}</span>
-                      <span class="text-[10px] font-mono text-slate-600">Order: {sub.display_order}</span>
-                    </div>
-
-                    <div class="flex items-center gap-1.5">
-                      <button
-                        on:click={() => openEdit(sub)}
-                        class="p-1 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
-                        title="Edit subcategory"
-                      >
-                        <Edit2 size={13} />
-                      </button>
-                      <button
-                        on:click={() => handleDelete(sub)}
-                        class="p-1 rounded bg-slate-900 hover:bg-rose-950/40 text-slate-500 hover:text-rose-400 transition-colors"
-                        title="Delete subcategory"
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
+          <CategoryTreeNode
+            node={root}
+            allCategories={categories}
+            depth={0}
+            onAddChild={openCreateSub}
+            onEdit={openEdit}
+            onDelete={handleDelete}
+          />
         {/each}
       </div>
     {/if}
   </div>
 </div>
 
-<!-- Category Modal -->
+<!-- Create / Edit Modal -->
 {#if isModalOpen}
-  <div class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-    <div class="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-4">
-      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-        <h3 class="text-base font-bold text-white flex items-center gap-2">
-          <FolderTree size={18} class="text-orange-500" />
-          <span>{modalMode === 'create' ? (parentId ? 'New Subcategory' : 'New Root Category') : 'Edit Category'}</span>
+  <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
+    <div class="w-full max-w-lg rounded-3xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+        <h3 class="text-sm font-bold text-white">
+          {modalMode === 'create' ? (parentId ? 'Create Nested Subcategory' : 'Create Root Category') : 'Edit Category'}
         </h3>
-        <button on:click={() => isModalOpen = false} class="text-xs text-slate-400 hover:text-white">
-          ✕
+        <button
+          on:click={() => isModalOpen = false}
+          class="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+        >
+          <X size={16} />
         </button>
       </div>
 
-      <form on:submit|preventDefault={handleSave} class="space-y-4 text-xs">
+      <form on:submit|preventDefault={handleSave} class="space-y-3.5 text-xs">
         <div>
-          <label class="block font-semibold text-slate-300 mb-1">Parent Category</label>
-          <select bind:value={parentId} class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500">
+          <label class="block text-slate-300 font-semibold mb-1">Parent Category</label>
+          <select
+            bind:value={parentId}
+            class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500 font-mono text-xs"
+          >
             <option value={null}>None (Root Category)</option>
-            {#each rootCategories as r}
-              <option value={r.id}>{r.name}</option>
+            {#each buildHierarchicalOptions() as opt}
+              <option value={opt.id}>{opt.label}</option>
             {/each}
           </select>
         </div>
 
         <div>
-          <label class="block font-semibold text-slate-300 mb-1">Category Name</label>
+          <label class="block text-slate-300 font-semibold mb-1">Category Name</label>
           <input
             type="text"
             bind:value={name}
             required
-            placeholder="e.g. Mechanical Keyboards"
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+            placeholder="e.g. Mechanical Keyboards, Switches, Lubes"
+            class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-orange-500"
           />
         </div>
 
-        <div>
-          <label class="block font-semibold text-slate-300 mb-1">URL Slug (Optional)</label>
-          <input
-            type="text"
-            bind:value={slug}
-            placeholder="auto-generated from name if empty"
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-          />
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">URL Slug</label>
+            <input
+              type="text"
+              bind:value={slug}
+              placeholder="auto-generated from name"
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono placeholder-slate-500 focus:outline-none focus:border-orange-500"
+            />
+          </div>
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Display Order</label>
+            <input
+              type="number"
+              bind:value={displayOrder}
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+            />
+          </div>
         </div>
 
         <div>
-          <label class="block font-semibold text-slate-300 mb-1">Description</label>
+          <label class="block text-slate-300 font-semibold mb-1">Description (Optional)</label>
           <textarea
             bind:value={description}
             rows="2"
-            placeholder="Optional summary for catalog metadata"
-            class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+            placeholder="Brief overview of products included in this hierarchy level..."
+            class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-orange-500"
           ></textarea>
         </div>
 
-        <div>
-          <label class="block font-semibold text-slate-300 mb-1">Display Sort Order</label>
-          <input
-            type="number"
-            bind:value={displayOrder}
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-          />
-        </div>
-
-        <div class="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
-          <button type="button" on:click={() => isModalOpen = false} class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 hover:text-white">
+        <div class="pt-2 flex justify-end gap-2 border-t border-slate-800">
+          <button
+            type="button"
+            on:click={() => isModalOpen = false}
+            class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold"
+          >
             Cancel
           </button>
-          <button type="submit" disabled={isSaving} class="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold transition-all shadow-md">
+          <button
+            type="submit"
+            disabled={isSaving}
+            class="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold transition-all shadow-md shadow-orange-600/30 disabled:opacity-50"
+          >
             {isSaving ? 'Saving...' : 'Save Category'}
           </button>
         </div>

@@ -19,6 +19,16 @@ export async function load({ fetch, url }) {
     console.error('Failed to fetch products from backend:', e);
   }
 
+  let carousels = [];
+  try {
+    const cRes = await fetch(`${backendUrl}/api/v1/products/carousels`);
+    if (cRes.ok) {
+      carousels = await cRes.json();
+    }
+  } catch (e) {
+    console.error('Failed to fetch carousels from backend:', e);
+  }
+
   let heroConfig = null;
   try {
     const sRes = await fetch(`${backendUrl}/api/v1/store/info`);
@@ -32,6 +42,7 @@ export async function load({ fetch, url }) {
 
   return {
     products,
+    carousels,
     currentCategory: category,
     currentSearch: search,
     heroConfig
