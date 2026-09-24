@@ -37,10 +37,18 @@
         <div class="w-5"></div>
       {/if}
 
-      <!-- Icon & Depth indicator -->
-      <div class="p-1.5 rounded-lg {depth === 0 ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20' : depth === 1 ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20' : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'}">
-        <Folder size={15} />
-      </div>
+      <!-- Icon / Thumbnail & Depth indicator -->
+      {#if node.image_url}
+        <img
+          src={node.image_url}
+          alt={node.name}
+          class="w-7 h-7 sm:w-8 sm:h-8 rounded-lg object-cover border border-slate-700/80 flex-shrink-0"
+        />
+      {:else}
+        <div class="p-1.5 rounded-lg {depth === 0 ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20' : depth === 1 ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20' : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'}">
+          <Folder size={15} />
+        </div>
+      {/if}
 
       <div class="min-w-0">
         <div class="flex items-center gap-2 flex-wrap">

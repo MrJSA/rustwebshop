@@ -28,6 +28,9 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let migration_sql_4 = include_str!("../migrations/0004_media_email_auth_extended.sql");
     sqlx::raw_sql(migration_sql_4).execute(&pool).await?;
 
+    let migration_sql_5 = include_str!("../migrations/0005_cookie_gallery_seo_analytics.sql");
+    sqlx::raw_sql(migration_sql_5).execute(&pool).await?;
+
     // Seed default admin user if none exists
     let admin_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_users")
         .fetch_one(&pool)

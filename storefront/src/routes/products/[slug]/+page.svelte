@@ -1,28 +1,30 @@
 <script>
   import { cart, isCartOpen } from '$lib/stores/cart.js';
   import { customer } from '$lib/stores/customer.js';
+  import ProductCard from '$lib/components/ProductCard.svelte';
   import {
-    ShieldCheck,
-    Truck,
-    Zap,
     Download,
-    Check,
-    AlertCircle,
     ArrowLeft,
     Plus,
     Minus,
     Box,
-    Layers,
     Heart,
-    Bell
+    Bell,
+    Maximize2,
+    X,
+    ChevronLeft,
+    ChevronRight,
+    Sparkles
   } from 'lucide-svelte';
 
   export let data;
   $: product = data.product || {};
   $: variants = data.variants || [];
-  $: allParts = data.parts || [];
+  $: relatedProducts = data.relatedProducts || [];
 
   let selectedVariantIndex = 0;
+  let activeImageIndex = 0;
+  let isLightboxOpen = false;
   let quantity = 1;
   let isInWishlist = false;
   let stockNotificationEmail = '';
@@ -35,8 +37,98 @@
   $: inStock = isDigital || (currentVariant.stock_quantity && currentVariant.stock_quantity > 0);
   $: isLowStock = !isDigital && currentVariant.stock_quantity > 0 && currentVariant.stock_quantity <= currentVariant.low_stock_threshold;
 
-  // Dynamically filter included parts for the selected variant/version!
-  $: activeParts = allParts.filter((p) => !p.variant_id || p.variant_id === currentVariant.id);
+  // Resolve gallery images: check variant images, then product images, then single image_url
+  $: currentImages = (() => {
+    if (currentVariant.images && Array.isArray(currentVariant.images) && currentVariant.images.length > 0) {
+      return currentVariant.images;
+    }
+    if (product.images && Array.isArray(product.images) && product.images.length > 0) {
+      return product.images;
+    }
+    const single = currentVariant.image_url || product.image_url;
+    return single ? [single] : [];
+  })();
+
+  $: activeImageUrl = currentImages[activeImageIndex] || currentImages[0] || currentVariant.image_url || product.image_url || '';
+
+  // When variant changes, ensure activeImageIndex is valid
+  $: if (activeImageIndex >= currentImages.length) {
+    activeImageIndex = 0;
+  }
+
+  function nextImage() {
+    if (currentImages.length > 0) {
+      activeImageIndex = (activeImageIndex + 1) % currentImages.length;
+    }
+  }
+
+  function prevImage() {
+    if (currentImages.length > 0) {
+      activeImageIndex = (activeImageIndex - 1 + currentImages.length) % currentImages.length;
+    }
+  }
+
+  function handleKeydown(e) {
+    if (!isLightboxOpen) return;
+    if (e.key === 'Escape') isLightboxOpen = false;
+    if (e.key === 'ArrowRight') nextImage();
+    if (e.key === 'ArrowLeft') prevImage();
+  }
+
+  // Simple Markdown parser for long description (supports headers, bold, italics, lists, blank lines)
+  function renderMarkdown(md) {
+    if (!md) return '';
+    const lines = md.split('\n');
+    let html = '';
+    let inList = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i].trim();
+
+      if (line.startsWith('- ') || line.startsWith('* ')) {
+        if (!inList) {
+          html += '<ul class="list-disc list-inside space-y-1 my-3 text-slate-300">';
+          inList = true;
+        }
+        let itemText = line.substring(2);
+        itemText = formatInline(itemText);
+        html += `<li>${itemText}</li>`;
+        continue;
+      } else if (inList) {
+        html += '</ul>';
+        inList = false;
+      }
+
+      if (!line) {
+        // Blank line creates paragraph spacing
+        html += '<div class="h-4"></div>';
+        continue;
+      }
+
+      if (line.startsWith('### ')) {
+        html += `<h3 class="text-base font-bold text-white mt-5 mb-2">${formatInline(line.substring(4))}</h3>`;
+      } else if (line.startsWith('## ')) {
+        html += `<h2 class="text-lg font-extrabold text-white mt-6 mb-2.5">${formatInline(line.substring(3))}</h2>`;
+      } else if (line.startsWith('# ')) {
+        html += `<h1 class="text-xl font-black text-white mt-8 mb-3">${formatInline(line.substring(2))}</h1>`;
+      } else {
+        html += `<p class="my-2 text-slate-300 leading-relaxed">${formatInline(line)}</p>`;
+      }
+    }
+
+    if (inList) {
+      html += '</ul>';
+    }
+
+    return html;
+  }
+
+  function formatInline(text) {
+    return text
+      .replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold text-white">$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em class="italic text-slate-200">$1</em>')
+      .replace(/`([^`]+)`/g, '<code class="px-1.5 py-0.5 rounded bg-slate-800 text-orange-400 font-mono text-xs">$1</code>');
+  }
 
   async function toggleWishlist() {
     try {
@@ -68,7 +160,7 @@
       price_cents: currentPriceCents,
       quantity,
       is_digital: isDigital,
-      image_url: currentVariant.image_url || product.image_url,
+      image_url: activeImageUrl,
       slug: product.slug
     });
     isCartOpen.set(true);
@@ -95,10 +187,60 @@
       subscribingStock = false;
     }
   }
+
+  // Related products carousel scroll container
+  let relatedCarouselEl;
+  function scrollRelated(direction) {
+    if (relatedCarouselEl) {
+      const scrollAmount = relatedCarouselEl.clientWidth * 0.8;
+      relatedCarouselEl.scrollBy({ left: direction * scrollAmount, behavior: 'smooth' });
+    }
+  }
 </script>
 
+<svelte:window on:keydown={handleKeydown} />
+
+<!-- Full SEO Tags: Title, Description, OpenGraph, Twitter, Canonical, Product JSON-LD -->
 <svelte:head>
   <title>{product.title} | RustCraft Gear</title>
+  <meta name="description" content={product.short_description || product.description || `Buy ${product.title} at RustCraft.`} />
+  <link rel="canonical" href={`https://rustcraft.io/products/${product.slug}`} />
+
+  <!-- OpenGraph -->
+  <meta property="og:type" content="product" />
+  <meta property="og:title" content={`${product.title} | RustCraft Gear`} />
+  <meta property="og:description" content={product.short_description || product.description || ''} />
+  {#if activeImageUrl}
+    <meta property="og:image" content={activeImageUrl} />
+  {/if}
+  <meta property="og:url" content={`https://rustcraft.io/products/${product.slug}`} />
+
+  <!-- Twitter Cards -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={`${product.title} | RustCraft Gear`} />
+  <meta name="twitter:description" content={product.short_description || product.description || ''} />
+  {#if activeImageUrl}
+    <meta name="twitter:image" content={activeImageUrl} />
+  {/if}
+
+  <!-- Schema.org Product JSON-LD Structured Data -->
+  {@html `<script type="application/ld+json">
+  ${JSON.stringify({
+    "@context": "https://schema.org/",
+    "@type": "Product",
+    "name": product.title,
+    "image": currentImages,
+    "description": product.short_description || product.description,
+    "sku": currentVariant.sku || product.slug,
+    "offers": {
+      "@type": "Offer",
+      "url": `https://rustcraft.io/products/${product.slug}`,
+      "priceCurrency": "EUR",
+      "price": (currentPriceCents / 100).toFixed(2),
+      "availability": inStock ? "https://schema.org/InStock" : "https://schema.org/OutOfStock"
+    }
+  })}
+  </script>`}
 </svelte:head>
 
 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
@@ -109,20 +251,38 @@
     </a>
     <span>/</span>
     <span class="text-slate-400">{product.category}</span>
+    {#if product.subcategory}
+      <span>/</span>
+      <span class="text-slate-400">{product.subcategory}</span>
+    {/if}
     <span>/</span>
     <span class="text-white font-medium truncate">{product.title}</span>
   </nav>
 
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-12 lg:gap-16">
-    <!-- Media Column -->
+  <!-- Top Section: Media Gallery (Left) & Details / Purchase (Right) -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-14">
+    <!-- Media Column with Multi-Image Gallery & Lightbox Trigger -->
     <div class="space-y-4">
-      <div class="aspect-square rounded-3xl overflow-hidden bg-slate-900 border border-slate-800 shadow-2xl relative">
-        {#if currentVariant.image_url || product.image_url}
-          <img
-            src={currentVariant.image_url || product.image_url}
-            alt={product.title}
-            class="w-full h-full object-cover"
-          />
+      <!-- Main Featured Image Container with Lightbox Click -->
+      <div class="relative aspect-square rounded-3xl overflow-hidden bg-slate-900 border border-slate-800 shadow-2xl group">
+        {#if activeImageUrl}
+          <button
+            type="button"
+            on:click={() => isLightboxOpen = true}
+            class="w-full h-full block focus:outline-none cursor-zoom-in"
+            aria-label="Enlarge image in fullscreen lightbox"
+          >
+            <img
+              src={activeImageUrl}
+              alt={product.title}
+              class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+            />
+            <!-- Maximize Button Overlay -->
+            <div class="absolute bottom-4 right-4 p-2.5 rounded-xl bg-slate-950/70 backdrop-blur-md text-white border border-slate-700/60 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg flex items-center gap-1.5 text-xs font-semibold">
+              <Maximize2 size={15} class="text-orange-400" />
+              <span>Fullscreen</span>
+            </div>
+          </button>
         {:else}
           <div class="w-full h-full flex items-center justify-center text-7xl text-slate-700">
             📦
@@ -130,30 +290,26 @@
         {/if}
 
         {#if isDigital}
-          <div class="absolute top-4 left-4 px-3 py-1 rounded-lg bg-sky-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md">
+          <div class="absolute top-4 left-4 px-3 py-1 rounded-lg bg-sky-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md pointer-events-none">
             <Download size={13} /> Digital Masterclass & Asset
           </div>
         {/if}
       </div>
 
-      <!-- Trust Badges -->
-      <div class="grid grid-cols-3 gap-3 pt-4">
-        <div class="p-3 rounded-xl bg-slate-900/50 border border-slate-800/80 text-center">
-          <ShieldCheck size={20} class="mx-auto text-emerald-400 mb-1" />
-          <div class="text-[11px] font-bold text-white">ACID Protected</div>
-          <div class="text-[10px] text-slate-400">Zero overselling</div>
+      <!-- Thumbnail Carousel / Switcher (if multiple images exist) -->
+      {#if currentImages.length > 1}
+        <div class="flex items-center gap-3 overflow-x-auto pb-2 scrollbar-none">
+          {#each currentImages as imgUrl, idx}
+            <button
+              type="button"
+              on:click={() => activeImageIndex = idx}
+              class="relative w-20 h-20 rounded-2xl overflow-hidden border-2 transition-all flex-shrink-0 bg-slate-900 {activeImageIndex === idx ? 'border-orange-500 ring-2 ring-orange-500/40 scale-105' : 'border-slate-800 hover:border-slate-700 opacity-70 hover:opacity-100'}"
+            >
+              <img src={imgUrl} alt={`Thumbnail ${idx + 1}`} class="w-full h-full object-cover" />
+            </button>
+          {/each}
         </div>
-        <div class="p-3 rounded-xl bg-slate-900/50 border border-slate-800/80 text-center">
-          <Truck size={20} class="mx-auto text-orange-400 mb-1" />
-          <div class="text-[11px] font-bold text-white">Zone Dispatch</div>
-          <div class="text-[10px] text-slate-400">DHL & Express</div>
-        </div>
-        <div class="p-3 rounded-xl bg-slate-900/50 border border-slate-800/80 text-center">
-          <Zap size={20} class="mx-auto text-amber-400 mb-1" />
-          <div class="text-[11px] font-bold text-white">Rust Speed</div>
-          <div class="text-[10px] text-slate-400">Sub-ms responses</div>
-        </div>
-      </div>
+      {/if}
     </div>
 
     <!-- Product Details Column -->
@@ -161,7 +317,7 @@
       <div>
         <div class="flex items-center gap-2 mb-2">
           <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-orange-500/10 text-orange-400 border border-orange-500/20">
-            {product.category} &bull; {product.subcategory}
+            {product.category} {#if product.subcategory}&bull; {product.subcategory}{/if}
           </span>
           {#if isLowStock}
             <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">
@@ -174,6 +330,13 @@
           {product.title}
         </h1>
 
+        <!-- Product Subtitle Underneath Title -->
+        {#if product.subtitle}
+          <p class="text-sm font-medium text-slate-400 mt-1.5 leading-snug">
+            {product.subtitle}
+          </p>
+        {/if}
+
         <div class="mt-4 flex items-baseline gap-3">
           <span class="text-3xl font-black text-white font-mono">
             {(currentPriceCents / 100).toFixed(2)} €
@@ -181,15 +344,20 @@
           <span class="text-xs text-slate-400 font-mono">Incl. VAT / Taxes</span>
         </div>
 
-        <div class="mt-6 prose prose-invert text-sm text-slate-300 leading-relaxed border-t border-b border-slate-800/80 py-5">
-          {product.description}
-        </div>
+        <!-- Short Description Next to Image -->
+        {#if product.short_description || product.description}
+          <div class="mt-6 prose prose-invert text-sm text-slate-300 leading-relaxed border-t border-b border-slate-800/80 py-4">
+            {product.short_description || product.description}
+          </div>
+        {/if}
 
-        <!-- Variants Selection -->
+        <!-- Variants Selection with Customizable Selector Label -->
         {#if variants.length > 0}
           <div class="mt-6 space-y-3">
             <div class="flex justify-between items-center text-xs">
-              <span class="font-bold text-slate-300 uppercase tracking-wider">Choose Variant / Model:</span>
+              <span class="font-bold text-slate-300 uppercase tracking-wider">
+                {product.variant_selector_label || 'Choose Variant / Model:'}
+              </span>
               <span class="font-mono text-orange-400 font-semibold">SKU: {currentVariant.sku}</span>
             </div>
 
@@ -197,7 +365,10 @@
               {#each variants as variant, i}
                 <button
                   type="button"
-                  on:click={() => selectedVariantIndex = i}
+                  on:click={() => {
+                    selectedVariantIndex = i;
+                    activeImageIndex = 0;
+                  }}
                   class="p-3.5 rounded-xl border text-left transition-all duration-200 flex items-center justify-between {selectedVariantIndex === i ? 'bg-orange-600/15 border-orange-500 ring-1 ring-orange-500 text-white' : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 text-slate-300'}"
                 >
                   <div class="min-w-0 pr-2">
@@ -215,36 +386,6 @@
                     {/if}
                   </div>
                 </button>
-              {/each}
-            </div>
-          </div>
-        {/if}
-
-        <!-- Included Components & Bill of Materials (BOM) -->
-        {#if activeParts.length > 0}
-          <div class="mt-6 p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 space-y-3">
-            <div class="flex items-center justify-between text-xs">
-              <div class="flex items-center gap-2 font-bold text-white uppercase tracking-wider">
-                <Layers size={15} class="text-orange-400" />
-                <span>Included Hardware Components & Parts ({activeParts.length})</span>
-              </div>
-              <span class="text-[10px] text-slate-500 font-mono">Sold as single kit</span>
-            </div>
-            <div class="space-y-2">
-              {#each activeParts as part}
-                <div class="p-2.5 rounded-xl bg-slate-950/80 border border-slate-800/60 flex items-center justify-between text-xs">
-                  <div class="min-w-0 pr-3">
-                    <div class="font-bold text-slate-200">{part.part_name}</div>
-                    {#if part.notes}
-                      <div class="text-[11px] text-slate-400 line-clamp-1">{part.notes}</div>
-                    {/if}
-                  </div>
-                  <div class="text-right flex-shrink-0 font-mono">
-                    <span class="px-2 py-0.5 rounded bg-slate-800 text-orange-400 text-[10px] font-bold">
-                      {part.quantity}x
-                    </span>
-                  </div>
-                </div>
               {/each}
             </div>
           </div>
@@ -352,5 +493,124 @@
       {/if}
     </div>
   </div>
+
+  <!-- Full-Width Long Description Section (Markdown with blank lines / paragraphs) -->
+  {#if product.long_description}
+    <div class="mt-16 pt-10 border-t border-slate-800">
+      <div class="max-w-4xl mx-auto">
+        <div class="flex items-center gap-2 mb-6">
+          <Sparkles size={18} class="text-orange-400" />
+          <h2 class="text-xl sm:text-2xl font-black text-white tracking-tight">Product Overview & Detailed Specifications</h2>
+        </div>
+        <div class="bg-slate-900/40 rounded-3xl p-6 sm:p-10 border border-slate-800/80 shadow-xl">
+          <div class="text-sm sm:text-base leading-relaxed text-slate-300">
+            {@html renderMarkdown(product.long_description)}
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- 5-Products Wide Carousel Underneath Description: "Related Products" -->
+  {#if relatedProducts.length > 0}
+    <div class="mt-20 pt-10 border-t border-slate-800">
+      <div class="flex items-center justify-between mb-8">
+        <div>
+          <h2 class="text-xl sm:text-2xl font-black text-white tracking-tight">Related Products</h2>
+          <p class="text-xs text-slate-400 mt-1">Customers who viewed this item also explored</p>
+        </div>
+        {#if relatedProducts.length > 5}
+          <div class="flex items-center gap-2">
+            <button
+              on:click={() => scrollRelated(-1)}
+              class="p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-colors"
+              aria-label="Previous related products"
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <button
+              on:click={() => scrollRelated(1)}
+              class="p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-colors"
+              aria-label="Next related products"
+            >
+              <ChevronRight size={18} />
+            </button>
+          </div>
+        {/if}
+      </div>
+
+      <!-- 5 items wide grid/carousel on desktop -->
+      <div
+        bind:this={relatedCarouselEl}
+        class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 overflow-x-auto scrollbar-none pb-4"
+      >
+        {#each relatedProducts as relProduct}
+          <div class="min-w-0">
+            <ProductCard item={relProduct} variants={[]} />
+          </div>
+        {/each}
+      </div>
+    </div>
+  {/if}
 </div>
 
+<!-- Fullscreen Lightbox Modal -->
+{#if isLightboxOpen}
+  <div class="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-8 animate-in fade-in duration-200">
+    <!-- Clickable Backdrop -->
+    <button
+      type="button"
+      on:click={() => isLightboxOpen = false}
+      class="absolute inset-0 bg-slate-950/95 backdrop-blur-md cursor-zoom-out w-full h-full border-0"
+      aria-label="Close fullscreen image viewer"
+    ></button>
+
+    <!-- Close Button -->
+    <button
+      type="button"
+      on:click={() => isLightboxOpen = false}
+      class="absolute top-6 right-6 z-10 p-3 rounded-2xl bg-slate-900/80 hover:bg-slate-800 text-white border border-slate-700 transition-colors shadow-2xl"
+      aria-label="Close lightbox"
+    >
+      <X size={22} />
+    </button>
+
+    <!-- Prev Button -->
+    {#if currentImages.length > 1}
+      <button
+        type="button"
+        on:click|stopPropagation={prevImage}
+        class="absolute left-4 sm:left-8 z-10 p-3.5 rounded-2xl bg-slate-900/80 hover:bg-slate-800 text-white border border-slate-700 transition-colors shadow-2xl"
+        aria-label="Previous image"
+      >
+        <ChevronLeft size={24} />
+      </button>
+    {/if}
+
+    <!-- Next Button -->
+    {#if currentImages.length > 1}
+      <button
+        type="button"
+        on:click|stopPropagation={nextImage}
+        class="absolute right-4 sm:right-8 z-10 p-3.5 rounded-2xl bg-slate-900/80 hover:bg-slate-800 text-white border border-slate-700 transition-colors shadow-2xl"
+        aria-label="Next image"
+      >
+        <ChevronRight size={24} />
+      </button>
+    {/if}
+
+    <!-- Maximized Image Container -->
+    <div class="relative z-10 max-w-5xl max-h-[85vh] flex flex-col items-center justify-center">
+      <img
+        src={activeImageUrl}
+        alt={product.title}
+        class="max-w-full max-h-[80vh] object-contain rounded-2xl shadow-2xl border border-slate-800"
+      />
+      {#if currentImages.length > 1}
+        <div class="mt-4 px-4 py-1.5 rounded-full bg-slate-900/90 border border-slate-800 text-xs font-mono text-slate-300">
+          {activeImageIndex + 1} / {currentImages.length}
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}

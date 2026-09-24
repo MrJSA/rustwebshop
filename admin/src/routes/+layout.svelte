@@ -7,7 +7,7 @@
     LayoutDashboard, Package, Warehouse, ShoppingCart, 
     CreditCard, Truck, Sliders, ExternalLink, ShieldCheck, Zap,
     FileText, Menu, FolderTree, Image, Mail, AlertTriangle, KeyRound,
-    LogOut, User, X, CheckCircle2
+    LogOut, User, X, CheckCircle2, TrendingUp
   } from 'lucide-svelte';
 
   export let data;
@@ -15,6 +15,7 @@
 
   const navLinks = [
     { href: '/', label: 'Overview & Analytics', icon: LayoutDashboard },
+    { href: '/analytics', label: 'Purchase Analysis', icon: TrendingUp },
     { href: '/products', label: 'Products & BOM', icon: Package },
     { href: '/categories', label: 'Categories Tree', icon: FolderTree },
     { href: '/logistics', label: 'Logistics & Stock', icon: Warehouse },

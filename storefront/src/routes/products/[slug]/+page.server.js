@@ -8,20 +8,25 @@ export async function load({ params, fetch }) {
     const res = await fetch(`${backendUrl}/api/v1/products/${slug}`);
     if (res.ok) {
       const data = await res.json();
-      let parts = [];
-      try {
-        const partsRes = await fetch(`${backendUrl}/api/v1/products/${slug}/parts`);
-        if (partsRes.ok) {
-          parts = await partsRes.json();
+      const product = data.product || data;
+      const variants = data.variants || [];
+
+      let relatedProducts = [];
+      if (product && product.id) {
+        try {
+          const relRes = await fetch(`${backendUrl}/api/v1/products/${product.id}/related`);
+          if (relRes.ok) {
+            relatedProducts = await relRes.json();
+          }
+        } catch (e) {
+          console.error('Failed to load related products:', e);
         }
-      } catch (e) {
-        console.error('Failed to load parts:', e);
       }
 
       return {
-        product: data.product || data,
-        variants: data.variants || [],
-        parts
+        product,
+        variants,
+        relatedProducts
       };
     }
   } catch (e) {

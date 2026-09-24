@@ -11,6 +11,7 @@ pub struct Category {
     pub slug: String,
     pub description: String,
     pub display_order: i32,
+    pub image_url: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -22,6 +23,7 @@ pub struct CategoryTreeItem {
     pub slug: String,
     pub description: String,
     pub display_order: i32,
+    pub image_url: String,
     pub children: Vec<CategoryTreeItem>,
 }
 
@@ -32,6 +34,7 @@ pub struct CreateCategoryRequest {
     pub slug: Option<String>,
     pub description: Option<String>,
     pub display_order: Option<i32>,
+    pub image_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,4 +44,6 @@ pub struct UpdateCategoryRequest {
     pub slug: String,
     pub description: Option<String>,
     pub display_order: Option<i32>,
+    pub image_url: Option<String>,
 }
+

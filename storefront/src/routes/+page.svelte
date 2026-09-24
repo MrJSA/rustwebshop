@@ -10,8 +10,14 @@
   export let data;
   $: products = data.products || [];
   $: carousels = data.carousels || [];
+  $: categories = data.categories || [];
   $: currentCategory = data.currentCategory || "";
+  $: currentSubcategory = data.currentSubcategory || "";
   $: currentSearch = data.currentSearch || "";
+  $: matchedCategoryNode = categories.find(
+    (c) => c.name.toLowerCase() === currentCategory.toLowerCase() || c.slug.toLowerCase() === currentCategory.toLowerCase()
+  );
+  $: subcategories = matchedCategoryNode ? (matchedCategoryNode.children || []) : [];
   $: heroConfig = data.heroConfig || {
     layout: "split",
     carousel_items: [
@@ -383,6 +389,30 @@
         </a>
       {/if}
     </div>
+
+    <!-- Visual Subcategory Cards with Images -->
+    {#if currentCategory && subcategories.length > 0}
+      <div class="mb-8 p-4 rounded-2xl bg-slate-900/40 border border-slate-800/80">
+        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Explore Subcategories</h3>
+        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+          {#each subcategories as sub}
+            <a
+              href="/?category={encodeURIComponent(currentCategory)}&subcategory={encodeURIComponent(sub.name)}"
+              class="group p-3 rounded-xl bg-slate-950/70 border {currentSubcategory === sub.name ? 'border-orange-500 bg-orange-500/10' : 'border-slate-800 hover:border-slate-700'} flex flex-col items-center text-center transition-all hover:scale-[1.02]"
+            >
+              <div class="w-16 h-16 rounded-xl overflow-hidden bg-slate-900 mb-2 flex items-center justify-center border border-slate-800">
+                {#if sub.image_url}
+                  <img src={sub.image_url} alt={sub.name} class="w-full h-full object-cover group-hover:scale-105 transition-transform" />
+                {:else}
+                  <span class="text-2xl text-slate-600">📁</span>
+                {/if}
+              </div>
+              <span class="text-xs font-bold text-white group-hover:text-orange-400 truncate w-full">{sub.name}</span>
+            </a>
+          {/each}
+        </div>
+      </div>
+    {/if}
 
     {#if products.length === 0}
       <div class="text-center py-20 bg-slate-900/40 rounded-3xl border border-slate-800/80">

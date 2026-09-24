@@ -2,6 +2,7 @@
   import '../app.css';
   import { cart, cartCount, cartSubtotal, isCartOpen } from '$lib/stores/cart.js';
   import { customer } from '$lib/stores/customer.js';
+  import CookieBanner from '$lib/components/CookieBanner.svelte';
   import {
     ShoppingBag,
     X,
@@ -55,21 +56,20 @@
     </div>
   {/if}
 
-  <!-- Main Sticky Header with Glassmorphism -->
-  <header class="sticky top-0 z-40 bg-slate-950/85 backdrop-blur-md border-b border-slate-900 shadow-xl transition-all">
-    <!-- Top Row: Logo, Search Bar, Account & Cart -->
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between gap-4">
-      <!-- Brand Logo & Optional Title -->
-      <a href="/" class="flex items-center gap-3 group flex-shrink-0">
+  <!-- Unified Sticky Header with Left Vertically Centered Logo, Middle Stacked Search & Nav, Right Actions -->
+  <header class="sticky top-0 z-40 bg-slate-950/90 backdrop-blur-md border-b border-slate-900 shadow-xl transition-all">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 sm:py-3.5 flex items-center justify-between gap-4 lg:gap-8">
+      <!-- Left: Brand Logo & Optional Title (Vertically Centered) -->
+      <a href="/" class="flex items-center gap-3.5 group flex-shrink-0">
         {#if store.logo_url}
           <img
             src={store.logo_url}
             alt={store.store_name || 'Logo'}
-            class="{store.show_store_title === false ? 'h-14 max-w-[240px] -my-1' : 'h-10 max-w-[160px]'} object-contain rounded-xl transition-all duration-300"
+            class="{store.show_store_title === false ? 'h-14 sm:h-16 max-w-[260px]' : 'h-10 max-w-[160px]'} object-contain rounded-xl transition-all duration-300"
           />
         {:else}
-          <div class="{store.show_store_title === false ? 'w-12 h-12' : 'w-10 h-10'} rounded-xl bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center shadow-lg shadow-orange-600/30 group-hover:scale-105 transition-transform duration-200">
-            <span class="{store.show_store_title === false ? 'text-3xl' : 'text-2xl'} select-none">🦀</span>
+          <div class="{store.show_store_title === false ? 'w-14 h-14 rounded-2xl shadow-orange-600/30 text-3xl' : 'w-10 h-10 rounded-xl shadow-orange-600/20 text-2xl'} bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center shadow-lg group-hover:scale-105 transition-transform duration-200">
+            <span class="select-none">🦀</span>
           </div>
         {/if}
 
@@ -87,17 +87,18 @@
         {/if}
       </a>
 
-      <!-- Searchbar in Header (Placed Above Menu) -->
-      <div class="flex-1 max-w-xl mx-2 hidden sm:block">
-        <form action="/" method="GET" class="relative flex items-center">
+      <!-- Middle: Stacked Search Bar (Top) & Nav Links (Bottom) aligned to the same left line -->
+      <div class="flex-1 flex flex-col justify-center min-w-0 max-w-2xl mx-2 sm:mx-6">
+        <!-- Top: Search Bar -->
+        <form action="/" method="GET" class="relative flex items-center w-full mb-1">
           <input
             type="text"
             name="search"
             bind:value={headerSearch}
             placeholder="Search products by title, SKU, or category..."
-            class="w-full pl-10 pr-20 py-2 rounded-xl bg-slate-900/90 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500/30 text-xs shadow-inner"
+            class="w-full pl-9 pr-20 py-1.5 sm:py-2 rounded-xl bg-slate-900/90 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500/30 text-xs shadow-inner"
           />
-          <Search size={15} class="absolute left-3.5 text-slate-500 pointer-events-none" />
+          <Search size={14} class="absolute left-3 text-slate-500 pointer-events-none" />
           <button
             type="submit"
             class="absolute right-1 px-3 py-1 rounded-lg bg-orange-600 hover:bg-orange-500 text-white text-[11px] font-bold transition-all shadow-sm"
@@ -105,6 +106,18 @@
             Search
           </button>
         </form>
+
+        <!-- Bottom: Dynamic Customizable Navigation Menu (starts at exact same left line) -->
+        <nav class="flex items-center gap-1 sm:gap-3 overflow-x-auto text-xs font-medium scrollbar-none pt-0.5">
+          {#each headerMenu as item, index}
+            <a
+              href={item.url}
+              class="{index === 0 ? 'pr-2.5 py-1 -ml-0.5' : 'px-2.5 py-1'} rounded-lg text-slate-300 hover:text-white hover:bg-slate-900/80 transition-all flex items-center gap-1 whitespace-nowrap"
+            >
+              <span>{item.label}</span>
+            </a>
+          {/each}
+        </nav>
       </div>
 
       <!-- Right Header Actions (Account Dropdown + Cart) -->
@@ -228,36 +241,6 @@
         </button>
       </div>
     </div>
-
-    <!-- Mobile Search Bar (under top row for smaller devices) -->
-    <div class="px-4 pb-2.5 sm:hidden">
-      <form action="/" method="GET" class="relative flex items-center">
-        <input
-          type="text"
-          name="search"
-          placeholder="Search products..."
-          class="w-full pl-9 pr-16 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white text-xs"
-        />
-        <Search size={14} class="absolute left-3 text-slate-500" />
-        <button type="submit" class="absolute right-1 px-2.5 py-0.5 rounded bg-orange-600 text-white text-[11px] font-bold">
-          Search
-        </button>
-      </form>
-    </div>
-
-    <!-- Lower Row: Dynamic Customizable Navigation Menu -->
-    <nav class="border-t border-slate-900/80 bg-slate-950/60 backdrop-blur-md">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center {store.show_store_title === false ? 'justify-center' : 'justify-start'} gap-1 sm:gap-6 overflow-x-auto py-2 text-xs font-medium scrollbar-none">
-        {#each headerMenu as item}
-          <a
-            href={item.url}
-            class="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-900 transition-all flex items-center gap-1.5 whitespace-nowrap"
-          >
-            <span>{item.label}</span>
-          </a>
-        {/each}
-      </div>
-    </nav>
   </header>
 
   <!-- Main Viewport -->
@@ -424,6 +407,19 @@
             <li><a href="/policies/terms-conditions" class="hover:text-orange-400 transition-colors">Terms and Conditions (AGB)</a></li>
             <li><a href="/policies/privacy-policy" class="hover:text-orange-400 transition-colors">Privacy Policy (GDPR)</a></li>
             <li><a href="/policies/cookie-policy" class="hover:text-orange-400 transition-colors">Cookie Policy</a></li>
+            <li>
+              <button
+                type="button"
+                on:click={() => {
+                  if (typeof window !== 'undefined') {
+                    window.dispatchEvent(new CustomEvent('open-cookie-preferences'));
+                  }
+                }}
+                class="hover:text-orange-400 transition-colors text-left"
+              >
+                Cookie Preferences
+              </button>
+            </li>
           </ul>
         </div>
 
@@ -442,4 +438,7 @@
       </div>
     </div>
   </footer>
+
+  <!-- Cookie Consent Banner & Preferences Modal -->
+  <CookieBanner {store} />
 </div>

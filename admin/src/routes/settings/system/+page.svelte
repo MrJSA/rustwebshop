@@ -36,6 +36,15 @@
   let showStoreSubtitle = settings.show_store_subtitle !== undefined ? Boolean(settings.show_store_subtitle) : true;
   let storeSubtitle = settings.store_subtitle || 'Rust Powered • ACID Fast';
 
+  // Cookie Consent Banner settings
+  let cookieBannerEnabled = settings.cookie_banner_enabled !== undefined ? Boolean(settings.cookie_banner_enabled) : true;
+  let cookieBannerTitle = settings.cookie_banner_title || 'We respect your privacy';
+  let cookieBannerDescription = settings.cookie_banner_description || 'We use cookies and similar technologies to ensure our website works safely and properly, analyze usage patterns, and improve your shopping experience under GDPR regulations.';
+  let cookiePolicyUrl = settings.cookie_policy_url || '/policies/cookie-policy';
+  let cookieBannerAcceptText = settings.cookie_banner_accept_text || 'Accept All';
+  let cookieBannerDeclineText = settings.cookie_banner_decline_text || 'Decline Optional';
+  let cookieBannerPreferencesText = settings.cookie_banner_preferences_text || 'Cookie Preferences';
+
   // Ensure hero_config has valid structure
   let heroConfig = settings.hero_config && typeof settings.hero_config === 'object'
     ? settings.hero_config
@@ -138,13 +147,20 @@
           show_store_title: showStoreTitle,
           show_store_subtitle: showStoreSubtitle,
           store_subtitle: storeSubtitle,
+          cookie_banner_enabled: cookieBannerEnabled,
+          cookie_banner_title: cookieBannerTitle,
+          cookie_banner_description: cookieBannerDescription,
+          cookie_policy_url: cookiePolicyUrl,
+          cookie_banner_accept_text: cookieBannerAcceptText,
+          cookie_banner_decline_text: cookieBannerDeclineText,
+          cookie_banner_preferences_text: cookieBannerPreferencesText,
           hero_config: heroConfig,
           carousels_config: carouselsConfig
         })
       });
 
       if (res.ok) {
-        successNotice = 'Shop identity, logo, hero showcase & carousels saved successfully!';
+        successNotice = 'Shop identity, logo, cookie banner & carousels saved successfully!';
         setTimeout(() => successNotice = '', 4000);
       }
     } catch (e) {
@@ -535,6 +551,96 @@
             </div>
           </div>
         {/each}
+      </div>
+    </div>
+
+    <!-- EU-Conform Cookie Consent Banner Configuration Card -->
+    <div class="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl space-y-6">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-4">
+        <div>
+          <h2 class="text-base font-bold text-white flex items-center gap-2">
+            <span class="text-xl">🍪</span>
+            <span>EU-Conform Cookie Consent Banner & GDPR Settings</span>
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">
+            Configure the customer storefront cookie banner, consent categories (Necessary, Analytics, Marketing), and privacy policy references.
+          </p>
+        </div>
+
+        <label class="flex items-center gap-2.5 cursor-pointer bg-slate-950 px-4 py-2 rounded-xl border border-slate-800 self-start sm:self-auto">
+          <input
+            type="checkbox"
+            bind:checked={cookieBannerEnabled}
+            class="accent-orange-500 w-4 h-4 rounded"
+          />
+          <span class="text-xs font-bold {cookieBannerEnabled ? 'text-emerald-400' : 'text-slate-400'}">
+            {cookieBannerEnabled ? 'Banner Enabled' : 'Banner Disabled'}
+          </span>
+        </label>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Banner Title</label>
+          <input
+            type="text"
+            bind:value={cookieBannerTitle}
+            placeholder="e.g. We respect your privacy"
+            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+          />
+        </div>
+
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Cookie Policy Link URL</label>
+          <input
+            type="text"
+            bind:value={cookiePolicyUrl}
+            placeholder="/policies/cookie-policy"
+            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+          />
+        </div>
+
+        <div class="sm:col-span-2">
+          <label class="block text-slate-300 font-semibold mb-1">Banner Description Text</label>
+          <textarea
+            bind:value={cookieBannerDescription}
+            rows="2"
+            placeholder="Explain to visitors how cookies and local storage are used for necessary operation, analytics, and marketing..."
+            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white leading-relaxed focus:outline-none focus:border-orange-500"
+          ></textarea>
+        </div>
+
+        <div class="sm:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-800/80">
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Accept All Button Label</label>
+            <input
+              type="text"
+              bind:value={cookieBannerAcceptText}
+              placeholder="Accept All"
+              class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+            />
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Decline Optional Button Label</label>
+            <input
+              type="text"
+              bind:value={cookieBannerDeclineText}
+              placeholder="Decline Optional"
+              class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+            />
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Preferences Modal Button Label</label>
+            <input
+              type="text"
+              bind:value={cookieBannerPreferencesText}
+              placeholder="Cookie Preferences"
+              class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+            />
+          </div>
+        </div>
       </div>
     </div>
 

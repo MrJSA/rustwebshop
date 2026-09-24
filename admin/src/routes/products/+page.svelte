@@ -1,4 +1,5 @@
 <script>
+  import MediaPickerModal from '$lib/components/MediaPickerModal.svelte';
   import {
     Package,
     Plus,
@@ -34,6 +35,13 @@
   // Form State (Product)
   let editingProductId = null;
   let title = '';
+  let subtitle = '';
+  let variantSelectorLabel = 'Choose Variant / Model:';
+  let shortDescription = '';
+  let longDescription = '';
+  let productImages = [];
+  let isProductMediaPickerOpen = false;
+  let isVariantMediaPickerOpen = false;
   let category = 'Hardware';
   let subcategory = 'Keyboards';
   let description = '';
@@ -76,6 +84,7 @@
   let editVariantPriceEuros = 49.99;
   let editVariantStock = 20;
   let editVariantImageUrl = '';
+  let editVariantImages = [];
   let isUploadingVariantImg = false;
   let variantUploadSavingsText = '';
 
@@ -86,23 +95,36 @@
   // Compression toggle
   let compressImage = true;
 
-  // Build tree from flat categories list
-  $: rootCategories = categories
-    .filter((c) => !c.parent_id)
-    .sort((a, b) => a.display_order - b.display_order);
-
-  function getSubcategories(parentId) {
-    return categories
-      .filter((c) => c.parent_id === parentId)
+  // Build recursive hierarchical category tree
+  function buildCategoryHierarchy(pid = null, depth = 0) {
+    let result = [];
+    const directChildren = categories
+      .filter(c => c.parent_id === pid)
       .sort((a, b) => a.display_order - b.display_order);
+
+    for (const child of directChildren) {
+      result.push({ ...child, depth });
+      result = result.concat(buildCategoryHierarchy(child.id, depth + 1));
+    }
+    return result;
   }
 
-  function selectCategoryFromTree(cat, sub = null) {
-    if (sub) {
+  function getRootCategoryName(cat) {
+    let curr = cat;
+    while (curr && curr.parent_id) {
+      const parent = categories.find(c => c.id === curr.parent_id);
+      if (!parent) break;
+      curr = parent;
+    }
+    return curr ? curr.name : cat.name;
+  }
+
+  function selectAnyCategory(cat) {
+    if (!cat.parent_id) {
       category = cat.name;
-      subcategory = sub.name;
+      subcategory = cat.name;
     } else {
-      category = cat.name;
+      category = getRootCategoryName(cat);
       subcategory = cat.name;
     }
     isCatPickerOpen = false;
@@ -221,6 +243,11 @@
   function openCreateModal() {
     editingProductId = null;
     title = '';
+    subtitle = '';
+    variantSelectorLabel = 'Choose Variant / Model:';
+    shortDescription = '';
+    longDescription = '';
+    productImages = ['https://images.unsplash.com/photo-1587829741301-dc798b83add3?auto=format&fit=crop&w=800&q=80'];
     category = 'Hardware';
     subcategory = 'Keyboards';
     description = '';
@@ -239,6 +266,13 @@
   async function openEditModal(product) {
     editingProductId = product.id;
     title = product.title;
+    subtitle = product.subtitle || '';
+    variantSelectorLabel = product.variant_selector_label || 'Choose Variant / Model:';
+    shortDescription = product.short_description || product.description || '';
+    longDescription = product.long_description || '';
+    productImages = product.images && Array.isArray(product.images) && product.images.length > 0
+      ? [...product.images]
+      : (product.image_url ? [product.image_url] : []);
     category = product.category;
     subcategory = product.subcategory;
     description = product.description;
@@ -277,16 +311,22 @@
   async function handleCreateProduct() {
     isSaving = true;
     const basePriceCents = Math.round(basePriceEuros * 100);
+    const primaryImg = productImages[0] || imageUrl || '';
 
     const payload = {
       title,
-      description,
+      subtitle: subtitle.trim() || null,
+      variant_selector_label: variantSelectorLabel.trim() || 'Choose Variant / Model:',
+      short_description: shortDescription.trim() || description.trim() || null,
+      long_description: longDescription.trim() || null,
+      description: shortDescription.trim() || description.trim(),
       product_type: productType,
       category,
       subcategory,
       base_price_cents: basePriceCents,
       digital_download_url: productType === 'digital' ? digitalDownloadUrl : null,
-      image_url: imageUrl,
+      image_url: primaryImg,
+      images: productImages.length > 0 ? productImages : [primaryImg],
       variants: [
         {
           sku: variantSku,
@@ -295,7 +335,8 @@
           attributes: { version: variantTitle },
           stock_quantity: productType === 'digital' ? 999999 : variantStock,
           low_stock_threshold: 5,
-          image_url: imageUrl
+          image_url: primaryImg,
+          images: productImages.length > 0 ? productImages : [primaryImg]
         }
       ]
     };
@@ -321,6 +362,7 @@
   async function handleUpdateProduct() {
     isSaving = true;
     const basePriceCents = Math.round(basePriceEuros * 100);
+    const primaryImg = productImages[0] || imageUrl || '';
 
     try {
       const res = await fetch(`/api/v1/admin/products/${editingProductId}`, {
@@ -328,12 +370,17 @@
         headers: { 'Content-Type': 'application/json', 'X-Dev-Mode': 'true' },
         body: JSON.stringify({
           title,
-          description,
+          subtitle: subtitle.trim() || null,
+          variant_selector_label: variantSelectorLabel.trim() || 'Choose Variant / Model:',
+          short_description: shortDescription.trim() || description.trim() || null,
+          long_description: longDescription.trim() || null,
+          description: shortDescription.trim() || description.trim(),
           category,
           subcategory,
           base_price_cents: basePriceCents,
           digital_download_url: productType === 'digital' ? digitalDownloadUrl : null,
-          image_url: imageUrl,
+          image_url: primaryImg,
+          images: productImages.length > 0 ? productImages : [primaryImg],
           is_active: true
         })
       });
@@ -406,11 +453,15 @@
     editVariantPriceEuros = (v.price_override_cents ? v.price_override_cents / 100 : basePriceEuros);
     editVariantStock = v.stock_quantity;
     editVariantImageUrl = v.image_url || imageUrl || '';
+    editVariantImages = v.images && Array.isArray(v.images) && v.images.length > 0
+      ? [...v.images]
+      : (v.image_url ? [v.image_url] : []);
     variantUploadSavingsText = '';
     isEditVariantOpen = true;
   }
 
   async function handleSaveVariant() {
+    const primaryImg = editVariantImages[0] || editVariantImageUrl || '';
     try {
       const res = await fetch(`/api/v1/admin/variants/${editingVariantId}`, {
         method: 'PUT',
@@ -422,7 +473,8 @@
           attributes: { version: editVariantTitle },
           stock_quantity: parseInt(editVariantStock) || 0,
           low_stock_threshold: 5,
-          image_url: editVariantImageUrl
+          image_url: primaryImg,
+          images: editVariantImages.length > 0 ? editVariantImages : [primaryImg]
         })
       });
       if (res.ok) {
@@ -657,6 +709,16 @@
             <input type="text" bind:value={title} required placeholder="e.g. RustCraft Custom Keypad" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
           </div>
 
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Product Subtitle (Under Title)</label>
+            <input type="text" bind:value={subtitle} placeholder="e.g. Hot-swappable CNC anodized aluminum chassis with QMK/VIA firmware" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Variant Selector Label</label>
+            <input type="text" bind:value={variantSelectorLabel} placeholder="e.g. Choose Color or Choose Mainboard Type (Default: Choose Variant / Model:)" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
+          </div>
+
           <!-- Category Tree Picker Trigger -->
           <div>
             <label class="block text-slate-300 font-semibold mb-1">Category & Subcategory Hierarchy</label>
@@ -690,39 +752,70 @@
             </div>
           </div>
 
-          <!-- Image Upload / Compression Box -->
+          <!-- Multi-Image Picture Gallery Box -->
           <div class="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
             <div class="flex items-center justify-between">
-              <label class="text-slate-300 font-semibold flex items-center gap-1.5">
-                <Upload size={14} class="text-orange-400" />
-                <span>Upload Product Image onto Server</span>
-              </label>
-              <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-300">
-                <input type="checkbox" bind:checked={compressImage} class="rounded accent-orange-500" />
-                <span class="font-semibold text-orange-400">Compress Image (WebP)</span>
-              </label>
+              <div>
+                <label class="text-slate-300 font-semibold flex items-center gap-1.5 text-xs">
+                  <Image size={14} class="text-orange-400" />
+                  <span>Product Picture Gallery ({productImages.length})</span>
+                </label>
+                <p class="text-[10px] text-slate-400">The first picture serves as the primary storefront thumbnail.</p>
+              </div>
+              <button
+                type="button"
+                on:click={() => isProductMediaPickerOpen = true}
+                class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-[11px] flex items-center gap-1"
+              >
+                <Upload size={12} />
+                <span>Media Library</span>
+              </button>
             </div>
 
-            <div class="flex items-center gap-3">
-              <input type="file" accept="image/*" on:change={handleFileSelect} class="text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-white hover:file:bg-slate-700" />
+            {#if productImages.length > 0}
+              <div class="flex flex-wrap gap-2 pt-1">
+                {#each productImages as img, idx}
+                  <div class="relative group w-14 h-14 rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+                    <img src={img} alt={`Img ${idx + 1}`} class="w-full h-full object-cover" />
+                    <button
+                      type="button"
+                      on:click={() => {
+                        productImages = productImages.filter((_, i) => i !== idx);
+                        imageUrl = productImages[0] || '';
+                      }}
+                      class="absolute top-0.5 right-0.5 p-0.5 rounded bg-rose-600/90 text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      <X size={10} />
+                    </button>
+                    {#if idx === 0}
+                      <div class="absolute bottom-0 inset-x-0 bg-orange-600 text-white text-[7px] font-bold text-center">
+                        PRIMARY
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
+            <div class="flex items-center gap-3 pt-1">
+              <input type="file" accept="image/*" on:change={handleFileSelect} class="text-xs text-slate-400 file:mr-3 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:bg-slate-800 file:text-white hover:file:bg-slate-700" />
               {#if isUploading}
                 <span class="text-xs text-orange-400 animate-pulse font-mono">Uploading & Compressing...</span>
               {/if}
             </div>
-
             {#if uploadSavingsText}
-              <div class="text-[11px] text-emerald-400 font-mono flex items-center gap-1">
-                <CheckCircle2 size={13} />
-                <span>{uploadSavingsText}</span>
-              </div>
+              <div class="text-[11px] text-emerald-400 font-mono">{uploadSavingsText}</div>
             {/if}
-
-            <input type="text" bind:value={imageUrl} placeholder="Image URL (e.g. /uploads/... or https://...)" class="w-full px-3.5 py-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 font-mono text-[11px] focus:outline-none focus:border-orange-500" />
           </div>
 
           <div>
-            <label class="block text-slate-300 font-semibold mb-1">Description</label>
-            <textarea bind:value={description} rows="3" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"></textarea>
+            <label class="block text-slate-300 font-semibold mb-1">Short Description (Next to Image)</label>
+            <textarea bind:value={shortDescription} rows="2" placeholder="Brief summary displayed right beside the product image..." class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"></textarea>
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Long Description (Full Width Markdown)</label>
+            <textarea bind:value={longDescription} rows="4" placeholder="Detailed product overview. Supports Markdown (# headers, **bold**, - lists, and blank lines for paragraphs)..." class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-orange-500"></textarea>
           </div>
 
           <div class="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
@@ -784,6 +877,16 @@
             </div>
           </div>
 
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Product Subtitle (Under Title)</label>
+            <input type="text" bind:value={subtitle} placeholder="e.g. Hot-swappable CNC anodized aluminum chassis with QMK/VIA firmware" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Variant Selector Label</label>
+            <input type="text" bind:value={variantSelectorLabel} placeholder="e.g. Choose Color or Choose Mainboard Type (Default: Choose Variant / Model:)" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
+          </div>
+
           <!-- Category Tree Selector -->
           <div>
             <label class="block text-slate-300 font-semibold mb-1">Category & Subcategory Hierarchy</label>
@@ -803,39 +906,70 @@
             </div>
           </div>
 
-          <!-- Image Upload / Compress for Edit -->
+          <!-- Multi-Image Picture Gallery Box -->
           <div class="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
             <div class="flex items-center justify-between">
-              <label class="text-slate-300 font-semibold flex items-center gap-1.5">
-                <Upload size={14} class="text-orange-400" />
-                <span>Upload Master Product Image</span>
-              </label>
-              <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-300">
-                <input type="checkbox" bind:checked={compressImage} class="rounded accent-orange-500" />
-                <span class="font-semibold text-orange-400">Compress Image (WebP)</span>
-              </label>
+              <div>
+                <label class="text-slate-300 font-semibold flex items-center gap-1.5 text-xs">
+                  <Image size={14} class="text-orange-400" />
+                  <span>Product Picture Gallery ({productImages.length})</span>
+                </label>
+                <p class="text-[10px] text-slate-400">The first picture serves as the primary storefront thumbnail.</p>
+              </div>
+              <button
+                type="button"
+                on:click={() => isProductMediaPickerOpen = true}
+                class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-[11px] flex items-center gap-1"
+              >
+                <Upload size={12} />
+                <span>Media Library</span>
+              </button>
             </div>
 
-            <div class="flex items-center gap-4">
-              <input type="file" accept="image/*" on:change={handleFileSelect} class="text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-white" />
+            {#if productImages.length > 0}
+              <div class="flex flex-wrap gap-2 pt-1">
+                {#each productImages as img, idx}
+                  <div class="relative group w-14 h-14 rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+                    <img src={img} alt={`Img ${idx + 1}`} class="w-full h-full object-cover" />
+                    <button
+                      type="button"
+                      on:click={() => {
+                        productImages = productImages.filter((_, i) => i !== idx);
+                        imageUrl = productImages[0] || '';
+                      }}
+                      class="absolute top-0.5 right-0.5 p-0.5 rounded bg-rose-600/90 text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      <X size={10} />
+                    </button>
+                    {#if idx === 0}
+                      <div class="absolute bottom-0 inset-x-0 bg-orange-600 text-white text-[7px] font-bold text-center">
+                        PRIMARY
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
+            <div class="flex items-center gap-3 pt-1">
+              <input type="file" accept="image/*" on:change={handleFileSelect} class="text-xs text-slate-400 file:mr-3 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:bg-slate-800 file:text-white hover:file:bg-slate-700" />
               {#if isUploading}
                 <span class="text-xs text-orange-400 animate-pulse font-mono">Uploading & Compressing...</span>
               {/if}
-              {#if imageUrl}
-                <img src={imageUrl} alt="Thumbnail preview" class="w-12 h-12 rounded-lg object-cover bg-slate-900 border border-slate-700" />
-              {/if}
             </div>
-
             {#if uploadSavingsText}
               <div class="text-[11px] text-emerald-400 font-mono">{uploadSavingsText}</div>
             {/if}
-
-            <input type="text" bind:value={imageUrl} placeholder="Image URL" class="w-full px-3.5 py-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 font-mono text-[11px] focus:outline-none focus:border-orange-500" />
           </div>
 
           <div>
-            <label class="block text-slate-300 font-semibold mb-1">Description</label>
-            <textarea bind:value={description} rows="3" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"></textarea>
+            <label class="block text-slate-300 font-semibold mb-1">Short Description (Next to Image)</label>
+            <textarea bind:value={shortDescription} rows="2" placeholder="Brief summary displayed right beside the product image..." class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"></textarea>
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Long Description (Full Width Markdown)</label>
+            <textarea bind:value={longDescription} rows="4" placeholder="Detailed product overview. Supports Markdown (# headers, **bold**, - lists, and blank lines for paragraphs)..." class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-orange-500"></textarea>
           </div>
 
           <div class="flex justify-end pt-2">
@@ -1018,7 +1152,7 @@
   {/if}
 </div>
 
-<!-- Category Tree Picker Modal -->
+<!-- Category Tree Picker Modal (Arbitrary Hierarchy Depth) -->
 {#if isCatPickerOpen}
   <div class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
     <div class="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-4 max-h-[85vh] overflow-y-auto">
@@ -1030,39 +1164,32 @@
         <button on:click={() => isCatPickerOpen = false} class="text-xs text-slate-400 hover:text-white">✕</button>
       </div>
 
-      <p class="text-xs text-slate-400">Click any category or subcategory to assign it to the product:</p>
+      <p class="text-xs text-slate-400">Click any category, subcategory, or nested sub-sub-category to assign to this product:</p>
 
-      <div class="space-y-2">
-        {#each rootCategories as root}
-          {@const subs = getSubcategories(root.id)}
-          <div class="border border-slate-800 rounded-xl bg-slate-950 overflow-hidden">
-            <div class="p-3 bg-slate-900/60 flex items-center justify-between hover:bg-slate-800/50 transition-colors">
-              <span class="font-bold text-white text-xs">{root.name}</span>
-              <button
-                type="button"
-                on:click={() => selectCategoryFromTree(root)}
-                class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-orange-600 text-white text-[11px] font-bold"
-              >
-                Select Root
-              </button>
+      <div class="space-y-1.5 max-h-96 overflow-y-auto pr-1">
+        {#each buildCategoryHierarchy() as cat}
+          <div
+            class="p-2.5 rounded-xl border border-slate-800 bg-slate-950 flex items-center justify-between hover:bg-slate-900 transition-colors"
+            style="margin-left: {cat.depth * 16}px;"
+          >
+            <div class="flex items-center gap-2.5 min-w-0">
+              {#if cat.image_url}
+                <img src={cat.image_url} alt="" class="w-6 h-6 rounded object-cover flex-shrink-0" />
+              {:else}
+                <span class="text-xs">{cat.depth === 0 ? '📁' : '↳'}</span>
+              {/if}
+              <span class="text-xs font-semibold text-white truncate">{cat.name}</span>
+              {#if cat.depth > 0}
+                <span class="text-[9px] font-mono px-1 rounded bg-slate-800 text-slate-400">Level {cat.depth + 1}</span>
+              {/if}
             </div>
-
-            {#if subs.length > 0}
-              <div class="p-2.5 pl-6 bg-slate-950/60 divide-y divide-slate-800/40">
-                {#each subs as sub}
-                  <div class="py-2 flex items-center justify-between">
-                    <span class="text-xs text-slate-300 font-semibold">&bull; {sub.name}</span>
-                    <button
-                      type="button"
-                      on:click={() => selectCategoryFromTree(root, sub)}
-                      class="px-2.5 py-1 rounded-lg bg-orange-600/20 hover:bg-orange-600 text-orange-400 hover:text-white border border-orange-500/30 text-[11px] font-bold transition-colors"
-                    >
-                      Select {sub.name}
-                    </button>
-                  </div>
-                {/each}
-              </div>
-            {/if}
+            <button
+              type="button"
+              on:click={() => selectAnyCategory(cat)}
+              class="px-2.5 py-1 rounded-lg bg-orange-600/20 hover:bg-orange-600 text-orange-400 hover:text-white border border-orange-500/30 text-[11px] font-bold transition-colors flex-shrink-0"
+            >
+              Select
+            </button>
           </div>
         {/each}
       </div>
@@ -1104,28 +1231,55 @@
           <input type="number" bind:value={editVariantStock} required class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
         </div>
 
-        <!-- Variant Image Upload -->
+        <!-- Variant Pictures Multi-Gallery -->
         <div class="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
           <div class="flex items-center justify-between">
-            <span class="font-semibold text-slate-300">Variant-Specific Picture</span>
-            <label class="flex items-center gap-1 text-[10px] text-orange-400 font-semibold cursor-pointer">
-              <input type="checkbox" bind:checked={compressImage} class="rounded accent-orange-500" />
-              <span>WebP</span>
-            </label>
+            <span class="font-semibold text-slate-300">Variant-Specific Picture Gallery ({editVariantImages.length})</span>
+            <button
+              type="button"
+              on:click={() => isVariantMediaPickerOpen = true}
+              class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white text-[10px] font-bold flex items-center gap-1"
+            >
+              <Upload size={10} />
+              <span>Media</span>
+            </button>
           </div>
+
+          {#if editVariantImages.length > 0}
+            <div class="flex flex-wrap gap-2">
+              {#each editVariantImages as vImg, vIdx}
+                <div class="relative group w-12 h-12 rounded-lg bg-slate-900 border border-slate-800 overflow-hidden">
+                  <img src={vImg} alt="" class="w-full h-full object-cover" />
+                  <button
+                    type="button"
+                    on:click={() => {
+                      editVariantImages = editVariantImages.filter((_, i) => i !== vIdx);
+                      editVariantImageUrl = editVariantImages[0] || '';
+                    }}
+                    class="absolute top-0.5 right-0.5 p-0.5 rounded bg-rose-600 text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <X size={9} />
+                  </button>
+                  {#if vIdx === 0}
+                    <div class="absolute bottom-0 inset-x-0 bg-orange-600 text-white text-[6px] font-bold text-center">
+                      PRIMARY
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
 
           <div class="flex items-center gap-3">
             <input type="file" accept="image/*" on:change={handleVariantFileSelect} class="text-xs text-slate-400 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:bg-slate-800 file:text-white" />
-            {#if editVariantImageUrl}
-              <img src={editVariantImageUrl} alt="" class="w-9 h-9 rounded-lg object-cover bg-slate-900 border border-slate-700 flex-shrink-0" />
+            {#if isUploadingVariantImg}
+              <span class="text-[10px] text-orange-400 animate-pulse font-mono">Uploading...</span>
             {/if}
           </div>
 
           {#if variantUploadSavingsText}
             <div class="text-[10px] text-emerald-400 font-mono">{variantUploadSavingsText}</div>
           {/if}
-
-          <input type="text" bind:value={editVariantImageUrl} placeholder="Variant image URL" class="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 font-mono text-[10px]" />
         </div>
 
         <div class="flex justify-end gap-2 pt-2 border-t border-slate-800">
@@ -1189,3 +1343,22 @@
     </div>
   </div>
 {/if}
+
+<!-- Media Picker Modals for Product and Variant -->
+<MediaPickerModal
+  open={isProductMediaPickerOpen}
+  onSelect={(url) => {
+    productImages = [...productImages, url];
+    if (!imageUrl) imageUrl = url;
+  }}
+  onClose={() => isProductMediaPickerOpen = false}
+/>
+
+<MediaPickerModal
+  open={isVariantMediaPickerOpen}
+  onSelect={(url) => {
+    editVariantImages = [...editVariantImages, url];
+    if (!editVariantImageUrl) editVariantImageUrl = url;
+  }}
+  onClose={() => isVariantMediaPickerOpen = false}
+/>

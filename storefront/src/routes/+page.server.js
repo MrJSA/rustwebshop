@@ -40,10 +40,22 @@ export async function load({ fetch, url }) {
     console.error('Failed to load store hero config:', e);
   }
 
+  let categories = [];
+  try {
+    const catRes = await fetch(`${backendUrl}/api/v1/categories`);
+    if (catRes.ok) {
+      categories = await catRes.json();
+    }
+  } catch (e) {
+    console.error('Failed to load categories:', e);
+  }
+
   return {
     products,
     carousels,
+    categories,
     currentCategory: category,
+    currentSubcategory: subcategory,
     currentSearch: search,
     heroConfig
   };

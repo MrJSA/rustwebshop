@@ -31,3 +31,15 @@ pub struct UpdateNavigationItemRequest {
     pub is_active: Option<bool>,
     pub location: Option<String>,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderMenuItem {
+    pub id: Uuid,
+    pub sort_order: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderMenuRequest {
+    pub items: Vec<ReorderMenuItem>,
+}
+

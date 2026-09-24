@@ -39,6 +39,7 @@ pub fn public_router() -> Router<PgPool> {
         .route("/products", get(list_products))
         .route("/products/carousels", get(public_get_carousels))
         .route("/products/:slug", get(get_product_by_slug))
+        .route("/products/:id/related", get(public_get_related_products))
         .route("/products/:id/notify-stock", post(public_subscribe_stock_notification))
         .route("/products/:slug/parts", get(public_get_product_parts))
         .route("/cart/validate", post(validate_cart))
@@ -61,7 +62,7 @@ pub fn public_router() -> Router<PgPool> {
 
 async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, updated_at FROM store_settings WHERE id = 1"
+        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, cookie_banner_enabled, cookie_banner_title, cookie_banner_description, cookie_banner_policy_url, cookie_accept_label, cookie_deny_label, cookie_preferences_label, updated_at FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
@@ -92,6 +93,13 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
         show_store_title: settings.show_store_title,
         show_store_subtitle: settings.show_store_subtitle,
         carousels_config: settings.carousels_config,
+        cookie_banner_enabled: settings.cookie_banner_enabled,
+        cookie_banner_title: settings.cookie_banner_title,
+        cookie_banner_description: settings.cookie_banner_description,
+        cookie_banner_policy_url: settings.cookie_banner_policy_url,
+        cookie_accept_label: settings.cookie_accept_label,
+        cookie_deny_label: settings.cookie_deny_label,
+        cookie_preferences_label: settings.cookie_preferences_label,
     };
 
     let payment_providers = sqlx::query_as::<_, PaymentProviderRow>(
@@ -131,7 +139,7 @@ async fn list_products(
     State(pool): State<PgPool>,
     Query(query): Query<ProductQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let mut sql = "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at FROM products WHERE is_active = true".to_string();
+    let mut sql = "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE is_active = true".to_string();
 
     if let Some(cat) = &query.category {
         sql.push_str(&format!(" AND category = '{}'", cat.replace('\'', "''")));
@@ -156,7 +164,7 @@ async fn list_products(
     let mut result = Vec::new();
     for product in products {
         let variants = sqlx::query_as::<_, ProductVariant>(
-            "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
+            "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
         )
         .bind(product.id)
         .fetch_all(&pool)
@@ -174,7 +182,7 @@ async fn get_product_by_slug(
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let product = sqlx::query_as::<_, Product>(
-        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at FROM products WHERE slug = $1 AND is_active = true"
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE slug = $1 AND is_active = true"
     )
     .bind(slug)
     .fetch_optional(&pool)
@@ -183,7 +191,7 @@ async fn get_product_by_slug(
     .ok_or((StatusCode::NOT_FOUND, "Product not found".to_string()))?;
 
     let variants = sqlx::query_as::<_, ProductVariant>(
-        "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
+        "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
     )
     .bind(product.id)
     .fetch_all(&pool)
@@ -1077,7 +1085,7 @@ async fn public_list_categories(
     State(pool): State<PgPool>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, Category>(
-        "SELECT id, parent_id, name, slug, description, display_order, created_at FROM categories ORDER BY display_order ASC, name ASC"
+        "SELECT id, parent_id, name, slug, description, display_order, image_url, created_at FROM categories ORDER BY display_order ASC, name ASC"
     )
     .fetch_all(&pool)
     .await
@@ -1135,6 +1143,51 @@ async fn public_subscribe_stock_notification(
     Ok(Json(json!({ "success": true, "message": "You will be notified when this item is back in stock!" })))
 }
 
+async fn public_get_related_products(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_product = sqlx::query_as::<_, Product>(
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE id = $1"
+    )
+    .bind(id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, "Product not found".to_string()))?;
+
+    let related = sqlx::query_as::<_, Product>(
+        r#"
+        SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images
+        FROM products 
+        WHERE is_active = true AND id != $1
+        ORDER BY (category = $2) DESC, (subcategory = $3) DESC, created_at DESC
+        LIMIT 5
+        "#
+    )
+    .bind(id)
+    .bind(&current_product.category)
+    .bind(&current_product.subcategory)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let mut result = Vec::new();
+    for p in related {
+        let variants = sqlx::query_as::<_, ProductVariant>(
+            "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
+        )
+        .bind(p.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+        result.push(ProductWithVariants { product: p, variants });
+    }
+
+    Ok(Json(result))
+}
+
 async fn public_get_carousels(
     State(pool): State<PgPool>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1171,7 +1224,7 @@ async fn public_get_carousels(
                     .unwrap_or_default();
                 if !ids.is_empty() {
                     products = sqlx::query_as::<_, Product>(
-                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at FROM products WHERE is_active = true AND id = ANY($1)"
+                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE is_active = true AND id = ANY($1)"
                     )
                     .bind(&ids)
                     .fetch_all(&pool)
@@ -1179,7 +1232,7 @@ async fn public_get_carousels(
                     .unwrap_or_default();
                 } else {
                     products = sqlx::query_as::<_, Product>(
-                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at FROM products WHERE is_active = true ORDER BY created_at DESC LIMIT 10"
+                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE is_active = true ORDER BY created_at DESC LIMIT 10"
                     )
                     .fetch_all(&pool)
                     .await
@@ -1189,7 +1242,7 @@ async fn public_get_carousels(
             "new" => {
                 let days = sec.get("days").and_then(|v| v.as_i64()).unwrap_or(30);
                 products = sqlx::query_as::<_, Product>(
-                    "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at FROM products WHERE is_active = true AND created_at >= NOW() - ($1 || ' days')::INTERVAL ORDER BY created_at DESC LIMIT 15"
+                    "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE is_active = true AND created_at >= NOW() - ($1 || ' days')::INTERVAL ORDER BY created_at DESC LIMIT 15"
                 )
                 .bind(days.to_string())
                 .fetch_all(&pool)
@@ -1201,7 +1254,8 @@ async fn public_get_carousels(
                 products = sqlx::query_as::<_, Product>(
                     r#"
                     SELECT p.id, p.title, p.slug, p.description, p.product_type, p.category, p.subcategory,
-                           p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at
+                           p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at,
+                           p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images
                     FROM products p
                     LEFT JOIN order_items oi ON oi.product_id = p.id
                     WHERE p.is_active = true
@@ -1219,7 +1273,8 @@ async fn public_get_carousels(
                 products = sqlx::query_as::<_, Product>(
                     r#"
                     SELECT DISTINCT p.id, p.title, p.slug, p.description, p.product_type, p.category, p.subcategory,
-                           p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at
+                           p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at,
+                           p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images
                     FROM products p
                     JOIN product_variants pv ON pv.product_id = p.id
                     WHERE p.is_active = true AND (p.product_type = 'digital' OR pv.stock_quantity > 0)
@@ -1237,7 +1292,7 @@ async fn public_get_carousels(
         let mut items_with_variants = Vec::new();
         for product in products {
             let variants = sqlx::query_as::<_, ProductVariant>(
-                "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
+                "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
             )
             .bind(product.id)
             .fetch_all(&pool)

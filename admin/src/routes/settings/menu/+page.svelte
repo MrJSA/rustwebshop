@@ -1,5 +1,5 @@
 <script>
-  import { Menu, Plus, Trash2, Check, ExternalLink, ArrowRight, X, Link, HelpCircle, Compass } from 'lucide-svelte';
+  import { Menu, Plus, Trash2, Check, ExternalLink, ArrowRight, X, Link, HelpCircle, Compass, ArrowUp, ArrowDown, Edit2 } from 'lucide-svelte';
 
   export let data;
   let menuItems = data.menuItems || [];
@@ -8,6 +8,12 @@
 
   let activeTab = 'header'; // 'header' or 'footer'
   let isModalOpen = false;
+  let isEditModalOpen = false;
+  let editingItemId = null;
+  let editLabel = '';
+  let editUrl = '/';
+  let editSortOrder = 1;
+
   let newLabel = '';
   let newUrl = '/';
   let newSortOrder = 1;
@@ -123,24 +129,71 @@
     }
   }
 
-  async function handleToggleActive(item) {
+  function openEditModal(item) {
+    editingItemId = item.id;
+    editLabel = item.label;
+    editUrl = item.url;
+    editSortOrder = item.sort_order;
+    isEditModalOpen = true;
+  }
+
+  async function handleEditItem() {
+    isSaving = true;
     const token = localStorage.getItem('admin_token');
     try {
-      await fetch(`/api/v1/admin/menu/${item.id}`, {
+      const res = await fetch(`/api/v1/admin/menu/${editingItemId}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({
-          is_active: !item.is_active,
-          location: item.location || 'header'
+          label: editLabel,
+          url: editUrl,
+          sort_order: parseInt(editSortOrder) || 1,
+          is_active: true,
+          location: activeTab
         })
       });
-      item.is_active = !item.is_active;
-      menuItems = [...menuItems];
+      if (res.ok) {
+        await reloadMenu();
+        isEditModalOpen = false;
+      }
     } catch (e) {
-      console.error('Failed to update item:', e);
+      console.error('Failed to update menu item:', e);
+    } finally {
+      isSaving = false;
+    }
+  }
+
+  async function moveItem(index, direction) {
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= currentItems.length) return;
+    const itemsCopy = [...currentItems];
+    const temp = itemsCopy[index];
+    itemsCopy[index] = itemsCopy[newIndex];
+    itemsCopy[newIndex] = temp;
+
+    const reorderedPayload = itemsCopy.map((item, idx) => ({
+      id: item.id,
+      sort_order: idx + 1
+    }));
+
+    const token = localStorage.getItem('admin_token');
+    try {
+      const res = await fetch('/api/v1/admin/menu/reorder', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ items: reorderedPayload })
+      });
+      if (res.ok) {
+        await reloadMenu();
+      }
+    } catch (e) {
+      console.error('Failed to reorder menu items:', e);
     }
   }
 </script>
@@ -219,9 +272,33 @@
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-800/60">
-              {#each currentItems as item}
+              {#each currentItems as item, idx}
                 <tr class="text-slate-300">
-                  <td class="py-3.5 font-mono text-slate-400 font-bold">{item.sort_order}</td>
+                  <td class="py-3.5 font-mono text-slate-400 font-bold">
+                    <div class="flex items-center gap-1.5">
+                      <span>{item.sort_order}</span>
+                      <div class="flex flex-col gap-0.5">
+                        <button
+                          type="button"
+                          disabled={idx === 0}
+                          on:click={() => moveItem(idx, -1)}
+                          class="p-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800 text-slate-300 hover:text-white transition-colors"
+                          title="Move Up"
+                        >
+                          <ArrowUp size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={idx === currentItems.length - 1}
+                          on:click={() => moveItem(idx, 1)}
+                          class="p-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800 text-slate-300 hover:text-white transition-colors"
+                          title="Move Down"
+                        >
+                          <ArrowDown size={11} />
+                        </button>
+                      </div>
+                    </div>
+                  </td>
                   <td class="py-3.5 font-bold text-white text-sm">{item.label}</td>
                   <td class="py-3.5 font-mono text-orange-400 text-xs">{item.url}</td>
                   <td class="py-3.5 text-center">
@@ -234,14 +311,24 @@
                     </button>
                   </td>
                   <td class="py-3.5 text-right">
-                    <button
-                      type="button"
-                      on:click={() => handleDeleteItem(item.id)}
-                      class="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 transition-colors border border-rose-500/20"
-                      title="Remove Link"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    <div class="inline-flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        on:click={() => openEditModal(item)}
+                        class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors border border-slate-700"
+                        title="Edit Link & Label"
+                      >
+                        <Edit2 size={13} class="text-orange-400" />
+                      </button>
+                      <button
+                        type="button"
+                        on:click={() => handleDeleteItem(item.id)}
+                        class="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 transition-colors border border-rose-500/20"
+                        title="Remove Link"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               {/each}
@@ -412,3 +499,75 @@
     </div>
   </div>
 {/if}
+
+<!-- Edit Navigation Item Modal -->
+{#if isEditModalOpen}
+  <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
+    <div class="w-full max-w-md rounded-3xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+        <h3 class="text-sm font-bold text-white flex items-center gap-2">
+          <Edit2 size={16} class="text-orange-400" />
+          <span>Edit Navigation Link</span>
+        </h3>
+        <button
+          on:click={() => isEditModalOpen = false}
+          class="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+        >
+          <X size={16} />
+        </button>
+      </div>
+
+      <form on:submit|preventDefault={handleEditItem} class="space-y-4 text-xs">
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Menu Label / Link Title</label>
+          <input
+            type="text"
+            bind:value={editLabel}
+            required
+            placeholder="e.g. Keyboards, Shipping Policy"
+            class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-orange-500"
+          />
+        </div>
+
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Target URL</label>
+          <input
+            type="text"
+            bind:value={editUrl}
+            required
+            placeholder="e.g. /policies/shipment-policy or /?category=Hardware"
+            class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono placeholder-slate-500 focus:outline-none focus:border-orange-500"
+          />
+        </div>
+
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Sort Order Position</label>
+          <input
+            type="number"
+            bind:value={editSortOrder}
+            min="1"
+            class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+          />
+        </div>
+
+        <div class="pt-2 flex justify-end gap-2 border-t border-slate-800">
+          <button
+            type="button"
+            on:click={() => isEditModalOpen = false}
+            class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={isSaving}
+            class="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold transition-all shadow-md shadow-orange-600/30 disabled:opacity-50"
+          >
+            {isSaving ? 'Saving Changes...' : 'Save Changes'}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+

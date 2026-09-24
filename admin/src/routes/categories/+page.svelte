@@ -1,6 +1,7 @@
 <script>
   import CategoryTreeNode from '$lib/components/CategoryTreeNode.svelte';
-  import { FolderTree, Plus, FolderPlus, CheckCircle2, X } from 'lucide-svelte';
+  import MediaPickerModal from '$lib/components/MediaPickerModal.svelte';
+  import { FolderTree, Plus, FolderPlus, CheckCircle2, X, Image as ImageIcon, Trash2 } from 'lucide-svelte';
 
   export let data;
   let categories = data.categories || [];
@@ -9,12 +10,14 @@
 
   // Modal State
   let isModalOpen = false;
+  let isMediaPickerOpen = false;
   let modalMode = 'create'; // 'create' or 'edit'
   let editId = null;
   let parentId = null;
   let name = '';
   let slug = '';
   let description = '';
+  let imageUrl = '';
   let displayOrder = 1;
 
   $: rootCategories = categories
@@ -42,6 +45,7 @@
     name = '';
     slug = '';
     description = '';
+    imageUrl = '';
     displayOrder = (rootCategories.length + 1) * 10;
     isModalOpen = true;
   }
@@ -53,6 +57,7 @@
     name = '';
     slug = '';
     description = '';
+    imageUrl = '';
     const siblings = categories.filter(c => c.parent_id === parent.id);
     displayOrder = (siblings.length + 1) * 10;
     isModalOpen = true;
@@ -65,6 +70,7 @@
     name = category.name;
     slug = category.slug;
     description = category.description || '';
+    imageUrl = category.image_url || '';
     displayOrder = category.display_order;
     isModalOpen = true;
   }
@@ -101,6 +107,7 @@
             name,
             slug: finalSlug,
             description,
+            image_url: imageUrl.trim() || null,
             display_order: parseInt(displayOrder) || 0
           })
         });
@@ -122,6 +129,7 @@
             name,
             slug: finalSlug,
             description,
+            image_url: imageUrl.trim() || null,
             display_order: parseInt(displayOrder) || 0
           })
         });
@@ -274,6 +282,43 @@
         </div>
 
         <div>
+          <label class="block text-slate-300 font-semibold mb-1">Category Image / Icon (Optional)</label>
+          <div class="flex items-center gap-3">
+            {#if imageUrl}
+              <div class="w-12 h-12 rounded-xl bg-slate-950 border border-slate-800 overflow-hidden flex-shrink-0">
+                <img src={imageUrl} alt="Preview" class="w-full h-full object-cover" />
+              </div>
+            {/if}
+            <div class="flex-1 flex gap-2">
+              <input
+                type="text"
+                bind:value={imageUrl}
+                placeholder="https://... or choose from media"
+                class="flex-1 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-orange-500 font-mono text-xs"
+              />
+              <button
+                type="button"
+                on:click={() => isMediaPickerOpen = true}
+                class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors"
+              >
+                <ImageIcon size={14} class="text-orange-400" />
+                <span>Media</span>
+              </button>
+              {#if imageUrl}
+                <button
+                  type="button"
+                  on:click={() => imageUrl = ''}
+                  class="p-2 rounded-xl bg-slate-800 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 transition-colors"
+                  title="Clear Image"
+                >
+                  <Trash2 size={14} />
+                </button>
+              {/if}
+            </div>
+          </div>
+        </div>
+
+        <div>
           <label class="block text-slate-300 font-semibold mb-1">Description (Optional)</label>
           <textarea
             bind:value={description}
@@ -303,3 +348,9 @@
     </div>
   </div>
 {/if}
+
+<MediaPickerModal
+  open={isMediaPickerOpen}
+  onSelect={(url) => imageUrl = url}
+  onClose={() => isMediaPickerOpen = false}
+/>

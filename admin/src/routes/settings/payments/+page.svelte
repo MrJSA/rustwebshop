@@ -1,5 +1,5 @@
 <script>
-  import { CreditCard, ShieldCheck, Check, AlertCircle, Save } from 'lucide-svelte';
+  import { CreditCard, ShieldCheck, Check, AlertCircle, Save, ExternalLink, Sparkles } from 'lucide-svelte';
 
   export let data;
   let paymentConfigs = data.paymentConfigs || [];
@@ -63,7 +63,8 @@
   <!-- Gateways List -->
   <div class="space-y-5">
     {#each paymentConfigs as provider}
-      <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
+      {@const isStripe = provider.provider === 'stripe'}
+      <div class="p-6 rounded-3xl border shadow-xl space-y-4 {isStripe ? 'bg-gradient-to-br from-slate-900 via-slate-900 to-orange-950/20 border-orange-500/50 shadow-orange-950/20 ring-1 ring-orange-500/20' : 'bg-slate-900 border-slate-800'}">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
           <div class="flex items-center gap-3">
             <div class="w-10 h-10 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-center font-black text-orange-400">
@@ -75,7 +76,14 @@
               {:else}💳{/if}
             </div>
             <div>
-              <h3 class="text-base font-bold text-white tracking-tight">{provider.display_name}</h3>
+              <div class="flex items-center gap-2">
+                <h3 class="text-base font-bold text-white tracking-tight">{provider.display_name}</h3>
+                {#if isStripe}
+                  <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-500/15 text-orange-400 border border-orange-500/30 flex items-center gap-1">
+                    <Sparkles size={11} /> Primary Gateway
+                  </span>
+                {/if}
+              </div>
               <div class="text-[11px] font-mono text-slate-400 uppercase">Provider ID: {provider.provider}</div>
             </div>
           </div>
@@ -109,6 +117,30 @@
             </label>
           </div>
         </div>
+
+        {#if isStripe}
+          <!-- Stripe Terminal & Integration Helper Banner -->
+          <div class="p-3.5 rounded-2xl bg-orange-950/20 border border-orange-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div class="space-y-0.5">
+              <div class="font-bold text-orange-400 flex items-center gap-1.5">
+                <CreditCard size={14} />
+                <span>Stripe Terminal & Payment Intents Support</span>
+              </div>
+              <p class="text-[11px] text-slate-300">
+                Collect in-person card payments and online checkouts seamlessly with Stripe Terminal and Elements.
+              </p>
+            </div>
+            <a
+              href="https://docs.stripe.com/terminal/payments/collect-card-payment"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="px-3 py-1.5 rounded-xl bg-orange-600/30 hover:bg-orange-600 text-orange-300 hover:text-white border border-orange-500/40 text-[11px] font-bold transition-all flex items-center gap-1.5 self-start sm:self-auto flex-shrink-0"
+            >
+              <span>Stripe Terminal Docs</span>
+              <ExternalLink size={12} />
+            </a>
+          </div>
+        {/if}
 
         <!-- Credentials Inputs -->
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">

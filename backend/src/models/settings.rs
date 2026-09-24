@@ -31,6 +31,13 @@ pub struct StoreSettings {
     pub show_store_title: bool,
     pub show_store_subtitle: bool,
     pub carousels_config: serde_json::Value,
+    pub cookie_banner_enabled: bool,
+    pub cookie_banner_title: String,
+    pub cookie_banner_description: String,
+    pub cookie_banner_policy_url: String,
+    pub cookie_accept_label: String,
+    pub cookie_deny_label: String,
+    pub cookie_preferences_label: String,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -60,6 +67,13 @@ pub struct StoreSettingsDTO {
     pub show_store_title: bool,
     pub show_store_subtitle: bool,
     pub carousels_config: serde_json::Value,
+    pub cookie_banner_enabled: bool,
+    pub cookie_banner_title: String,
+    pub cookie_banner_description: String,
+    pub cookie_banner_policy_url: String,
+    pub cookie_accept_label: String,
+    pub cookie_deny_label: String,
+    pub cookie_preferences_label: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +104,13 @@ pub struct UpdateStoreSettingsRequest {
     pub show_store_title: Option<bool>,
     pub show_store_subtitle: Option<bool>,
     pub carousels_config: Option<serde_json::Value>,
+    pub cookie_banner_enabled: Option<bool>,
+    pub cookie_banner_title: Option<String>,
+    pub cookie_banner_description: Option<String>,
+    pub cookie_banner_policy_url: Option<String>,
+    pub cookie_accept_label: Option<String>,
+    pub cookie_deny_label: Option<String>,
+    pub cookie_preferences_label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,4 +135,54 @@ pub struct SalesDataPoint {
     pub date: String,
     pub orders_count: i64,
     pub sales_cents: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PurchaseAnalysisSummary {
+    pub total_sales_cents: i64,
+    pub net_sales_cents: i64,
+    pub shipping_cost_cents: i64,
+    pub tax_cents: i64,
+    pub orders_count: i64,
+    pub products_sold: i64,
+    pub variations_sold: i64,
+    pub visitors_count: i64,
+    pub views_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PurchaseAnalysisDayPoint {
+    pub date: String,
+    pub total_sales_cents: i64,
+    pub net_sales_cents: i64,
+    pub shipping_cents: i64,
+    pub orders_count: i64,
+    pub items_sold: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CategoryLeaderboardItem {
+    pub category: String,
+    pub items_sold: i64,
+    pub sales_cents: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProductLeaderboardItem {
+    pub product_id: String,
+    pub title: String,
+    pub image_url: String,
+    pub items_sold: i64,
+    pub sales_cents: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PurchaseAnalysisResponse {
+    pub period_label: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub summary: PurchaseAnalysisSummary,
+    pub daily_points: Vec<PurchaseAnalysisDayPoint>,
+    pub top_categories: Vec<CategoryLeaderboardItem>,
+    pub top_products: Vec<ProductLeaderboardItem>,
 }

@@ -19,6 +19,11 @@ pub struct Product {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub subtitle: String,
+    pub variant_selector_label: String,
+    pub short_description: String,
+    pub long_description: String,
+    pub images: JsonValue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -34,6 +39,7 @@ pub struct ProductVariant {
     pub image_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub images: JsonValue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +60,11 @@ pub struct CreateProductRequest {
     pub base_price_cents: i32,
     pub digital_download_url: Option<String>,
     pub image_url: String,
+    pub subtitle: Option<String>,
+    pub variant_selector_label: Option<String>,
+    pub short_description: Option<String>,
+    pub long_description: Option<String>,
+    pub images: Option<JsonValue>,
     pub variants: Vec<CreateVariantRequest>,
 }
 
@@ -67,6 +78,11 @@ pub struct UpdateProductRequest {
     pub digital_download_url: Option<String>,
     pub image_url: Option<String>,
     pub is_active: Option<bool>,
+    pub subtitle: Option<String>,
+    pub variant_selector_label: Option<String>,
+    pub short_description: Option<String>,
+    pub long_description: Option<String>,
+    pub images: Option<JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -99,6 +115,7 @@ pub struct UpdateVariantRequest {
     pub stock_quantity: Option<i32>,
     pub low_stock_threshold: Option<i32>,
     pub image_url: Option<String>,
+    pub images: Option<JsonValue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +127,7 @@ pub struct CreateVariantRequest {
     pub stock_quantity: i32,
     pub low_stock_threshold: Option<i32>,
     pub image_url: Option<String>,
+    pub images: Option<JsonValue>,
 }
 
 #[derive(Debug, Deserialize)]
