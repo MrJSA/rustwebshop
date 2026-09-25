@@ -262,9 +262,9 @@
                 <!-- Depth Gradient & Highlights -->
                 <div class="absolute inset-0 bg-gradient-to-br from-white/15 via-transparent to-black/30 pointer-events-none"></div>
 
-                <!-- Floating Product Image with Depth Layering -->
+                <!-- Floating Product Image Aligned Center Right -->
                 {#if btn.image_url}
-                  <div class="absolute right-2 top-2 sm:right-3 sm:top-3 w-24 h-24 sm:w-28 sm:h-28 z-10 transition-all duration-300 group-hover:scale-110 group-hover:-translate-y-1">
+                  <div class="absolute right-2 sm:right-3 top-1/2 -translate-y-1/2 w-24 h-24 sm:w-28 sm:h-28 z-10 transition-all duration-300 group-hover:scale-110 flex items-center justify-center pointer-events-none">
                     <img
                       src={btn.image_url}
                       alt={btn.title}

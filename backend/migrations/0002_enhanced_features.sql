@@ -238,15 +238,20 @@ CREATE TABLE IF NOT EXISTS navigation_items (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO navigation_items (id, label, url, sort_order, is_active)
-VALUES
-('20000000-0000-0000-0000-000000000001', 'Catalog', '/', 1, true),
-('20000000-0000-0000-0000-000000000002', 'Hardware', '/?category=Hardware', 2, true),
-('20000000-0000-0000-0000-000000000003', 'Apparel', '/?category=Apparel', 3, true),
-('20000000-0000-0000-0000-000000000004', 'Digital & Books', '/?category=Software+%26+Books', 4, true),
-('20000000-0000-0000-0000-000000000005', 'Shipping Policy', '/policies/shipment-policy', 5, true),
-('20000000-0000-0000-0000-000000000006', 'Track Order', '/track', 6, true)
-ON CONFLICT DO NOTHING;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM navigation_items) THEN
+        INSERT INTO navigation_items (id, label, url, sort_order, is_active)
+        VALUES
+        ('20000000-0000-0000-0000-000000000001', 'Catalog', '/', 1, true),
+        ('20000000-0000-0000-0000-000000000002', 'Hardware', '/?category=Hardware', 2, true),
+        ('20000000-0000-0000-0000-000000000003', 'Apparel', '/?category=Apparel', 3, true),
+        ('20000000-0000-0000-0000-000000000004', 'Digital & Books', '/?category=Software+%26+Books', 4, true),
+        ('20000000-0000-0000-0000-000000000005', 'Shipping Policy', '/policies/shipment-policy', 5, true),
+        ('20000000-0000-0000-0000-000000000006', 'Track Order', '/track', 6, true)
+        ON CONFLICT DO NOTHING;
+    END IF;
+END $$;
 
 -- 5. Customer Addresses and Wishlist
 CREATE TABLE IF NOT EXISTS customer_addresses (

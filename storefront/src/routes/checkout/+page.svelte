@@ -26,6 +26,33 @@
   let isSubmitting = false;
   let errorMessage = '';
 
+  // Interactive Payment Card Fields (inspired by svelte_shop-main)
+  let cardNumber = '4242 4242 4242 4242';
+  let cardExpiry = '12/28';
+  let cardCvc = '123';
+  let cardholderName = 'Joshua Rust';
+
+  function handleCardInput(e) {
+    const val = e.target.value.replace(/\D/g, '').replace(/(\d{4})(?=\d)/g, '$1 ').trim();
+    cardNumber = val;
+  }
+
+  function autofillTestCard() {
+    cardNumber = '4242 4242 4242 4242';
+    cardExpiry = '12/28';
+    cardCvc = '123';
+    cardholderName = customerName || 'Joshua Rust';
+  }
+
+  function getCardType(num) {
+    const clean = num.replace(/\s/g, '');
+    if (/^4/.test(clean)) return 'VISA';
+    if (/^5[1-5]/.test(clean)) return 'MASTERCARD';
+    if (/^3[47]/.test(clean)) return 'AMEX';
+    return 'CARD';
+  }
+  $: cardBrand = getCardType(cardNumber);
+
   const countries = [
     { code: 'DE', name: 'Germany (Domestic)' },
     { code: 'FR', name: 'France' },
@@ -327,6 +354,95 @@
               <div class="text-[10px] text-slate-400 mt-0.5">Amazon Account</div>
             </button>
           </div>
+
+          <!-- Interactive Provider Panels (Inspired by svelte_shop-main) -->
+          {#if selectedProvider === 'stripe'}
+            <div class="mt-5 p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3.5 animate-in fade-in duration-200">
+              <div class="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                  <CreditCard size={14} class="text-orange-400" />
+                  <span>Encrypted Credit / Debit Card</span>
+                </span>
+                <button
+                  type="button"
+                  on:click={autofillTestCard}
+                  class="text-[10px] font-bold text-orange-400 hover:text-orange-300 bg-orange-600/15 hover:bg-orange-600/25 px-2 py-0.5 rounded border border-orange-500/30 transition-colors"
+                >
+                  ⚡ Fill Test Card
+                </button>
+              </div>
+
+              <div>
+                <label for="stripe-card-num" class="block text-[11px] font-semibold text-slate-400 mb-1">Card Number</label>
+                <div class="relative">
+                  <input
+                    id="stripe-card-num"
+                    type="text"
+                    bind:value={cardNumber}
+                    on:input={handleCardInput}
+                    maxlength="19"
+                    placeholder="4242 4242 4242 4242"
+                    class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-orange-500 pr-16"
+                  />
+                  <span class="absolute right-2.5 top-1/2 -translate-y-1/2 px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-mono font-bold text-indigo-400">
+                    {cardBrand}
+                  </span>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label for="stripe-card-exp" class="block text-[11px] font-semibold text-slate-400 mb-1">Expiry (MM / YY)</label>
+                  <input
+                    id="stripe-card-exp"
+                    type="text"
+                    bind:value={cardExpiry}
+                    maxlength="5"
+                    placeholder="MM/YY"
+                    class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-orange-500"
+                  />
+                </div>
+                <div>
+                  <label for="stripe-card-cvc" class="block text-[11px] font-semibold text-slate-400 mb-1">CVC / CVV</label>
+                  <input
+                    id="stripe-card-cvc"
+                    type="text"
+                    bind:value={cardCvc}
+                    maxlength="4"
+                    placeholder="CVC"
+                    class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-orange-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label for="stripe-card-name" class="block text-[11px] font-semibold text-slate-400 mb-1">Cardholder Name</label>
+                <input
+                  id="stripe-card-name"
+                  type="text"
+                  bind:value={cardholderName}
+                  placeholder="Full name on card"
+                  class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"
+                />
+              </div>
+            </div>
+          {:else if selectedProvider === 'paypal'}
+            <div class="mt-5 p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-center justify-between animate-in fade-in duration-200">
+              <div class="flex items-center gap-2">
+                <span class="font-black text-sky-400 text-sm">PayPal</span>
+                <span class="text-[11px] text-slate-400">You will be securely redirected to PayPal to authorize payment.</span>
+              </div>
+              <span class="px-2 py-0.5 rounded bg-sky-500/15 text-sky-400 text-[10px] font-bold">Express Active</span>
+            </div>
+          {:else}
+            <div class="mt-5 p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-center justify-between animate-in fade-in duration-200">
+              <div class="flex items-center gap-2">
+                <span class="font-bold text-white capitalize">{selectedProvider.replace('_', ' ')}</span>
+                <span class="text-[11px] text-slate-400">One-touch biometric authorization ready on your device.</span>
+              </div>
+              <span class="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-bold">Ready</span>
+            </div>
+          {/if}
 
           <div class="mt-4 p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-400 flex items-center justify-between">
             <div class="flex items-center gap-2">

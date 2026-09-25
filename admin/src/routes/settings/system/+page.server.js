@@ -3,6 +3,9 @@ export async function load({ fetch }) {
   const headers = { 'X-Dev-Mode': 'true' };
   let settings = {};
   let products = [];
+  let categories = [];
+  let menuItems = [];
+  let pages = [];
 
   try {
     const res = await fetch(`${backendUrl}/api/v1/admin/settings/system`, { headers });
@@ -22,6 +25,33 @@ export async function load({ fetch }) {
     console.error('Failed to load products in system settings:', e);
   }
 
+  try {
+    const catRes = await fetch(`${backendUrl}/api/v1/admin/categories`, { headers });
+    if (catRes.ok) {
+      categories = await catRes.json();
+    }
+  } catch (e) {
+    console.error('Failed to load categories in system settings:', e);
+  }
+
+  try {
+    const mRes = await fetch(`${backendUrl}/api/v1/admin/menu`, { headers });
+    if (mRes.ok) {
+      menuItems = await mRes.json();
+    }
+  } catch (e) {
+    console.error('Failed to load menu in system settings:', e);
+  }
+
+  try {
+    const pRes = await fetch(`${backendUrl}/api/v1/admin/pages`, { headers });
+    if (pRes.ok) {
+      pages = await pRes.json();
+    }
+  } catch (e) {
+    console.error('Failed to load pages in system settings:', e);
+  }
+
   return {
     settings: Object.keys(settings).length > 0 ? settings : {
       store_name: 'RustCraft Gear & Software',
@@ -37,6 +67,9 @@ export async function load({ fetch }) {
       logo_url: '',
       hero_config: { layout: 'split', carousel_items: [], featured_buttons: [] }
     },
-    products
+    products,
+    categories,
+    menuItems,
+    pages
   };
 }

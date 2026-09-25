@@ -62,7 +62,7 @@ pub fn public_router() -> Router<PgPool> {
 
 async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, cookie_banner_enabled, cookie_banner_title, cookie_banner_description, cookie_banner_policy_url, cookie_accept_label, cookie_deny_label, cookie_preferences_label, updated_at FROM store_settings WHERE id = 1"
+        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, cookie_banner_enabled, cookie_banner_title, cookie_banner_description, cookie_banner_policy_url, cookie_accept_label, cookie_deny_label, cookie_preferences_label, tax_notice, updated_at FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
@@ -100,6 +100,7 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
         cookie_accept_label: settings.cookie_accept_label,
         cookie_deny_label: settings.cookie_deny_label,
         cookie_preferences_label: settings.cookie_preferences_label,
+        tax_notice: settings.tax_notice,
     };
 
     let payment_providers = sqlx::query_as::<_, PaymentProviderRow>(
@@ -135,17 +136,55 @@ struct PaymentProviderRow {
     config_data: serde_json::Value,
 }
 
+async fn get_category_and_descendants(pool: &PgPool, cat_name_or_slug: &str) -> Vec<String> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        r#"
+        WITH RECURSIVE cat_tree AS (
+            SELECT id, name, slug FROM categories 
+            WHERE LOWER(name) = LOWER($1) OR LOWER(slug) = LOWER($1)
+            UNION ALL
+            SELECT c.id, c.name, c.slug 
+            FROM categories c 
+            JOIN cat_tree ct ON c.parent_id = ct.id
+        )
+        SELECT name FROM cat_tree
+        "#
+    )
+    .bind(cat_name_or_slug)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    if rows.is_empty() {
+        vec![cat_name_or_slug.to_string()]
+    } else {
+        rows
+    }
+}
+
 async fn list_products(
     State(pool): State<PgPool>,
     Query(query): Query<ProductQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let mut sql = "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE is_active = true".to_string();
+    let mut sql = "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE is_active = true".to_string();
 
     if let Some(cat) = &query.category {
-        sql.push_str(&format!(" AND category = '{}'", cat.replace('\'', "''")));
+        let descendant_names = get_category_and_descendants(&pool, cat).await;
+        let formatted_in = descendant_names
+            .iter()
+            .map(|n| format!("'{}'", n.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(" AND (category IN ({}) OR subcategory IN ({}))", formatted_in, formatted_in));
     }
     if let Some(subcat) = &query.subcategory {
-        sql.push_str(&format!(" AND subcategory = '{}'", subcat.replace('\'', "''")));
+        let descendant_names = get_category_and_descendants(&pool, subcat).await;
+        let formatted_in = descendant_names
+            .iter()
+            .map(|n| format!("'{}'", n.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(" AND (category IN ({}) OR subcategory IN ({}))", formatted_in, formatted_in));
     }
     if let Some(ptype) = &query.product_type {
         sql.push_str(&format!(" AND product_type = '{}'", ptype.replace('\'', "''")));
@@ -182,7 +221,7 @@ async fn get_product_by_slug(
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let product = sqlx::query_as::<_, Product>(
-        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE slug = $1 AND is_active = true"
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE slug = $1 AND is_active = true"
     )
     .bind(slug)
     .fetch_optional(&pool)
@@ -441,13 +480,13 @@ async fn public_get_menu(
     let loc = query.location.unwrap_or_else(|| "header".to_string());
     let items = if loc == "all" {
         sqlx::query_as::<_, NavigationItem>(
-            "SELECT id, location, label, url, sort_order, is_active, created_at FROM navigation_items WHERE is_active = true ORDER BY sort_order ASC, created_at ASC"
+            "SELECT id, location, label, url, sort_order, is_active, parent_id, created_at FROM navigation_items WHERE is_active = true ORDER BY sort_order ASC, created_at ASC"
         )
         .fetch_all(&pool)
         .await
     } else {
         sqlx::query_as::<_, NavigationItem>(
-            "SELECT id, location, label, url, sort_order, is_active, created_at FROM navigation_items WHERE is_active = true AND location = $1 ORDER BY sort_order ASC, created_at ASC"
+            "SELECT id, location, label, url, sort_order, is_active, parent_id, created_at FROM navigation_items WHERE is_active = true AND location = $1 ORDER BY sort_order ASC, created_at ASC"
         )
         .bind(loc)
         .fetch_all(&pool)
@@ -463,7 +502,7 @@ async fn public_get_page(
     State(pool): State<PgPool>,
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let page = sqlx::query_as::<_, PageContent>(
+    let mut page = sqlx::query_as::<_, PageContent>(
         "SELECT slug, title, content_markdown, is_published, updated_at FROM pages WHERE slug = $1 AND is_published = true"
     )
     .bind(&slug)
@@ -471,6 +510,31 @@ async fn public_get_page(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .ok_or_else(|| (StatusCode::NOT_FOUND, "Page not found".to_string()))?;
+
+    // Load store_settings to dynamically interpolate Store Identity across all Policy pages
+    let settings_opt = sqlx::query_as::<_, StoreSettings>(
+        "SELECT * FROM store_settings WHERE id = 1"
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap_or(None);
+
+    if let Some(s) = settings_opt {
+        let mut md = page.content_markdown;
+        md = md.replace("{{STORE_NAME}}", &s.store_name);
+        md = md.replace("{{COMPANY_ADDRESS}}", &s.company_address);
+        md = md.replace("{{SUPPORT_EMAIL}}", &s.support_email);
+        md = md.replace("{{PHONE}}", &s.phone);
+        md = md.replace("{{VAT_ID}}", &s.vat_id);
+        md = md.replace("{{TAX_NOTICE}}", &s.tax_notice);
+        // Also update standard initial default strings if present
+        md = md.replace("RustCraft Gear & Software GmbH", &s.store_name);
+        md = md.replace("RustCraft Gear & Software", &s.store_name);
+        md = md.replace("support@rustwebshop.local", &s.support_email);
+        md = md.replace("+49 (0) 30 123456-78", &s.phone);
+        md = md.replace("DE314159265", &s.vat_id);
+        page.content_markdown = md;
+    }
 
     // If shipment policy, also bundle active shipping providers with zones and rates!
     if slug == "shipment-policy" {
@@ -1148,7 +1212,7 @@ async fn public_get_related_products(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let current_product = sqlx::query_as::<_, Product>(
-        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE id = $1"
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE id = $1"
     )
     .bind(id)
     .fetch_optional(&pool)
@@ -1158,7 +1222,7 @@ async fn public_get_related_products(
 
     let related = sqlx::query_as::<_, Product>(
         r#"
-        SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images
+        SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants
         FROM products 
         WHERE is_active = true AND id != $1
         ORDER BY (category = $2) DESC, (subcategory = $3) DESC, created_at DESC
@@ -1196,7 +1260,7 @@ async fn public_get_carousels(
         .await
         .unwrap_or_else(|_| json!({
             "sections": [
-                { "id": "featured", "title": "Featured Gear", "enabled": true, "product_ids": [] },
+                { "id": "featured", "title": "Featured Products", "enabled": true, "product_ids": [] },
                 { "id": "new", "title": "New Arrivals", "enabled": true, "days": 30 },
                 { "id": "bestsellers", "title": "Best Sellers", "enabled": true, "limit": 10 },
                 { "id": "catalog", "title": "In Stock Hardware & Gear", "enabled": true }
@@ -1224,7 +1288,7 @@ async fn public_get_carousels(
                     .unwrap_or_default();
                 if !ids.is_empty() {
                     products = sqlx::query_as::<_, Product>(
-                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE is_active = true AND id = ANY($1)"
+                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE is_active = true AND id = ANY($1)"
                     )
                     .bind(&ids)
                     .fetch_all(&pool)
@@ -1232,7 +1296,7 @@ async fn public_get_carousels(
                     .unwrap_or_default();
                 } else {
                     products = sqlx::query_as::<_, Product>(
-                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE is_active = true ORDER BY created_at DESC LIMIT 10"
+                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE is_active = true ORDER BY created_at DESC LIMIT 10"
                     )
                     .fetch_all(&pool)
                     .await
@@ -1241,10 +1305,12 @@ async fn public_get_carousels(
             }
             "new" => {
                 let days = sec.get("days").and_then(|v| v.as_i64()).unwrap_or(30);
+                let limit = sec.get("limit").and_then(|v| v.as_i64()).unwrap_or(12);
                 products = sqlx::query_as::<_, Product>(
-                    "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products WHERE is_active = true AND created_at >= NOW() - ($1 || ' days')::INTERVAL ORDER BY created_at DESC LIMIT 15"
+                    "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE is_active = true AND created_at >= NOW() - ($1 || ' days')::INTERVAL ORDER BY created_at DESC LIMIT $2"
                 )
                 .bind(days.to_string())
+                .bind(limit)
                 .fetch_all(&pool)
                 .await
                 .unwrap_or_default();
@@ -1255,7 +1321,7 @@ async fn public_get_carousels(
                     r#"
                     SELECT p.id, p.title, p.slug, p.description, p.product_type, p.category, p.subcategory,
                            p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at,
-                           p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images
+                           p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images, p.has_multiple_variants
                     FROM products p
                     LEFT JOIN order_items oi ON oi.product_id = p.id
                     WHERE p.is_active = true
@@ -1270,18 +1336,20 @@ async fn public_get_carousels(
                 .unwrap_or_default();
             }
             "catalog" => {
+                let limit = sec.get("limit").and_then(|v| v.as_i64()).unwrap_or(24);
                 products = sqlx::query_as::<_, Product>(
                     r#"
                     SELECT DISTINCT p.id, p.title, p.slug, p.description, p.product_type, p.category, p.subcategory,
                            p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at,
-                           p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images
+                           p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images, p.has_multiple_variants
                     FROM products p
                     JOIN product_variants pv ON pv.product_id = p.id
                     WHERE p.is_active = true AND (p.product_type = 'digital' OR pv.stock_quantity > 0)
                     ORDER BY p.created_at DESC
-                    LIMIT 20
+                    LIMIT $1
                     "#
                 )
+                .bind(limit)
                 .fetch_all(&pool)
                 .await
                 .unwrap_or_default();

@@ -14,36 +14,41 @@ CREATE TABLE IF NOT EXISTS categories (
 CREATE INDEX IF NOT EXISTS idx_categories_parent_id ON categories(parent_id);
 CREATE INDEX IF NOT EXISTS idx_categories_slug ON categories(slug);
 
--- Seed initial hierarchical categories
-INSERT INTO categories (id, parent_id, name, slug, description, display_order)
-VALUES
-('30000000-0000-0000-0000-000000000001', NULL, 'Hardware', 'hardware', 'Precision-crafted mechanical and computing peripherals', 1),
-('30000000-0000-0000-0000-000000000002', NULL, 'Apparel', 'apparel', 'High quality organic cotton developer apparel', 2),
-('30000000-0000-0000-0000-000000000003', NULL, 'Software & Books', 'software-books', 'Systems architecture manuals, eBooks and crates', 3),
-('30000000-0000-0000-0000-000000000004', NULL, 'Accessories', 'accessories', 'Desk mats, aviator cables, keycap pullers and tools', 4)
-ON CONFLICT (slug) DO NOTHING;
+-- Seed initial hierarchical categories - only if categories table is empty
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM categories) THEN
+        INSERT INTO categories (id, parent_id, name, slug, description, display_order)
+        VALUES
+        ('30000000-0000-0000-0000-000000000001', NULL, 'Hardware', 'hardware', 'Precision-crafted mechanical and computing peripherals', 1),
+        ('30000000-0000-0000-0000-000000000002', NULL, 'Apparel', 'apparel', 'High quality organic cotton developer apparel', 2),
+        ('30000000-0000-0000-0000-000000000003', NULL, 'Software & Books', 'software-books', 'Systems architecture manuals, eBooks and crates', 3),
+        ('30000000-0000-0000-0000-000000000004', NULL, 'Accessories', 'accessories', 'Desk mats, aviator cables, keycap pullers and tools', 4)
+        ON CONFLICT (slug) DO NOTHING;
 
--- Seed subcategories under Hardware
-INSERT INTO categories (id, parent_id, name, slug, description, display_order)
-VALUES
-('30000000-0000-0000-0000-000000000011', '30000000-0000-0000-0000-000000000001', 'Keyboards', 'keyboards', 'Custom mechanical keyboards and kits', 1),
-('30000000-0000-0000-0000-000000000012', '30000000-0000-0000-0000-000000000001', 'Switches & Lube', 'switches-lube', 'Mechanical switch packs and tuning lubricants', 2),
-('30000000-0000-0000-0000-000000000013', '30000000-0000-0000-0000-000000000001', 'Keycaps', 'keycaps', 'PBT dye-sub and double-shot keycap sets', 3)
-ON CONFLICT (slug) DO NOTHING;
+        -- Seed subcategories under Hardware
+        INSERT INTO categories (id, parent_id, name, slug, description, display_order)
+        VALUES
+        ('30000000-0000-0000-0000-000000000011', '30000000-0000-0000-0000-000000000001', 'Keyboards', 'keyboards', 'Custom mechanical keyboards and kits', 1),
+        ('30000000-0000-0000-0000-000000000012', '30000000-0000-0000-0000-000000000001', 'Switches & Lube', 'switches-lube', 'Mechanical switch packs and tuning lubricants', 2),
+        ('30000000-0000-0000-0000-000000000013', '30000000-0000-0000-0000-000000000001', 'Keycaps', 'keycaps', 'PBT dye-sub and double-shot keycap sets', 3)
+        ON CONFLICT (slug) DO NOTHING;
 
--- Seed subcategories under Apparel
-INSERT INTO categories (id, parent_id, name, slug, description, display_order)
-VALUES
-('30000000-0000-0000-0000-000000000021', '30000000-0000-0000-0000-000000000002', 'Hoodies', 'hoodies', 'Heavyweight French terry hoodies', 1),
-('30000000-0000-0000-0000-000000000022', '30000000-0000-0000-0000-000000000002', 'T-Shirts', 't-shirts', 'Organic cotton developer tees', 2)
-ON CONFLICT (slug) DO NOTHING;
+        -- Seed subcategories under Apparel
+        INSERT INTO categories (id, parent_id, name, slug, description, display_order)
+        VALUES
+        ('30000000-0000-0000-0000-000000000021', '30000000-0000-0000-0000-000000000002', 'Hoodies', 'hoodies', 'Heavyweight French terry hoodies', 1),
+        ('30000000-0000-0000-0000-000000000022', '30000000-0000-0000-0000-000000000002', 'T-Shirts', 't-shirts', 'Organic cotton developer tees', 2)
+        ON CONFLICT (slug) DO NOTHING;
 
--- Seed subcategories under Software & Books
-INSERT INTO categories (id, parent_id, name, slug, description, display_order)
-VALUES
-('30000000-0000-0000-0000-000000000031', '30000000-0000-0000-0000-000000000003', 'eBooks & Guides', 'ebooks-guides', 'Digital guides in PDF, ePub and Mobi', 1),
-('30000000-0000-0000-0000-000000000032', '30000000-0000-0000-0000-000000000003', 'Software Licenses', 'software-licenses', 'Binary licenses and developer tools', 2)
-ON CONFLICT (slug) DO NOTHING;
+        -- Seed subcategories under Software & Books
+        INSERT INTO categories (id, parent_id, name, slug, description, display_order)
+        VALUES
+        ('30000000-0000-0000-0000-000000000031', '30000000-0000-0000-0000-000000000003', 'eBooks & Guides', 'ebooks-guides', 'Digital guides in PDF, ePub and Mobi', 1),
+        ('30000000-0000-0000-0000-000000000032', '30000000-0000-0000-0000-000000000003', 'Software Licenses', 'software-licenses', 'Binary licenses and developer tools', 2)
+        ON CONFLICT (slug) DO NOTHING;
+    END IF;
+END $$;
 
 -- 2. Store Settings Extensions (Logo, Phone, Hero Configuration)
 ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS logo_url TEXT NOT NULL DEFAULT '';

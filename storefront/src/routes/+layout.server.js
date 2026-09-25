@@ -1,3 +1,23 @@
+function buildMenuTree(flatItems) {
+  if (!Array.isArray(flatItems) || flatItems.length === 0) return [];
+  const map = new Map();
+  const roots = [];
+
+  flatItems.forEach(item => {
+    map.set(item.id, { ...item, children: [] });
+  });
+
+  flatItems.forEach(item => {
+    if (item.parent_id && map.has(item.parent_id)) {
+      map.get(item.parent_id).children.push(map.get(item.id));
+    } else {
+      roots.push(map.get(item.id));
+    }
+  });
+
+  return roots.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+}
+
 export async function load({ fetch }) {
   const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://backend:8000';
   let store = {};
@@ -19,7 +39,8 @@ export async function load({ fetch }) {
   try {
     const hRes = await fetch(`${backendUrl}/api/v1/menu?location=header`);
     if (hRes.ok) {
-      headerMenu = await hRes.json();
+      const rawHeader = await hRes.json();
+      headerMenu = buildMenuTree(rawHeader);
     }
   } catch (e) {
     console.error('Failed to load header menu:', e);
@@ -28,11 +49,21 @@ export async function load({ fetch }) {
   try {
     const fRes = await fetch(`${backendUrl}/api/v1/menu?location=footer`);
     if (fRes.ok) {
-      footerMenu = await fRes.json();
+      const rawFooter = await fRes.json();
+      footerMenu = buildMenuTree(rawFooter);
     }
   } catch (e) {
     console.error('Failed to load footer menu:', e);
   }
+
+  const defaultHeader = [
+    { id: '1', label: 'Catalog', url: '/' },
+    { id: '2', label: 'Hardware', url: '/?category=Hardware' },
+    { id: '3', label: 'Apparel', url: '/?category=Apparel' },
+    { id: '4', label: 'Digital & Books', url: '/?category=Software+%26+Books' },
+    { id: '5', label: 'Shipping Policy', url: '/policies/shipment-policy' },
+    { id: '6', label: 'Track Order', url: '/track' }
+  ];
 
   return {
     store: Object.keys(store).length > 0 ? store : {
@@ -43,14 +74,7 @@ export async function load({ fetch }) {
       debug_mode: true
     },
     paymentProviders,
-    headerMenu: headerMenu.length > 0 ? headerMenu : [
-      { id: '1', label: 'Catalog', url: '/' },
-      { id: '2', label: 'Hardware', url: '/?category=Hardware' },
-      { id: '3', label: 'Apparel', url: '/?category=Apparel' },
-      { id: '4', label: 'Digital & Books', url: '/?category=Software+%26+Books' },
-      { id: '5', label: 'Shipping Policy', url: '/policies/shipment-policy' },
-      { id: '6', label: 'Track Order', url: '/track' }
-    ],
+    headerMenu: headerMenu.length > 0 ? headerMenu : defaultHeader,
     footerMenu: footerMenu.length > 0 ? footerMenu : [
       { id: 'f1', label: 'Shipping Policy', url: '/policies/shipment-policy' },
       { id: 'f2', label: 'Terms & Conditions', url: '/policies/terms-and-conditions' },
@@ -58,14 +82,7 @@ export async function load({ fetch }) {
       { id: 'f4', label: 'Legal Notice', url: '/policies/legal-notice' },
       { id: 'f5', label: 'Contact Us', url: '/policies/contact-information' }
     ],
-    menuItems: headerMenu.length > 0 ? headerMenu : [
-      { id: '1', label: 'Catalog', url: '/' },
-      { id: '2', label: 'Hardware', url: '/?category=Hardware' },
-      { id: '3', label: 'Apparel', url: '/?category=Apparel' },
-      { id: '4', label: 'Digital & Books', url: '/?category=Software+%26+Books' },
-      { id: '5', label: 'Shipping Policy', url: '/policies/shipment-policy' },
-      { id: '6', label: 'Track Order', url: '/track' }
-    ]
+    menuItems: headerMenu.length > 0 ? headerMenu : defaultHeader
   };
 }
 

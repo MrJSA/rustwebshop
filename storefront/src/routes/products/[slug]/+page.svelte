@@ -125,6 +125,7 @@
 
   function formatInline(text) {
     return text
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-orange-400 underline hover:text-orange-300 font-semibold transition-colors">$1</a>')
       .replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold text-white">$1</strong>')
       .replace(/\*(.*?)\*/g, '<em class="italic text-slate-200">$1</em>')
       .replace(/`([^`]+)`/g, '<code class="px-1.5 py-0.5 rounded bg-slate-800 text-orange-400 font-mono text-xs">$1</code>');
@@ -303,9 +304,9 @@
             <button
               type="button"
               on:click={() => activeImageIndex = idx}
-              class="relative w-20 h-20 rounded-2xl overflow-hidden border-2 transition-all flex-shrink-0 bg-slate-900 {activeImageIndex === idx ? 'border-orange-500 ring-2 ring-orange-500/40 scale-105' : 'border-slate-800 hover:border-slate-700 opacity-70 hover:opacity-100'}"
+              class="relative w-20 h-20 rounded-xl overflow-hidden p-0.5 border-2 transition-all flex-shrink-0 bg-slate-900 {activeImageIndex === idx ? 'border-orange-500 shadow-lg shadow-orange-500/25' : 'border-slate-800 hover:border-slate-600 opacity-60 hover:opacity-100'}"
             >
-              <img src={imgUrl} alt={`Thumbnail ${idx + 1}`} class="w-full h-full object-cover" />
+              <img src={imgUrl} alt={`Thumbnail ${idx + 1}`} class="w-full h-full object-cover rounded-[8px]" />
             </button>
           {/each}
         </div>
@@ -351,8 +352,8 @@
           </div>
         {/if}
 
-        <!-- Variants Selection with Customizable Selector Label -->
-        {#if variants.length > 0}
+        <!-- Variants Selection with Customizable Selector Label (Only when product has multiple versions) -->
+        {#if product.has_multiple_variants && variants.length > 1}
           <div class="mt-6 space-y-3">
             <div class="flex justify-between items-center text-xs">
               <span class="font-bold text-slate-300 uppercase tracking-wider">

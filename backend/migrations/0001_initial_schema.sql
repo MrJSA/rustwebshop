@@ -181,41 +181,46 @@ VALUES
 ('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', '33333333-3333-3333-3333-333333333333', 'Global Airmail Tracked', 'standard', 0, 5000, 2499, '5-10 business days')
 ON CONFLICT DO NOTHING;
 
--- Initial Products (Physical & Digital)
-INSERT INTO products (id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active)
-VALUES
-('a1000000-0000-0000-0000-000000000001', 'Rust Mechanical Keyboard (Ferris Edition)', 'rust-mechanical-keyboard', 'High-end hot-swappable mechanical keyboard engineered with CNC aluminum chassis, customized Rust orange keycaps, and ultra-low latency response.', 'physical', 'Hardware', 'Keyboards', 14999, NULL, 'https://images.unsplash.com/photo-1587829741301-dc798b83add3?auto=format&fit=crop&w=800&q=80', true),
-('a2000000-0000-0000-0000-000000000002', 'Rustacean Heavyweight Organic Hoodie', 'rustacean-heavyweight-hoodie', 'Ultra-comfortable 450 GSM organic cotton hoodie with embroidered Ferris the Crab mascot and minimal Rust code sleeve accents.', 'physical', 'Apparel', 'Hoodies', 7999, NULL, 'https://images.unsplash.com/photo-1556905055-8f358a7a47b2?auto=format&fit=crop&w=800&q=80', true),
-('a3000000-0000-0000-0000-000000000003', 'SpeedDesk Extended Precision Mousepad', 'speeddesk-extended-mousepad', 'Micro-textured low-friction cloth pad with stitched anti-fray borders and water-resistant nano coating.', 'physical', 'Accessories', 'Desk Mats', 2999, NULL, 'https://images.unsplash.com/photo-1616440347437-b1c73416efc2?auto=format&fit=crop&w=800&q=80', true),
-('a4000000-0000-0000-0000-000000000004', 'Mastering High-Concurrency Rust Architecture', 'mastering-high-concurrency-rust-guide', 'Complete 400-page interactive eBook, architecture blueprints, and 12 production-ready Tokio & Axum microservices project templates.', 'digital', 'Software & Books', 'eBooks', 4999, 'https://cdn.rustwebshop.local/downloads/mastering-rust-concurrency-v2.pdf', 'https://images.unsplash.com/photo-1532012164546-f432f2e3edd4?auto=format&fit=crop&w=800&q=80', true)
-ON CONFLICT DO NOTHING;
+-- Initial Products (Physical & Digital) - only seeded if products table is completely empty
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM products) THEN
+        INSERT INTO products (id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active)
+        VALUES
+        ('a1000000-0000-0000-0000-000000000001', 'Rust Mechanical Keyboard (Ferris Edition)', 'rust-mechanical-keyboard', 'High-end hot-swappable mechanical keyboard engineered with CNC aluminum chassis, customized Rust orange keycaps, and ultra-low latency response.', 'physical', 'Hardware', 'Keyboards', 14999, NULL, 'https://images.unsplash.com/photo-1587829741301-dc798b83add3?auto=format&fit=crop&w=800&q=80', true),
+        ('a2000000-0000-0000-0000-000000000002', 'Rustacean Heavyweight Organic Hoodie', 'rustacean-heavyweight-hoodie', 'Ultra-comfortable 450 GSM organic cotton hoodie with embroidered Ferris the Crab mascot and minimal Rust code sleeve accents.', 'physical', 'Apparel', 'Hoodies', 7999, NULL, 'https://images.unsplash.com/photo-1556905055-8f358a7a47b2?auto=format&fit=crop&w=800&q=80', true),
+        ('a3000000-0000-0000-0000-000000000003', 'SpeedDesk Extended Precision Mousepad', 'speeddesk-extended-mousepad', 'Micro-textured low-friction cloth pad with stitched anti-fray borders and water-resistant nano coating.', 'physical', 'Accessories', 'Desk Mats', 2999, NULL, 'https://images.unsplash.com/photo-1616440347437-b1c73416efc2?auto=format&fit=crop&w=800&q=80', true),
+        ('a4000000-0000-0000-0000-000000000004', 'Mastering High-Concurrency Rust Architecture', 'mastering-high-concurrency-rust-guide', 'Complete 400-page interactive eBook, architecture blueprints, and 12 production-ready Tokio & Axum microservices project templates.', 'digital', 'Software & Books', 'eBooks', 4999, 'https://cdn.rustwebshop.local/downloads/mastering-rust-concurrency-v2.pdf', 'https://images.unsplash.com/photo-1532012164546-f432f2e3edd4?auto=format&fit=crop&w=800&q=80', true)
+        ON CONFLICT DO NOTHING;
 
--- Variants for Keyboard (Multiple switch types & chassis colors, individual SKUs & stock)
-INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold)
-VALUES
-('b1000000-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000001', 'KB-RUST-TACT-BLK', 'Space Black / Tactile Brown Switches', 14999, '{"color": "Space Black", "switch": "Tactile Brown", "layout": "ANSI 75%"}', 38, 5),
-('b1000000-0000-0000-0000-000000000002', 'a1000000-0000-0000-0000-000000000001', 'KB-RUST-LINR-BLK', 'Space Black / Linear Red Switches', 14999, '{"color": "Space Black", "switch": "Linear Red", "layout": "ANSI 75%"}', 4, 5), -- Low stock alert demo
-('b1000000-0000-0000-0000-000000000003', 'a1000000-0000-0000-0000-000000000001', 'KB-RUST-CLK-ORG', 'Ferris Orange / Clicky Blue Switches', 15999, '{"color": "Ferris Orange", "switch": "Clicky Blue", "layout": "ANSI 75%"}', 19, 5)
-ON CONFLICT DO NOTHING;
+        -- Variants for Keyboard
+        INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold)
+        VALUES
+        ('b1000000-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000001', 'KB-RUST-TACT-BLK', 'Space Black / Tactile Brown Switches', 14999, '{"color": "Space Black", "switch": "Tactile Brown", "layout": "ANSI 75%"}', 38, 5),
+        ('b1000000-0000-0000-0000-000000000002', 'a1000000-0000-0000-0000-000000000001', 'KB-RUST-LINR-BLK', 'Space Black / Linear Red Switches', 14999, '{"color": "Space Black", "switch": "Linear Red", "layout": "ANSI 75%"}', 4, 5),
+        ('b1000000-0000-0000-0000-000000000003', 'a1000000-0000-0000-0000-000000000001', 'KB-RUST-CLK-ORG', 'Ferris Orange / Clicky Blue Switches', 15999, '{"color": "Ferris Orange", "switch": "Clicky Blue", "layout": "ANSI 75%"}', 19, 5)
+        ON CONFLICT DO NOTHING;
 
--- Variants for Hoodie (Color & Size variants)
-INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold)
-VALUES
-('b2000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000002', 'HD-RUST-CHRC-M', 'Charcoal Heather / Medium', 7999, '{"color": "Charcoal Heather", "size": "M"}', 25, 5),
-('b2000000-0000-0000-0000-000000000002', 'a2000000-0000-0000-0000-000000000002', 'HD-RUST-CHRC-L', 'Charcoal Heather / Large', 7999, '{"color": "Charcoal Heather", "size": "L"}', 42, 5),
-('b2000000-0000-0000-0000-000000000003', 'a2000000-0000-0000-0000-000000000002', 'HD-RUST-CHRC-XL', 'Charcoal Heather / Extra Large', 7999, '{"color": "Charcoal Heather", "size": "XL"}', 15, 5),
-('b2000000-0000-0000-0000-000000000004', 'a2000000-0000-0000-0000-000000000002', 'HD-RUST-NVY-L', 'Deep Navy / Large', 7999, '{"color": "Deep Navy", "size": "L"}', 2, 5) -- Low stock demo
-ON CONFLICT DO NOTHING;
+        -- Variants for Hoodie
+        INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold)
+        VALUES
+        ('b2000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000002', 'HD-RUST-CHRC-M', 'Charcoal Heather / Medium', 7999, '{"color": "Charcoal Heather", "size": "M"}', 25, 5),
+        ('b2000000-0000-0000-0000-000000000002', 'a2000000-0000-0000-0000-000000000002', 'HD-RUST-CHRC-L', 'Charcoal Heather / Large', 7999, '{"color": "Charcoal Heather", "size": "L"}', 42, 5),
+        ('b2000000-0000-0000-0000-000000000003', 'a2000000-0000-0000-0000-000000000002', 'HD-RUST-CHRC-XL', 'Charcoal Heather / Extra Large', 7999, '{"color": "Charcoal Heather", "size": "XL"}', 15, 5),
+        ('b2000000-0000-0000-0000-000000000004', 'a2000000-0000-0000-0000-000000000002', 'HD-RUST-NVY-L', 'Deep Navy / Large', 7999, '{"color": "Deep Navy", "size": "L"}', 2, 5)
+        ON CONFLICT DO NOTHING;
 
--- Variants for Deskmat
-INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold)
-VALUES
-('b3000000-0000-0000-0000-000000000001', 'a3000000-0000-0000-0000-000000000003', 'MP-STEALTH-900', 'Stealth Dark 900x400mm', 2999, '{"color": "Stealth Dark", "size": "900x400mm"}', 85, 10),
-('b3000000-0000-0000-0000-000000000002', 'a3000000-0000-0000-0000-000000000003', 'MP-TOPOGRAPHY-900', 'Topography Edition 900x400mm', 3499, '{"color": "Topography White/Orange", "size": "900x400mm"}', 3, 10)
-ON CONFLICT DO NOTHING;
+        -- Variants for Deskmat
+        INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold)
+        VALUES
+        ('b3000000-0000-0000-0000-000000000001', 'a3000000-0000-0000-0000-000000000003', 'MP-STEALTH-900', 'Stealth Dark 900x400mm', 2999, '{"color": "Stealth Dark", "size": "900x400mm"}', 85, 10),
+        ('b3000000-0000-0000-0000-000000000002', 'a3000000-0000-0000-0000-000000000003', 'MP-TOPOGRAPHY-900', 'Topography Edition 900x400mm', 3499, '{"color": "Topography White/Orange", "size": "900x400mm"}', 3, 10)
+        ON CONFLICT DO NOTHING;
 
--- Variant for Digital Product (Single license variant)
-INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold)
-VALUES
-('b4000000-0000-0000-0000-000000000001', 'a4000000-0000-0000-0000-000000000004', 'DIG-RUST-ARCH-EBOOK', 'Standard Digital License (PDF + ePub + Code)', 4999, '{"format": "PDF / ePub / GitHub Repository Access"}', 999999, 10)
-ON CONFLICT DO NOTHING;
+        -- Variant for Digital Product
+        INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold)
+        VALUES
+        ('b4000000-0000-0000-0000-000000000001', 'a4000000-0000-0000-0000-000000000004', 'DIG-RUST-ARCH-EBOOK', 'Standard Digital License (PDF + ePub + Code)', 4999, '{"format": "PDF / ePub / GitHub Repository Access"}', 999999, 10)
+        ON CONFLICT DO NOTHING;
+    END IF;
+END $$;

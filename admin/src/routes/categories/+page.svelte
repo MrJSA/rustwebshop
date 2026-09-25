@@ -5,6 +5,7 @@
 
   export let data;
   let categories = data.categories || [];
+  let products = data.products || [];
   let isSaving = false;
   let successNotice = '';
 
@@ -209,6 +210,7 @@
           <CategoryTreeNode
             node={root}
             allCategories={categories}
+            products={products}
             depth={0}
             onAddChild={openCreateSub}
             onEdit={openEdit}

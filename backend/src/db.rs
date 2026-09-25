@@ -13,23 +13,72 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .connect(database_url)
         .await?;
 
-    info!("Database connection established. Running schema migrations...");
+    info!("Database connection established. Checking schema migrations...");
 
-    // Execute initial schema and seed directly to ensure tables are always ready
-    let migration_sql_1 = include_str!("../migrations/0001_initial_schema.sql");
-    sqlx::raw_sql(migration_sql_1).execute(&pool).await?;
+    // Create migrations tracking table if not exists
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE IF NOT EXISTS _schema_migrations (
+            version VARCHAR(255) PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        "#
+    )
+    .execute(&pool)
+    .await?;
 
-    let migration_sql_2 = include_str!("../migrations/0002_enhanced_features.sql");
-    sqlx::raw_sql(migration_sql_2).execute(&pool).await?;
+    // Check if store_settings already exists in DB (meaning previously initialized DB without tracking)
+    let has_existing_schema: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'store_settings')"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(false);
 
-    let migration_sql_3 = include_str!("../migrations/0003_extended_features.sql");
-    sqlx::raw_sql(migration_sql_3).execute(&pool).await?;
+    let migration_files: &[(&str, &str)] = &[
+        ("0001_initial_schema", include_str!("../migrations/0001_initial_schema.sql")),
+        ("0002_enhanced_features", include_str!("../migrations/0002_enhanced_features.sql")),
+        ("0003_extended_features", include_str!("../migrations/0003_extended_features.sql")),
+        ("0004_media_email_auth_extended", include_str!("../migrations/0004_media_email_auth_extended.sql")),
+        ("0005_cookie_gallery_seo_analytics", include_str!("../migrations/0005_cookie_gallery_seo_analytics.sql")),
+        ("0006_menu_dropdown_single_variant_slip", include_str!("../migrations/0006_menu_dropdown_single_variant_slip.sql")),
+        ("0007_tax_notice_and_migrations_table", include_str!("../migrations/0007_tax_notice_and_migrations_table.sql")),
+    ];
 
-    let migration_sql_4 = include_str!("../migrations/0004_media_email_auth_extended.sql");
-    sqlx::raw_sql(migration_sql_4).execute(&pool).await?;
+    // If schema already existed prior to migration tracking, mark initial migrations 0001..0006 as applied if not tracked
+    if has_existing_schema {
+        for (version, _) in &migration_files[0..6] {
+            let _ = sqlx::query(
+                "INSERT INTO _schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING"
+            )
+            .bind(version)
+            .execute(&pool)
+            .await;
+        }
+    }
 
-    let migration_sql_5 = include_str!("../migrations/0005_cookie_gallery_seo_analytics.sql");
-    sqlx::raw_sql(migration_sql_5).execute(&pool).await?;
+    // Apply any unapplied migrations in order
+    for (version, sql) in migration_files {
+        let is_applied: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM _schema_migrations WHERE version = $1)"
+        )
+        .bind(version)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(false);
+
+        if !is_applied {
+            info!("Applying migration {}...", version);
+            sqlx::raw_sql(sql).execute(&pool).await?;
+            sqlx::query("INSERT INTO _schema_migrations (version) VALUES ($1)")
+                .bind(version)
+                .execute(&pool)
+                .await?;
+            info!("Migration {} applied successfully!", version);
+        } else {
+            tracing::debug!("Migration {} already applied, skipping.", version);
+        }
+    }
 
     // Seed default admin user if none exists
     let admin_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_users")
@@ -49,7 +98,7 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, sqlx::Error> {
         }
     }
 
-    info!("Schema migrations successfully applied!");
+    info!("Schema migrations check complete!");
 
     Ok(pool)
 }

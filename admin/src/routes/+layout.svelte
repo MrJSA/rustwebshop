@@ -13,20 +13,65 @@
   export let data;
   $: settings = data.settings || {};
 
-  const navLinks = [
-    { href: '/', label: 'Overview & Analytics', icon: LayoutDashboard },
-    { href: '/analytics', label: 'Purchase Analysis', icon: TrendingUp },
-    { href: '/products', label: 'Products & BOM', icon: Package },
-    { href: '/categories', label: 'Categories Tree', icon: FolderTree },
-    { href: '/logistics', label: 'Logistics & Stock', icon: Warehouse },
-    { href: '/orders', label: 'Orders & Slips', icon: ShoppingCart },
-    { href: '/settings/media', label: 'Media Library', icon: Image },
-    { href: '/settings/email', label: 'Email & Auth Policies', icon: Mail },
-    { href: '/settings/shipping', label: 'Shipping Providers & Zones', icon: Truck },
-    { href: '/settings/pages', label: 'Policy CMS (Markdown)', icon: FileText },
-    { href: '/settings/menu', label: 'Navigation Menu', icon: Menu },
-    { href: '/settings/payments', label: 'Payment Providers', icon: CreditCard },
-    { href: '/settings/system', label: 'System & Shop Identity', icon: Sliders }
+  const navGroups = [
+    {
+      id: 'overview',
+      label: 'Overview & Analytics',
+      icon: LayoutDashboard,
+      href: '/',
+      match: (p) => p === '/' || p === '/analytics',
+      subItems: [
+        { href: '/', label: 'Executive Overview', tab: 'overview', match: (p, t) => (p === '/' && (!t || t === 'overview')) },
+        { href: '/?tab=analytics', label: 'Purchase Analysis', tab: 'analytics', match: (p, t) => p === '/analytics' || (p === '/' && t === 'analytics') }
+      ]
+    },
+    {
+      id: 'products',
+      label: 'Products',
+      icon: Package,
+      href: '/products',
+      match: (p) => p.startsWith('/products') || p.startsWith('/categories') || p.startsWith('/logistics'),
+      subItems: [
+        { href: '/products?tab=catalog', label: 'Products & BOM', tab: 'catalog', match: (p, t) => (p === '/products' && (!t || t === 'catalog')) },
+        { href: '/products?tab=categories', label: 'Categories Tree', tab: 'categories', match: (p, t) => p === '/categories' || (p === '/products' && t === 'categories') },
+        { href: '/products?tab=stock', label: 'Logistics & Stock', tab: 'stock', match: (p, t) => p === '/logistics' || (p === '/products' && t === 'stock') }
+      ]
+    },
+    {
+      id: 'orders',
+      label: 'Orders & Slips',
+      icon: ShoppingCart,
+      href: '/orders',
+      match: (p) => p.startsWith('/orders'),
+      subItems: []
+    },
+    {
+      id: 'storefront',
+      label: 'Storefront & Design',
+      icon: Sliders,
+      href: '/settings/system',
+      match: (p) => p === '/settings/system' || p === '/settings/menu' || p === '/settings/pages',
+      subItems: [
+        { href: '/settings/system?tab=hero', label: 'Hero & Carousels', tab: 'hero', match: (p, t) => (p === '/settings/system' && (!t || t === 'hero')) },
+        { href: '/settings/system?tab=menu', label: 'Navigation Menus', tab: 'menu', match: (p, t) => p === '/settings/menu' || (p === '/settings/system' && t === 'menu') },
+        { href: '/settings/system?tab=policies', label: 'Policy CMS (Markdown)', tab: 'policies', match: (p, t) => p === '/settings/pages' || (p === '/settings/system' && t === 'policies') },
+        { href: '/settings/system?tab=cookie', label: 'Cookie Consent', tab: 'cookie', match: (p, t) => (p === '/settings/system' && t === 'cookie') }
+      ]
+    },
+    {
+      id: 'settings',
+      label: 'Settings',
+      icon: ShieldCheck,
+      href: '/settings',
+      match: (p) => p === '/settings' || p === '/settings/payments' || p === '/settings/email' || p === '/settings/shipping' || p === '/settings/media',
+      subItems: [
+        { href: '/settings?tab=identity', label: 'Store Identity & Legal', tab: 'identity', match: (p, t) => (p === '/settings' && (!t || t === 'identity')) },
+        { href: '/settings?tab=payments', label: 'Payment Providers', tab: 'payments', match: (p, t) => p === '/settings/payments' || (p === '/settings' && t === 'payments') },
+        { href: '/settings?tab=email', label: 'Email & Auth Policies', tab: 'email', match: (p, t) => p === '/settings/email' || (p === '/settings' && t === 'email') },
+        { href: '/settings?tab=shipping', label: 'Shipping & Delivery', tab: 'shipping', match: (p, t) => p === '/settings/shipping' || (p === '/settings' && t === 'shipping') },
+        { href: '/settings?tab=media', label: 'Media Library', tab: 'media', match: (p, t) => p === '/settings/media' || (p === '/settings' && t === 'media') }
+      ]
+    }
   ];
 
   let adminUsername = 'admin';
@@ -164,17 +209,40 @@
         </div>
       </div>
 
-      <!-- Navigation links -->
-      <nav class="flex-1 px-3 py-6 space-y-1 overflow-y-auto">
-        {#each navLinks as item}
-          {@const active = $page.url.pathname === item.href}
-          <a
-            href={item.href}
-            class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold transition-all {active ? 'bg-orange-600 text-white shadow-md shadow-orange-600/30' : 'text-slate-400 hover:text-white hover:bg-slate-800/80'}"
-          >
-            <svelte:component this={item.icon} size={18} class={active ? 'text-white' : 'text-slate-400'} />
-            <span>{item.label}</span>
-          </a>
+      <!-- Navigation links with Sub-menus -->
+      <nav class="flex-1 px-3 py-6 space-y-2 overflow-y-auto">
+        {#each navGroups as group}
+          {@const isGroupActive = group.match($page.url.pathname)}
+          <div class="space-y-0.5">
+            <a
+              href={group.href}
+              class="flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all {isGroupActive ? 'bg-orange-600/15 text-orange-400 border border-orange-500/20' : 'text-slate-300 hover:text-white hover:bg-slate-800/80'}"
+            >
+              <div class="flex items-center gap-2.5">
+                <svelte:component this={group.icon} size={16} class={isGroupActive ? 'text-orange-400' : 'text-slate-400'} />
+                <span>{group.label}</span>
+              </div>
+              {#if group.subItems.length > 0}
+                <span class="text-[10px] text-slate-500 font-mono font-normal">{group.subItems.length}</span>
+              {/if}
+            </a>
+
+            <!-- Submenu Items -->
+            {#if group.subItems.length > 0}
+              <div class="pl-7 pr-1 py-1 space-y-0.5 border-l border-slate-800/80 ml-5 my-0.5">
+                {#each group.subItems as sub}
+                  {@const isSubActive = sub.match($page.url.pathname, $page.url.searchParams.get('tab'))}
+                  <a
+                    href={sub.href}
+                    class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all {isSubActive ? 'bg-orange-600 text-white font-bold shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}"
+                  >
+                    <span class="w-1.5 h-1.5 rounded-full {isSubActive ? 'bg-white' : 'bg-slate-600'}"></span>
+                    <span>{sub.label}</span>
+                  </a>
+                {/each}
+              </div>
+            {/if}
+          </div>
         {/each}
       </nav>
 

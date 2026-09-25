@@ -38,6 +38,7 @@ pub struct StoreSettings {
     pub cookie_accept_label: String,
     pub cookie_deny_label: String,
     pub cookie_preferences_label: String,
+    pub tax_notice: String,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -74,6 +75,7 @@ pub struct StoreSettingsDTO {
     pub cookie_accept_label: String,
     pub cookie_deny_label: String,
     pub cookie_preferences_label: String,
+    pub tax_notice: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +113,7 @@ pub struct UpdateStoreSettingsRequest {
     pub cookie_accept_label: Option<String>,
     pub cookie_deny_label: Option<String>,
     pub cookie_preferences_label: Option<String>,
+    pub tax_notice: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

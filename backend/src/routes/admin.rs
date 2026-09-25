@@ -40,6 +40,7 @@ pub fn admin_router() -> Router<PgPool> {
         // Product & Variant & Parts Management
         .route("/products", get(admin_list_products).post(admin_create_product))
         .route("/products/:id", put(admin_update_product).delete(admin_delete_product))
+        .route("/products/:id/toggle-featured", post(admin_toggle_featured_product))
         .route("/products/:id/variants", post(admin_add_variant))
         .route("/products/:id/parts", get(admin_get_product_parts).post(admin_add_product_part))
         .route("/products/:id/parts/:part_id", delete(admin_delete_product_part))
@@ -76,7 +77,7 @@ pub fn admin_router() -> Router<PgPool> {
         .route("/pages/:slug", get(admin_get_page).put(admin_update_page))
         // Navigation Menu
         .route("/menu", get(admin_list_menu).post(admin_create_menu_item))
-        .route("/menu/reorder", put(admin_reorder_menu))
+        .route("/menu/reorder", put(admin_reorder_menu).post(admin_reorder_menu))
         .route("/menu/:id", put(admin_update_menu_item).delete(admin_delete_menu_item))
         .route("/settings/system", get(admin_get_system_settings).put(admin_update_system_settings))
         .route("/settings/email/test", post(admin_test_email))
@@ -333,7 +334,7 @@ async fn get_sales_analytics(State(pool): State<PgPool>) -> Result<impl IntoResp
 // 3. Products Management
 async fn admin_list_products(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let products = sqlx::query_as::<_, Product>(
-        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images FROM products ORDER BY created_at DESC"
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products ORDER BY created_at DESC"
     )
     .fetch_all(&pool)
     .await
@@ -361,55 +362,71 @@ async fn admin_create_product(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let mut tx = pool.begin().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let slug = payload.slug.unwrap_or_else(|| {
-        payload
-            .title
+    let base_title = if payload.title.trim().is_empty() { "Untitled Product".to_string() } else { payload.title.trim().to_string() };
+
+    let slug = payload.slug.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
+        let clean = base_title
             .to_lowercase()
             .replace(|c: char| !c.is_alphanumeric() && c != ' ', "")
-            .replace(' ', "-")
+            .replace(' ', "-");
+        if clean.is_empty() {
+            format!("product-{}", &Uuid::new_v4().to_string()[..8])
+        } else {
+            clean
+        }
     });
 
     let product_id = Uuid::new_v4();
-    let short_desc = payload.short_description.unwrap_or_else(|| payload.description.clone());
-    let long_desc = payload.long_description.unwrap_or_else(|| payload.description.clone());
+    let description = payload.description.unwrap_or_default();
+    let short_desc = payload.short_description.unwrap_or_else(|| description.clone());
+    let long_desc = payload.long_description.unwrap_or_else(|| description.clone());
     let subtitle = payload.subtitle.unwrap_or_default();
     let var_label = payload.variant_selector_label.unwrap_or_else(|| "Choose Variant / Model:".to_string());
-    let images = payload.images.unwrap_or_else(|| json!([payload.image_url]));
+    let product_type = payload.product_type.unwrap_or_else(|| "physical".to_string());
+    let category = payload.category.unwrap_or_else(|| "Hardware".to_string());
+    let subcategory = payload.subcategory.unwrap_or_default();
+    let base_price = payload.base_price_cents.unwrap_or(4999);
+    let image_url = payload.image_url.unwrap_or_default();
+    let images = payload.images.unwrap_or_else(|| {
+        if !image_url.is_empty() {
+            json!([image_url])
+        } else {
+            json!([])
+        }
+    });
+    let has_multiple = payload.has_multiple_variants.unwrap_or(false);
 
     sqlx::query(
         r#"
-        INSERT INTO products (id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, subtitle, variant_selector_label, short_description, long_description, images)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11, $12, $13, $14, $15)
+        INSERT INTO products (id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11, $12, $13, $14, $15, $16)
         "#
     )
     .bind(product_id)
-    .bind(&payload.title)
+    .bind(&base_title)
     .bind(&slug)
-    .bind(&payload.description)
-    .bind(&payload.product_type)
-    .bind(&payload.category)
-    .bind(&payload.subcategory)
-    .bind(payload.base_price_cents)
+    .bind(&description)
+    .bind(&product_type)
+    .bind(&category)
+    .bind(&subcategory)
+    .bind(base_price)
     .bind(&payload.digital_download_url)
-    .bind(&payload.image_url)
+    .bind(&image_url)
     .bind(&subtitle)
     .bind(&var_label)
     .bind(&short_desc)
     .bind(&long_desc)
     .bind(&images)
+    .bind(has_multiple)
     .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to create product: {}", e)))?;
 
-    for v in payload.variants {
-        let v_images = v.images.unwrap_or_else(|| {
-            if let Some(ref u) = v.image_url {
-                json!([u])
-            } else {
-                json!([])
-            }
-        });
+    let variants_to_create = payload.variants.unwrap_or_default();
 
+    if variants_to_create.is_empty() {
+        // Automatically create single default variant for immediate out-of-the-box readiness
+        let default_sku = format!("PRD-{}-{}", &base_title.chars().filter(|c| c.is_alphanumeric()).take(4).collect::<String>().to_uppercase(), &product_id.to_string()[..4].to_uppercase());
         sqlx::query(
             r#"
             INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, images)
@@ -418,17 +435,47 @@ async fn admin_create_product(
         )
         .bind(Uuid::new_v4())
         .bind(product_id)
-        .bind(&v.sku)
-        .bind(&v.title)
-        .bind(v.price_override_cents)
-        .bind(&v.attributes)
-        .bind(v.stock_quantity)
-        .bind(v.low_stock_threshold.unwrap_or(5))
-        .bind(&v.image_url)
-        .bind(&v_images)
+        .bind(default_sku)
+        .bind("Standard Edition")
+        .bind(base_price)
+        .bind(json!({ "version": "Standard" }))
+        .bind(20)
+        .bind(5)
+        .bind(&image_url)
+        .bind(&images)
         .execute(&mut *tx)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to create variant: {}", e)))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to create default variant: {}", e)))?;
+    } else {
+        for v in variants_to_create {
+            let v_images = v.images.unwrap_or_else(|| {
+                if let Some(ref u) = v.image_url {
+                    json!([u])
+                } else {
+                    json!([])
+                }
+            });
+
+            sqlx::query(
+                r#"
+                INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, images)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                "#
+            )
+            .bind(Uuid::new_v4())
+            .bind(product_id)
+            .bind(&v.sku)
+            .bind(&v.title)
+            .bind(v.price_override_cents)
+            .bind(&v.attributes)
+            .bind(v.stock_quantity)
+            .bind(v.low_stock_threshold.unwrap_or(5))
+            .bind(&v.image_url)
+            .bind(&v_images)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to create variant: {}", e)))?;
+        }
     }
 
     tx.commit().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -458,8 +505,9 @@ async fn admin_update_product(
             short_description = COALESCE($11, short_description),
             long_description = COALESCE($12, long_description),
             images = COALESCE($13, images),
+            has_multiple_variants = COALESCE($14, has_multiple_variants),
             updated_at = NOW()
-        WHERE id = $14
+        WHERE id = $15
         "#
     )
     .bind(payload.title)
@@ -475,6 +523,7 @@ async fn admin_update_product(
     .bind(payload.short_description)
     .bind(payload.long_description)
     .bind(payload.images)
+    .bind(payload.has_multiple_variants)
     .bind(id)
     .execute(&pool)
     .await
@@ -487,13 +536,144 @@ async fn admin_delete_product(
     State(pool): State<PgPool>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let mut tx = pool.begin().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // 1. Detach from historical order items so existing customer orders and invoices never break
+    sqlx::query("UPDATE order_items SET product_id = NULL, variant_id = NULL WHERE product_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to detach order items: {}", e)))?;
+
+    // 2. Remove references in product_parts (parts can reference both product_id and variant_id)
+    sqlx::query("DELETE FROM product_parts WHERE product_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove product parts: {}", e)))?;
+
+    // 3. Remove customer wishlist & stock notifications
+    sqlx::query("DELETE FROM customer_wishlist WHERE product_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to clear wishlist items: {}", e)))?;
+
+    sqlx::query("DELETE FROM stock_notifications WHERE product_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to clear stock notifications: {}", e)))?;
+
+    // 4. Remove all SKU variants for this product
+    sqlx::query("DELETE FROM product_variants WHERE product_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove variants: {}", e)))?;
+
+    // 5. Delete product master record
     sqlx::query("DELETE FROM products WHERE id = $1")
         .bind(id)
-        .execute(&pool)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete product: {}", e)))?;
+
+    // 6. Remove from carousels_config featured list in store_settings if present
+    let id_str = id.to_string();
+    let settings = sqlx::query_as::<_, StoreSettings>(
+        "SELECT * FROM store_settings WHERE id = 1 FOR UPDATE"
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .unwrap_or(None);
+
+    if let Some(s) = settings {
+        let mut cfg = s.carousels_config;
+        let mut modified = false;
+        if let Some(sections) = cfg.get_mut("sections").and_then(|s| s.as_array_mut()) {
+            for sec in sections.iter_mut() {
+                if sec.get("id").and_then(|v| v.as_str()) == Some("featured") {
+                    if let Some(arr) = sec.get("product_ids").and_then(|v| v.as_array()) {
+                        let filtered: Vec<serde_json::Value> = arr
+                            .iter()
+                            .filter(|v| v.as_str() != Some(&id_str))
+                            .cloned()
+                            .collect();
+                        if filtered.len() != arr.len() {
+                            if let Some(obj) = sec.as_object_mut() {
+                                obj.insert("product_ids".to_string(), serde_json::Value::Array(filtered));
+                                modified = true;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        if modified {
+            let _ = sqlx::query("UPDATE store_settings SET carousels_config = $1, updated_at = NOW() WHERE id = 1")
+                .bind(&cfg)
+                .execute(&mut *tx)
+                .await;
+        }
+    }
+
+    tx.commit().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn admin_toggle_featured_product(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let mut tx = pool.begin().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let settings = sqlx::query_as::<_, StoreSettings>(
+        "SELECT * FROM store_settings WHERE id = 1 FOR UPDATE"
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut cfg = settings.carousels_config;
+    let id_str = id.to_string();
+    let mut is_now_featured = false;
+
+    if let Some(sections) = cfg.get_mut("sections").and_then(|s| s.as_array_mut()) {
+        for sec in sections.iter_mut() {
+            if sec.get("id").and_then(|v| v.as_str()) == Some("featured") {
+                let mut ids: Vec<String> = sec.get("product_ids")
+                    .and_then(|arr| arr.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+
+                if let Some(pos) = ids.iter().position(|x| x == &id_str) {
+                    ids.remove(pos);
+                    is_now_featured = false;
+                } else {
+                    ids.push(id_str.clone());
+                    is_now_featured = true;
+                }
+
+                if let Some(obj) = sec.as_object_mut() {
+                    obj.insert("product_ids".to_string(), json!(ids));
+                }
+                break;
+            }
+        }
+    }
+
+    sqlx::query("UPDATE store_settings SET carousels_config = $1, updated_at = NOW() WHERE id = 1")
+        .bind(&cfg)
+        .execute(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(json!({ "success": true })))
+    tx.commit().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "is_featured": is_now_featured, "product_id": id })))
 }
 
 async fn admin_add_variant(
@@ -725,7 +905,7 @@ async fn update_variant_stock(
 
                 if !emails.is_empty() {
                     let settings = sqlx::query_as::<_, StoreSettings>(
-                        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, updated_at FROM store_settings WHERE id = 1"
+                        "SELECT * FROM store_settings WHERE id = 1"
                     )
                     .fetch_one(&pool_clone)
                     .await;
@@ -869,7 +1049,7 @@ async fn admin_update_order_status(
                     .unwrap_or_else(|| "N/A".to_string());
 
                 let settings = sqlx::query_as::<_, StoreSettings>(
-                    "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, updated_at FROM store_settings WHERE id = 1"
+                    "SELECT * FROM store_settings WHERE id = 1"
                 )
                 .fetch_one(&pool_clone)
                 .await;
@@ -932,7 +1112,7 @@ async fn admin_get_order_invoice(
     .unwrap_or_default();
 
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, cookie_banner_enabled, cookie_banner_title, cookie_banner_description, cookie_banner_policy_url, cookie_accept_label, cookie_deny_label, cookie_preferences_label, updated_at FROM store_settings WHERE id = 1"
+        "SELECT * FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
@@ -969,7 +1149,7 @@ async fn admin_get_order_packing_slip(
     .unwrap_or_default();
 
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, cookie_banner_enabled, cookie_banner_title, cookie_banner_description, cookie_banner_policy_url, cookie_accept_label, cookie_deny_label, cookie_preferences_label, updated_at FROM store_settings WHERE id = 1"
+        "SELECT * FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
@@ -1126,7 +1306,7 @@ async fn admin_delete_shipping_rate(
 // 8. System Settings (Email, Verification, Branding, Carousels & Cookie Consent)
 async fn admin_get_system_settings(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, cookie_banner_enabled, cookie_banner_title, cookie_banner_description, cookie_banner_policy_url, cookie_accept_label, cookie_deny_label, cookie_preferences_label, updated_at FROM store_settings WHERE id = 1"
+        "SELECT * FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
@@ -1176,6 +1356,7 @@ async fn admin_update_system_settings(
             cookie_accept_label = COALESCE($31, cookie_accept_label),
             cookie_deny_label = COALESCE($32, cookie_deny_label),
             cookie_preferences_label = COALESCE($33, cookie_preferences_label),
+            tax_notice = COALESCE($34, tax_notice),
             updated_at = NOW()
         WHERE id = 1
         "#
@@ -1213,6 +1394,7 @@ async fn admin_update_system_settings(
     .bind(payload.cookie_accept_label)
     .bind(payload.cookie_deny_label)
     .bind(payload.cookie_preferences_label)
+    .bind(payload.tax_notice)
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1225,7 +1407,7 @@ async fn admin_test_email(
     Json(payload): Json<TestEmailRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, cookie_banner_enabled, cookie_banner_title, cookie_banner_description, cookie_banner_policy_url, cookie_accept_label, cookie_deny_label, cookie_preferences_label, updated_at FROM store_settings WHERE id = 1"
+        "SELECT * FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
@@ -1802,14 +1984,14 @@ async fn admin_list_menu(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let items = if let Some(loc) = filter.location {
         sqlx::query_as::<_, NavigationItem>(
-            "SELECT id, label, url, sort_order, is_active, location, created_at FROM navigation_items WHERE location = $1 ORDER BY sort_order ASC, created_at ASC"
+            "SELECT id, label, url, sort_order, is_active, location, parent_id, created_at FROM navigation_items WHERE location = $1 ORDER BY sort_order ASC, created_at ASC"
         )
         .bind(loc)
         .fetch_all(&pool)
         .await
     } else {
         sqlx::query_as::<_, NavigationItem>(
-            "SELECT id, label, url, sort_order, is_active, location, created_at FROM navigation_items ORDER BY sort_order ASC, created_at ASC"
+            "SELECT id, label, url, sort_order, is_active, location, parent_id, created_at FROM navigation_items ORDER BY sort_order ASC, created_at ASC"
         )
         .fetch_all(&pool)
         .await
@@ -1825,7 +2007,7 @@ async fn admin_create_menu_item(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO navigation_items (id, label, url, sort_order, is_active, location) VALUES ($1, $2, $3, $4, $5, $6)"
+        "INSERT INTO navigation_items (id, label, url, sort_order, is_active, location, parent_id) VALUES ($1, $2, $3, $4, $5, $6, $7)"
     )
     .bind(id)
     .bind(&payload.label)
@@ -1833,6 +2015,7 @@ async fn admin_create_menu_item(
     .bind(payload.sort_order.unwrap_or(0))
     .bind(payload.is_active.unwrap_or(true))
     .bind(payload.location.unwrap_or_else(|| "header".to_string()))
+    .bind(payload.parent_id)
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1853,8 +2036,9 @@ async fn admin_update_menu_item(
             url = COALESCE($2, url),
             sort_order = COALESCE($3, sort_order),
             is_active = COALESCE($4, is_active),
-            location = COALESCE($5, location)
-        WHERE id = $6
+            location = COALESCE($5, location),
+            parent_id = $6
+        WHERE id = $7
         "#
     )
     .bind(payload.label)
@@ -1862,6 +2046,7 @@ async fn admin_update_menu_item(
     .bind(payload.sort_order)
     .bind(payload.is_active)
     .bind(payload.location)
+    .bind(payload.parent_id)
     .bind(id)
     .execute(&pool)
     .await
@@ -1877,12 +2062,22 @@ async fn admin_reorder_menu(
     let mut tx = pool.begin().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     for item in payload.items {
-        sqlx::query("UPDATE navigation_items SET sort_order = $1 WHERE id = $2")
-            .bind(item.sort_order)
-            .bind(item.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some(pid) = item.parent_id {
+            sqlx::query("UPDATE navigation_items SET sort_order = $1, parent_id = $2 WHERE id = $3")
+                .bind(item.sort_order)
+                .bind(pid)
+                .bind(item.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        } else {
+            sqlx::query("UPDATE navigation_items SET sort_order = $1 WHERE id = $2")
+                .bind(item.sort_order)
+                .bind(item.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
     }
 
     tx.commit().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

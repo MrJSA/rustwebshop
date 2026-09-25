@@ -11,6 +11,7 @@ pub struct NavigationItem {
     pub sort_order: i32,
     pub is_active: bool,
     pub location: String, // 'header' or 'footer'
+    pub parent_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -21,6 +22,7 @@ pub struct CreateNavigationItemRequest {
     pub sort_order: Option<i32>,
     pub is_active: Option<bool>,
     pub location: Option<String>,
+    pub parent_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,12 +32,14 @@ pub struct UpdateNavigationItemRequest {
     pub sort_order: Option<i32>,
     pub is_active: Option<bool>,
     pub location: Option<String>,
+    pub parent_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ReorderMenuItem {
     pub id: Uuid,
     pub sort_order: i32,
+    pub parent_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -107,15 +107,43 @@
           </button>
         </form>
 
-        <!-- Bottom: Dynamic Customizable Navigation Menu (starts at exact same left line) -->
-        <nav class="flex items-center gap-1 sm:gap-3 overflow-x-auto text-xs font-medium scrollbar-none pt-0.5">
-          {#each headerMenu as item, index}
-            <a
-              href={item.url}
-              class="{index === 0 ? 'pr-2.5 py-1 -ml-0.5' : 'px-2.5 py-1'} rounded-lg text-slate-300 hover:text-white hover:bg-slate-900/80 transition-all flex items-center gap-1 whitespace-nowrap"
-            >
-              <span>{item.label}</span>
-            </a>
+        <!-- Bottom: Dynamic Customizable Navigation Menu with Dropdown Support -->
+        <nav class="flex items-center gap-1 sm:gap-2 text-xs font-medium pt-0.5 pl-3 sm:pl-4 overflow-visible">
+          {#each headerMenu as item}
+            {#if item.children && item.children.length > 0}
+              <!-- Dropdown Menu Item -->
+              <div class="relative group/nav py-0.5">
+                <a
+                  href={item.url || '#'}
+                  class="px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-900/80 transition-all flex items-center gap-1 whitespace-nowrap"
+                >
+                  <span>{item.label}</span>
+                  <ChevronDown size={12} class="text-slate-500 group-hover/nav:text-orange-400 group-hover/nav:rotate-180 transition-transform duration-200" />
+                </a>
+
+                <!-- Dropdown Sub-menu Floating Card -->
+                <div class="absolute left-0 top-full pt-1 hidden group-hover/nav:block z-50 animate-in fade-in slide-in-from-top-1 duration-150">
+                  <div class="w-56 rounded-xl bg-slate-900/95 backdrop-blur-md border border-slate-800 shadow-2xl p-1.5 space-y-0.5 ring-1 ring-white/5">
+                    {#each item.children as sub}
+                      <a
+                        href={sub.url}
+                        class="flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-orange-600/15 hover:text-orange-300 transition-all group/sub"
+                      >
+                        <span>{sub.label}</span>
+                        <ArrowRight size={11} class="text-orange-400 opacity-60 group-hover/sub:opacity-100 group-hover/sub:translate-x-0.5 transition-all" />
+                      </a>
+                    {/each}
+                  </div>
+                </div>
+              </div>
+            {:else}
+              <a
+                href={item.url}
+                class="px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-900/80 transition-all flex items-center gap-1 whitespace-nowrap"
+              >
+                <span>{item.label}</span>
+              </a>
+            {/if}
           {/each}
         </nav>
       </div>

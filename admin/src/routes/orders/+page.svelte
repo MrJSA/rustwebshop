@@ -185,6 +185,7 @@
   function getStatusBadgeClass(status) {
     switch (status) {
       case 'paid':
+      case 'completed':
       case 'delivered':
         return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
       case 'processing':
@@ -238,7 +239,7 @@
         <option value="pending">Pending</option>
         <option value="processing">Processing</option>
         <option value="shipped">Shipped</option>
-        <option value="delivered">Delivered</option>
+        <option value="completed">Completed</option>
         <option value="cancelled">Cancelled</option>
       </select>
     </div>
@@ -497,7 +498,7 @@
               <option value="pending">Pending</option>
               <option value="processing">Processing</option>
               <option value="shipped">Shipped (Requires Tracking #)</option>
-              <option value="delivered">Delivered</option>
+              <option value="completed">Completed</option>
               <option value="cancelled">Cancelled</option>
             </select>
           </div>

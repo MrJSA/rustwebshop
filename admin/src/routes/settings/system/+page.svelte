@@ -1,5 +1,9 @@
 <script>
   import MediaPickerModal from '$lib/components/MediaPickerModal.svelte';
+  import MenuManager from '$lib/components/MenuManager.svelte';
+  import PolicyManager from '$lib/components/PolicyManager.svelte';
+  import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
   import {
     Sliders,
     Save,
@@ -19,17 +23,28 @@
     Eye,
     FolderOpen,
     ArrowUp,
-    ArrowDown
+    ArrowDown,
+    Star,
+    X,
+    FileText,
+    Menu,
+    Cookie
   } from 'lucide-svelte';
 
   export let data;
   let settings = data.settings || {};
   let products = data.products || [];
 
+  $: activeTab = $page.url.searchParams.get('tab') || 'hero';
+  function setTab(tab) {
+    goto(`/settings/system?tab=${tab}`, { keepFocus: true, noScroll: true, replaceState: true });
+  }
+
   let isSaving = false;
   let successNotice = '';
   let showMediaPicker = false;
   let mediaPickerTarget = null; // callback or field identifier
+  let isFeaturedModalOpen = false;
 
   // Branding toggles
   let showStoreTitle = settings.show_store_title !== undefined ? Boolean(settings.show_store_title) : true;
@@ -63,12 +78,53 @@
     ? settings.carousels_config
     : {
         sections: [
-          { id: 'featured', title: 'Featured Gear', enabled: true, product_ids: [] },
-          { id: 'new', title: 'New Arrivals', enabled: true, days: 30 },
+          { id: 'featured', title: 'Featured Products', enabled: true, product_ids: [] },
+          { id: 'new', title: 'New Arrivals', enabled: true, days: 30, limit: 12 },
           { id: 'bestsellers', title: 'Best Sellers', enabled: true, limit: 10 },
-          { id: 'catalog', title: 'In Stock Hardware & Gear', enabled: true }
+          { id: 'catalog', title: 'All Products', enabled: true, limit: 24 }
         ]
       };
+
+  // Normalize titles & limits
+  if (carouselsConfig && Array.isArray(carouselsConfig.sections)) {
+    for (const sec of carouselsConfig.sections) {
+      if (sec.id === 'featured' && (sec.title === 'Featured Gear' || !sec.title)) {
+        sec.title = 'Featured Products';
+      }
+      if (sec.id === 'catalog' && (sec.title === 'In Stock Hardware & Gear' || sec.title === 'Public Key / Merchant Client ID' || !sec.title)) {
+        sec.title = 'All Products';
+      }
+      if (sec.id === 'new' && !sec.limit) {
+        sec.limit = 12;
+      }
+      if (sec.id === 'bestsellers' && !sec.limit) {
+        sec.limit = 10;
+      }
+      if (sec.id === 'catalog' && !sec.limit) {
+        sec.limit = 24;
+      }
+    }
+  }
+
+  function openFeaturedModal() {
+    isFeaturedModalOpen = true;
+  }
+
+  $: featuredSection = carouselsConfig?.sections?.find(s => s.id === 'featured');
+  $: featuredActiveIds = (featuredSection && Array.isArray(featuredSection.product_ids)) ? featuredSection.product_ids : [];
+
+  function toggleFeaturedProduct(productId) {
+    const featSec = carouselsConfig.sections.find(s => s.id === 'featured');
+    if (!featSec) return;
+    if (!Array.isArray(featSec.product_ids)) featSec.product_ids = [];
+    const idx = featSec.product_ids.indexOf(productId);
+    if (idx >= 0) {
+      featSec.product_ids.splice(idx, 1);
+    } else {
+      featSec.product_ids.push(productId);
+    }
+    carouselsConfig = { ...carouselsConfig };
+  }
 
   function openPicker(target) {
     mediaPickerTarget = target;
@@ -176,25 +232,44 @@
 </svelte:head>
 
 <div class="space-y-6 max-w-5xl mx-auto">
-  <!-- Header -->
-  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-    <div>
-      <h1 class="text-2xl font-black text-white tracking-tight flex items-center gap-2.5">
-        <Sliders size={24} class="text-orange-500" />
-        Shop Identity, Branding & Showcase Layouts
-      </h1>
-      <p class="text-xs text-slate-400 mt-1">
-        Configure shop branding, logo uploads, 8BitDo/8BitMods-style hero layouts, and 5-per-row product carousels.
-      </p>
-    </div>
+  <!-- Section Tabs Navigation -->
+  <div class="flex items-center gap-2 border-b border-slate-800 pb-3 overflow-x-auto">
+    <button
+      type="button"
+      on:click={() => setTab('hero')}
+      class="px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 {activeTab === 'hero' ? 'bg-orange-600 text-white shadow-lg shadow-orange-600/25 ring-1 ring-orange-500' : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'}"
+    >
+      <Layout size={15} />
+      <span>Hero & Carousels</span>
+    </button>
 
     <button
-      on:click={handleSaveSettings}
-      disabled={isSaving}
-      class="px-6 py-2.5 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold text-xs shadow-lg shadow-orange-600/30 transition-all flex items-center gap-2 disabled:opacity-50 self-start sm:self-auto"
+      type="button"
+      on:click={() => setTab('menu')}
+      class="px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 {activeTab === 'menu' ? 'bg-orange-600 text-white shadow-lg shadow-orange-600/25 ring-1 ring-orange-500' : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'}"
     >
-      <Save size={16} />
-      <span>{isSaving ? 'Saving Changes...' : 'Save All Settings'}</span>
+      <Menu size={15} />
+      <span>Navigation Menus</span>
+      <span class="text-[10px] px-2 py-0.5 rounded-full {activeTab === 'menu' ? 'bg-white/20 text-white' : 'bg-slate-800 text-slate-400'}">{(data.menuItems || []).length}</span>
+    </button>
+
+    <button
+      type="button"
+      on:click={() => setTab('policies')}
+      class="px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 {activeTab === 'policies' ? 'bg-orange-600 text-white shadow-lg shadow-orange-600/25 ring-1 ring-orange-500' : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'}"
+    >
+      <FileText size={15} />
+      <span>Policy CMS (Markdown)</span>
+      <span class="text-[10px] px-2 py-0.5 rounded-full {activeTab === 'policies' ? 'bg-white/20 text-white' : 'bg-slate-800 text-slate-400'}">{(data.pages || []).length}</span>
+    </button>
+
+    <button
+      type="button"
+      on:click={() => setTab('cookie')}
+      class="px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 {activeTab === 'cookie' ? 'bg-orange-600 text-white shadow-lg shadow-orange-600/25 ring-1 ring-orange-500' : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'}"
+    >
+      <Cookie size={15} />
+      <span>Cookie Consent</span>
     </button>
   </div>
 
@@ -205,7 +280,30 @@
     </div>
   {/if}
 
-  <form on:submit|preventDefault={handleSaveSettings} class="space-y-6">
+  {#if activeTab === 'hero'}
+    <!-- Header -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div>
+        <h1 class="text-2xl font-black text-white tracking-tight flex items-center gap-2.5">
+          <Sliders size={24} class="text-orange-500" />
+          Hero Showcase, 8Bit Buttons & Carousels
+        </h1>
+        <p class="text-xs text-slate-400 mt-1">
+          Configure shop branding, logo uploads, 8BitDo/8BitMods-style hero layouts, and product carousels with product limits.
+        </p>
+      </div>
+
+      <button
+        on:click={handleSaveSettings}
+        disabled={isSaving}
+        class="px-6 py-2.5 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold text-xs shadow-lg shadow-orange-600/30 transition-all flex items-center gap-2 disabled:opacity-50 self-start sm:self-auto"
+      >
+        <Save size={16} />
+        <span>{isSaving ? 'Saving Changes...' : 'Save Settings'}</span>
+      </button>
+    </div>
+
+    <form on:submit|preventDefault={handleSaveSettings} class="space-y-6">
     <!-- Card 1: Shop Logo & Header Identity -->
     <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-5">
       <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
@@ -520,25 +618,53 @@
                 </button>
               </div>
 
-              <div>
+              <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2">
-                  <span class="font-bold text-white text-sm">{sec.title}</span>
+                  <input
+                    type="text"
+                    bind:value={sec.title}
+                    class="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-white text-xs font-bold focus:outline-none focus:border-orange-500 w-48 sm:w-56"
+                  />
                   <span class="px-2 py-0.5 rounded bg-slate-900 font-mono text-[10px] text-orange-400">ID: {sec.id}</span>
                 </div>
-                {#if sec.id === 'new'}
-                  <div class="mt-1 flex items-center gap-2 text-slate-400">
-                    <span>Products added within last</span>
-                    <input type="number" bind:value={sec.days} class="w-16 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-white font-mono" />
-                    <span>days</span>
+                {#if sec.id === 'featured'}
+                  <div class="mt-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      on:click={openFeaturedModal}
+                      class="px-3 py-1.5 rounded-lg bg-orange-600/15 hover:bg-orange-600/25 text-orange-400 border border-orange-500/20 text-xs font-bold flex items-center gap-1.5 transition-colors"
+                    >
+                      <Star size={13} class="fill-current" />
+                      <span>Choose Featured Products ({(sec.product_ids || []).length} Selected)</span>
+                    </button>
+                    <span class="text-[11px] text-slate-400">Click to select products for this carousel</span>
+                  </div>
+                {:else if sec.id === 'new'}
+                  <div class="mt-2 flex flex-wrap items-center gap-3 text-slate-400 text-xs">
+                    <div class="flex items-center gap-1.5">
+                      <span>Products added within last</span>
+                      <input type="number" bind:value={sec.days} min="1" max="365" class="w-16 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:border-orange-500" />
+                      <span>days</span>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                      <span>&bull; Max products shown:</span>
+                      <input type="number" bind:value={sec.limit} min="1" max="100" class="w-16 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:border-orange-500" />
+                    </div>
                   </div>
                 {:else if sec.id === 'bestsellers'}
-                  <div class="mt-1 flex items-center gap-2 text-slate-400">
+                  <div class="mt-2 flex items-center gap-2 text-slate-400 text-xs">
                     <span>Limit to top</span>
-                    <input type="number" bind:value={sec.limit} class="w-16 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-white font-mono" />
+                    <input type="number" bind:value={sec.limit} min="1" max="100" class="w-16 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:border-orange-500" />
                     <span>best-selling products</span>
                   </div>
                 {:else if sec.id === 'catalog'}
-                  <p class="text-[11px] text-slate-400 mt-1">Automatically shows all in-stock products.</p>
+                  <div class="mt-2 flex flex-wrap items-center gap-3 text-slate-400 text-xs">
+                    <span class="text-[11px]">Shows all catalog in-stock products.</span>
+                    <div class="flex items-center gap-1.5">
+                      <span>&bull; Max products shown:</span>
+                      <input type="number" bind:value={sec.limit} min="1" max="100" placeholder="24" class="w-16 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:border-orange-500" />
+                    </div>
+                  </div>
                 {/if}
               </div>
             </div>
@@ -554,108 +680,133 @@
       </div>
     </div>
 
-    <!-- EU-Conform Cookie Consent Banner Configuration Card -->
-    <div class="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl space-y-6">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-4">
-        <div>
-          <h2 class="text-base font-bold text-white flex items-center gap-2">
-            <span class="text-xl">🍪</span>
-            <span>EU-Conform Cookie Consent Banner & GDPR Settings</span>
-          </h2>
-          <p class="text-xs text-slate-400 mt-0.5">
-            Configure the customer storefront cookie banner, consent categories (Necessary, Analytics, Marketing), and privacy policy references.
-          </p>
-        </div>
-
-        <label class="flex items-center gap-2.5 cursor-pointer bg-slate-950 px-4 py-2 rounded-xl border border-slate-800 self-start sm:self-auto">
-          <input
-            type="checkbox"
-            bind:checked={cookieBannerEnabled}
-            class="accent-orange-500 w-4 h-4 rounded"
-          />
-          <span class="text-xs font-bold {cookieBannerEnabled ? 'text-emerald-400' : 'text-slate-400'}">
-            {cookieBannerEnabled ? 'Banner Enabled' : 'Banner Disabled'}
-          </span>
-        </label>
-      </div>
-
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-        <div>
-          <label class="block text-slate-300 font-semibold mb-1">Banner Title</label>
-          <input
-            type="text"
-            bind:value={cookieBannerTitle}
-            placeholder="e.g. We respect your privacy"
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
-          />
-        </div>
-
-        <div>
-          <label class="block text-slate-300 font-semibold mb-1">Cookie Policy Link URL</label>
-          <input
-            type="text"
-            bind:value={cookiePolicyUrl}
-            placeholder="/policies/cookie-policy"
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-          />
-        </div>
-
-        <div class="sm:col-span-2">
-          <label class="block text-slate-300 font-semibold mb-1">Banner Description Text</label>
-          <textarea
-            bind:value={cookieBannerDescription}
-            rows="2"
-            placeholder="Explain to visitors how cookies and local storage are used for necessary operation, analytics, and marketing..."
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white leading-relaxed focus:outline-none focus:border-orange-500"
-          ></textarea>
-        </div>
-
-        <div class="sm:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-800/80">
-          <div>
-            <label class="block text-slate-300 font-semibold mb-1">Accept All Button Label</label>
-            <input
-              type="text"
-              bind:value={cookieBannerAcceptText}
-              placeholder="Accept All"
-              class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
-            />
-          </div>
-
-          <div>
-            <label class="block text-slate-300 font-semibold mb-1">Decline Optional Button Label</label>
-            <input
-              type="text"
-              bind:value={cookieBannerDeclineText}
-              placeholder="Decline Optional"
-              class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
-            />
-          </div>
-
-          <div>
-            <label class="block text-slate-300 font-semibold mb-1">Preferences Modal Button Label</label>
-            <input
-              type="text"
-              bind:value={cookieBannerPreferencesText}
-              placeholder="Cookie Preferences"
-              class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
-            />
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Submit Action -->
-    <div class="flex justify-end">
+    <!-- Submit Action for Hero & Carousels -->
+    <div class="flex justify-end pt-2">
       <button
         type="submit"
         disabled={isSaving}
         class="px-8 py-3 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-xs shadow-lg shadow-orange-600/30 transition-all flex items-center gap-2 disabled:opacity-50"
       >
         <Save size={16} />
-        <span>{isSaving ? 'Updating Settings...' : 'Save All Settings'}</span>
+        <span>{isSaving ? 'Updating Settings...' : 'Save Showcase Settings'}</span>
       </button>
     </div>
   </form>
+  {:else if activeTab === 'menu'}
+    <MenuManager
+      menuItems={data.menuItems || []}
+      categories={data.categories || []}
+      pages={data.pages || []}
+    />
+  {:else if activeTab === 'policies'}
+    <PolicyManager
+      pages={data.pages || []}
+    />
+  {:else if activeTab === 'cookie'}
+    <form on:submit|preventDefault={handleSaveSettings} class="space-y-6">
+      <!-- EU-Conform Cookie Consent Banner Configuration Card -->
+      <div class="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl space-y-6">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-4">
+          <div>
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="text-xl">🍪</span>
+              <span>EU-Conform Cookie Consent Banner & GDPR Settings</span>
+            </h2>
+            <p class="text-xs text-slate-400 mt-0.5">
+              Configure the customer storefront cookie banner, consent categories (Necessary, Analytics, Marketing), and privacy policy references.
+            </p>
+          </div>
+
+          <label class="flex items-center gap-2.5 cursor-pointer bg-slate-950 px-4 py-2 rounded-xl border border-slate-800 self-start sm:self-auto">
+            <input
+              type="checkbox"
+              bind:checked={cookieBannerEnabled}
+              class="accent-orange-500 w-4 h-4 rounded"
+            />
+            <span class="text-xs font-bold {cookieBannerEnabled ? 'text-emerald-400' : 'text-slate-400'}">
+              {cookieBannerEnabled ? 'Banner Enabled' : 'Banner Disabled'}
+            </span>
+          </label>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Banner Title</label>
+            <input
+              type="text"
+              bind:value={cookieBannerTitle}
+              placeholder="e.g. We respect your privacy"
+              class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+            />
+          </div>
+
+          <div>
+            <label class="block text-slate-300 font-semibold mb-1">Cookie Policy Link URL</label>
+            <input
+              type="text"
+              bind:value={cookiePolicyUrl}
+              placeholder="/policies/cookie-policy"
+              class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+            />
+          </div>
+
+          <div class="sm:col-span-2">
+            <label class="block text-slate-300 font-semibold mb-1">Banner Description Text</label>
+            <textarea
+              bind:value={cookieBannerDescription}
+              rows="2"
+              placeholder="Explain to visitors how cookies and local storage are used for necessary operation, analytics, and marketing..."
+              class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white leading-relaxed focus:outline-none focus:border-orange-500"
+            ></textarea>
+          </div>
+
+          <div class="sm:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-800/80">
+            <div>
+              <label class="block text-slate-300 font-semibold mb-1">Accept All Button Label</label>
+              <input
+                type="text"
+                bind:value={cookieBannerAcceptText}
+                placeholder="Accept All"
+                class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+              />
+            </div>
+
+            <div>
+              <label class="block text-slate-300 font-semibold mb-1">Decline Optional Button Label</label>
+              <input
+                type="text"
+                bind:value={cookieBannerDeclineText}
+                placeholder="Decline Optional"
+                class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+              />
+            </div>
+
+            <div>
+              <label class="block text-slate-300 font-semibold mb-1">Preferences Modal Button Label</label>
+              <input
+                type="text"
+                bind:value={cookieBannerPreferencesText}
+                placeholder="Cookie Preferences"
+                class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Submit Action -->
+      <div class="flex justify-end">
+        <button
+          type="submit"
+          disabled={isSaving}
+          class="px-8 py-3 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-xs shadow-lg shadow-orange-600/30 transition-all flex items-center gap-2 disabled:opacity-50"
+        >
+          <Save size={16} />
+          <span>{isSaving ? 'Updating Settings...' : 'Save Cookie Settings'}</span>
+        </button>
+      </div>
+    </form>
+  {/if}
 </div>
 
 <!-- Reusable Media Picker Modal -->
@@ -664,3 +815,76 @@
   onSelect={handleMediaSelected}
   onClose={() => showMediaPicker = false}
 />
+
+<!-- Featured Products Selection Modal -->
+{#if isFeaturedModalOpen}
+  <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
+    <div class="w-full max-w-2xl max-h-[85vh] rounded-3xl bg-slate-900 border border-slate-800 p-6 shadow-2xl flex flex-col space-y-4">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-800 flex-shrink-0">
+        <div class="flex items-center gap-2">
+          <Star size={18} class="text-amber-400 fill-amber-400" />
+          <h3 class="text-base font-bold text-white">Select Featured Products Carousel Items</h3>
+        </div>
+        <button
+          type="button"
+          on:click={() => isFeaturedModalOpen = false}
+          class="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+        >
+          <X size={16} />
+        </button>
+      </div>
+
+      <p class="text-xs text-slate-400 flex-shrink-0">
+        Check the products you want displayed in the "Featured Products" storefront carousel:
+      </p>
+
+      <div class="overflow-y-auto space-y-2 flex-1 pr-1">
+        {#each products as prod}
+          {@const isChecked = featuredActiveIds.includes(prod.id)}
+          <label class="p-3 rounded-2xl border transition-all cursor-pointer flex items-center justify-between {isChecked ? 'bg-amber-500/10 border-amber-500/30' : 'bg-slate-950/60 border-slate-800/80 hover:bg-slate-800/30'}">
+            <div class="flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={isChecked}
+                on:change={() => toggleFeaturedProduct(prod.id)}
+                class="accent-orange-500 w-4 h-4 rounded"
+              />
+              {#if prod.image_url}
+                <img src={prod.image_url} alt="" class="w-10 h-10 rounded-lg object-cover bg-slate-900 border border-slate-800" />
+              {:else}
+                <div class="w-10 h-10 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center text-sm">📦</div>
+              {/if}
+              <div>
+                <div class="font-bold text-white text-xs">{prod.title}</div>
+                <div class="text-[11px] text-slate-400">{prod.category} &rsaquo; {prod.subcategory || 'General'}</div>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <span class="font-mono text-xs font-bold text-white">{(prod.base_price_cents / 100).toFixed(2)} €</span>
+              {#if isChecked}
+                <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
+                  <Star size={10} class="fill-current" />
+                  <span>Featured</span>
+                </span>
+              {/if}
+            </div>
+          </label>
+        {/each}
+      </div>
+
+      <div class="pt-3 border-t border-slate-800 flex justify-between items-center flex-shrink-0">
+        <span class="text-xs text-slate-400 font-mono">
+          {featuredActiveIds.length} of {products.length} products selected
+        </span>
+        <button
+          type="button"
+          on:click={() => isFeaturedModalOpen = false}
+          class="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold text-xs shadow-md shadow-orange-600/30"
+        >
+          Done
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}

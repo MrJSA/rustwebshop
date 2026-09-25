@@ -24,6 +24,7 @@ pub struct Product {
     pub short_description: String,
     pub long_description: String,
     pub images: JsonValue,
+    pub has_multiple_variants: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -53,19 +54,20 @@ pub struct ProductWithVariants {
 pub struct CreateProductRequest {
     pub title: String,
     pub slug: Option<String>,
-    pub description: String,
-    pub product_type: String,
-    pub category: String,
-    pub subcategory: String,
-    pub base_price_cents: i32,
+    pub description: Option<String>,
+    pub product_type: Option<String>,
+    pub category: Option<String>,
+    pub subcategory: Option<String>,
+    pub base_price_cents: Option<i32>,
     pub digital_download_url: Option<String>,
-    pub image_url: String,
+    pub image_url: Option<String>,
     pub subtitle: Option<String>,
     pub variant_selector_label: Option<String>,
     pub short_description: Option<String>,
     pub long_description: Option<String>,
     pub images: Option<JsonValue>,
-    pub variants: Vec<CreateVariantRequest>,
+    pub has_multiple_variants: Option<bool>,
+    pub variants: Option<Vec<CreateVariantRequest>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +85,7 @@ pub struct UpdateProductRequest {
     pub short_description: Option<String>,
     pub long_description: Option<String>,
     pub images: Option<JsonValue>,
+    pub has_multiple_variants: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

@@ -8,107 +8,340 @@ impl DocumentGenerator {
         items: &[OrderItem],
         settings: &StoreSettings,
     ) -> String {
-        let shipping_addr = &order.shipping_address;
         let billing_addr = &order.billing_address;
+
+        let customer_name = billing_addr
+            .get("full_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&order.customer_name);
+
+        let street = billing_addr
+            .get("street_address")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let postal_code = billing_addr
+            .get("postal_code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let city = billing_addr
+            .get("city")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let country = billing_addr
+            .get("country_code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Germany");
+
+        let customer_email = &order.customer_email;
+
+        let customer_phone = billing_addr
+            .get("phone")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Format company address lines
+        let addr_lines = settings
+            .company_address
+            .split(',')
+            .map(|s| format!("<div>{}</div>", s.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let items_rows = items
             .iter()
             .map(|item| {
+                let variant_display = if !item.variant_title.is_empty() && item.variant_title != "Standard" && item.variant_title != "Default" {
+                    format!(r#"<div style="font-size: 11px; color: #475569; margin-top: 2px;">Variant: {}</div>"#, item.variant_title)
+                } else {
+                    String::new()
+                };
+
+                let license_tag = if item.is_digital {
+                    r#"<div style="font-size: 11px; color: #0284c7; margin-top: 2px;">[Digital Download License]</div>"#
+                } else {
+                    ""
+                };
+
+                let formatted_price = format!("{:.2} {}", (item.total_price_cents as f64) / 100.0, settings.currency_symbol).replace('.', ",");
+
                 format!(
-                    r#"<tr>
-                        <td style="padding: 12px; border-bottom: 1px solid #e2e8f0;">
-                            <strong>{}</strong><br/>
-                            <span style="color: #64748b; font-size: 13px;">{} | SKU: <code>{}</code></span>
+                    r#"<tr style="border-bottom: 1px solid #e2e8f0;">
+                        <td style="padding: 14px 10px 14px 0; vertical-align: top;">
+                            <div style="font-size: 13px; font-weight: 600; color: #000;">{}</div>
+                            <div style="font-size: 11px; color: #475569; margin-top: 4px;"><strong>SKU:</strong> {}</div>
+                            {}
                             {}
                         </td>
-                        <td style="padding: 12px; border-bottom: 1px solid #e2e8f0; text-align: center;">{}</td>
-                        <td style="padding: 12px; border-bottom: 1px solid #e2e8f0; text-align: right;">{:.2} {}</td>
-                        <td style="padding: 12px; border-bottom: 1px solid #e2e8f0; text-align: right; font-weight: bold;">{:.2} {}</td>
+                        <td style="padding: 14px 10px; vertical-align: top; text-align: center; font-size: 13px; color: #000;">
+                            {}
+                        </td>
+                        <td style="padding: 14px 0 14px 10px; vertical-align: top; text-align: right; font-size: 13px; font-weight: 500; color: #000; white-space: nowrap;">
+                            {}
+                        </td>
                     </tr>"#,
                     item.product_title,
-                    item.variant_title,
                     item.sku,
-                    if item.is_digital { "<br/><span style='color: #0284c7; font-size: 11px;'>[Digital License]</span>" } else { "" },
+                    variant_display,
+                    license_tag,
                     item.quantity,
-                    (item.unit_price_cents as f64) / 100.0,
-                    settings.currency_symbol,
-                    (item.total_price_cents as f64) / 100.0,
-                    settings.currency_symbol,
+                    formatted_price
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
 
+        let subtotal_str = format!("{:.2} {}", (order.subtotal_cents as f64) / 100.0, settings.currency_symbol).replace('.', ",");
+        let shipping_str = format!("{:.2} {}", (order.shipping_cost_cents as f64) / 100.0, settings.currency_symbol).replace('.', ",");
+        let total_str = format!("{:.2} {} {}", (order.total_cents as f64) / 100.0, settings.currency_symbol, settings.currency).replace('.', ",");
+
+        let logo_html = if !settings.logo_url.is_empty() {
+            format!(
+                r#"<img src="{}" alt="{}" style="max-height: 85px; max-width: 220px; object-fit: contain;" />"#,
+                settings.logo_url, settings.store_name
+            )
+        } else {
+            format!(
+                r#"<div style="font-size: 24px; font-weight: 900; color: #000; letter-spacing: -0.5px;">{}</div>"#,
+                settings.store_name
+            )
+        };
+
+        let payment_lower = order.payment_provider.to_lowercase();
+        let payment_provider_display = match payment_lower.as_str() {
+            "stripe" => "Credit Card / Stripe",
+            "paypal" => "PayPal",
+            "apple_pay" => "Apple Pay",
+            "google_pay" => "Google Pay",
+            "amazon_pay" => "Amazon Pay",
+            other => other,
+        };
+
         format!(
             r#"<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>Tax Invoice - {}</title>
+    <title>Invoice {}</title>
     <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; margin: 0; padding: 40px; background: #fff; }}
-        .header {{ display: flex; justify-content: space-between; border-bottom: 2px solid #0f172a; padding-bottom: 24px; margin-bottom: 30px; }}
-        .company-name {{ font-size: 26px; font-weight: 800; color: #0f172a; letter-spacing: -0.5px; }}
-        .badge {{ display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; text-transform: uppercase; background: #dcfce7; color: #15803d; }}
-        .meta-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin-bottom: 30px; }}
-        .addr-card {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; font-size: 14px; line-height: 1.6; }}
-        table {{ width: 100%; border-collapse: collapse; margin-bottom: 30px; font-size: 14px; }}
-        th {{ background: #f1f5f9; padding: 12px; text-align: left; font-weight: 700; color: #475569; border-bottom: 2px solid #cbd5e1; }}
-        .totals-table {{ width: 340px; margin-left: auto; margin-bottom: 40px; font-size: 14px; }}
-        .totals-table td {{ padding: 8px 12px; }}
-        .grand-total {{ font-size: 18px; font-weight: 800; border-top: 2px solid #0f172a; color: #0f172a; }}
-        .footer {{ font-size: 12px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 20px; text-align: center; }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: #111827;
+            background: #fff;
+            margin: 0;
+            padding: 40px 50px;
+            font-size: 13px;
+            line-height: 1.5;
+        }}
+        .no-print {{
+            text-align: right;
+            margin-bottom: 25px;
+        }}
+        .print-btn {{
+            background: #000;
+            color: #fff;
+            border: none;
+            padding: 10px 22px;
+            font-size: 13px;
+            font-weight: 700;
+            border-radius: 6px;
+            cursor: pointer;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+        }}
+        .top-row {{
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 45px;
+        }}
+        .company-info {{
+            text-align: right;
+            font-size: 12px;
+            color: #1f2937;
+            line-height: 1.45;
+        }}
+        .company-name {{
+            font-weight: 700;
+            font-size: 14px;
+            color: #000;
+            margin-bottom: 2px;
+        }}
+        .tax-notice {{
+            font-size: 11px;
+            color: #374151;
+            margin-top: 6px;
+            max-width: 320px;
+            line-height: 1.35;
+        }}
+        .meta-row {{
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 40px;
+        }}
+        .doc-title {{
+            font-size: 22px;
+            font-weight: 800;
+            letter-spacing: -0.3px;
+            color: #000;
+            margin-bottom: 15px;
+        }}
+        .customer-block {{
+            font-size: 13px;
+            color: #1f2937;
+            line-height: 1.45;
+        }}
+        .order-meta {{
+            text-align: right;
+            font-size: 13px;
+            color: #1f2937;
+            line-height: 1.6;
+        }}
+        .order-meta-table {{
+            margin-left: auto;
+            border-collapse: collapse;
+        }}
+        .order-meta-table td {{
+            padding: 2px 0;
+        }}
+        .order-meta-table td.label {{
+            color: #4b5563;
+            padding-right: 18px;
+            text-align: left;
+        }}
+        .order-meta-table td.val {{
+            font-weight: 600;
+            color: #000;
+            text-align: left;
+        }}
+        table.items-table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 25px;
+        }}
+        table.items-table th {{
+            background: #000;
+            color: #fff;
+            padding: 10px 10px;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.2px;
+        }}
+        table.items-table th:first-child {{
+            text-align: left;
+            padding-left: 12px;
+        }}
+        table.items-table th:nth-child(2) {{
+            text-align: center;
+            width: 15%;
+        }}
+        table.items-table th:last-child {{
+            text-align: right;
+            padding-right: 12px;
+            width: 20%;
+        }}
+        .totals-section {{
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 10px;
+        }}
+        .totals-table {{
+            width: 320px;
+            border-collapse: collapse;
+            font-size: 13px;
+        }}
+        .totals-table td {{
+            padding: 6px 0;
+        }}
+        .totals-table td.label {{
+            color: #000;
+            font-weight: 700;
+        }}
+        .totals-table td.val {{
+            text-align: right;
+            color: #000;
+            font-weight: 500;
+        }}
+        .totals-table tr.total-row {{
+            border-top: 2px solid #000;
+            border-bottom: 2px solid #000;
+        }}
+        .totals-table tr.total-row td {{
+            padding: 10px 0;
+            font-size: 14px;
+            font-weight: 800;
+        }}
         @media print {{
-            body {{ padding: 0; }}
-            .no-print {{ display: none; }}
+            body {{
+                padding: 10px 20px;
+            }}
+            .no-print {{
+                display: none;
+            }}
         }}
     </style>
 </head>
 <body>
-    <div class="no-print" style="margin-bottom: 20px; text-align: right;">
-        <button onclick="window.print()" style="background: #0f172a; color: #fff; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer; font-weight: 600;">Print / Save as PDF</button>
+    <div class="no-print">
+        <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
     </div>
 
-    <div class="header">
+    <!-- Top Row: Logo (Left) & Store Info (Right) -->
+    <div class="top-row">
         <div>
+            {}
+        </div>
+        <div class="company-info">
             <div class="company-name">{}</div>
-            <div style="color: #64748b; font-size: 13px; margin-top: 4px;">{}</div>
-            <div style="color: #64748b; font-size: 13px;">VAT ID: {} | Email: {}</div>
-        </div>
-        <div style="text-align: right;">
-            <h1 style="margin: 0; font-size: 24px; color: #0f172a;">TAX INVOICE</h1>
-            <div style="font-size: 14px; font-weight: 600; margin-top: 4px;">Order: {}</div>
-            <div style="font-size: 13px; color: #64748b;">Date: {}</div>
-            <div style="margin-top: 8px;"><span class="badge">PAID</span></div>
+            {}
+            {}
+            {}
+            {}
+            <div class="tax-notice">Value added tax is not collected, as small businesses according to §19 (1) UStG.</div>
         </div>
     </div>
 
-    <div class="meta-grid">
-        <div class="addr-card">
-            <strong style="color: #475569; font-size: 12px; text-transform: uppercase;">Billed To:</strong><br/>
-            <strong>{}</strong><br/>
-            {}<br/>
-            {}, {} {}<br/>
-            Country: {}<br/>
-            Email: {}
+    <!-- Heading & Meta Columns -->
+    <div class="meta-row">
+        <div>
+            <div class="doc-title">INVOICE</div>
+            <div class="customer-block">
+                <div style="font-weight: 600; color: #000;">{}</div>
+                {}
+                {}
+                {}
+                <div style="margin-top: 4px;">{}</div>
+                {}
+            </div>
         </div>
-        <div class="addr-card">
-            <strong style="color: #475569; font-size: 12px; text-transform: uppercase;">Ship To:</strong><br/>
-            <strong>{}</strong><br/>
-            {}<br/>
-            {}, {} {}<br/>
-            Country: {}<br/>
-            Payment Method: <span style="text-transform: capitalize;">{}</span>
+        <div class="order-meta">
+            <table class="order-meta-table">
+                <tr>
+                    <td class="label">Order Number:</td>
+                    <td class="val">{}</td>
+                </tr>
+                <tr>
+                    <td class="label">Order Date:</td>
+                    <td class="val">{}</td>
+                </tr>
+                <tr>
+                    <td class="label">Payment Method:</td>
+                    <td class="val">{}</td>
+                </tr>
+            </table>
         </div>
     </div>
 
-    <table>
+    <!-- Items Table with Solid Black Header -->
+    <table class="items-table">
         <thead>
             <tr>
-                <th style="width: 55%;">Item & SKU</th>
-                <th style="width: 15%; text-align: center;">Qty</th>
-                <th style="width: 15%; text-align: right;">Unit Price</th>
-                <th style="width: 15%; text-align: right;">Total</th>
+                <th>Product</th>
+                <th>Quantity</th>
+                <th>Price</th>
             </tr>
         </thead>
         <tbody>
@@ -116,63 +349,50 @@ impl DocumentGenerator {
         </tbody>
     </table>
 
-    <table class="totals-table">
-        <tr>
-            <td style="color: #64748b;">Subtotal:</td>
-            <td style="text-align: right; font-weight: 600;">{:.2} {}</td>
-        </tr>
-        <tr>
-            <td style="color: #64748b;">Estimated Shipping:</td>
-            <td style="text-align: right; font-weight: 600;">{:.2} {}</td>
-        </tr>
-        <tr>
-            <td style="color: #64748b;">VAT / Sales Tax ({:.1}%):</td>
-            <td style="text-align: right; font-weight: 600;">{:.2} {}</td>
-        </tr>
-        <tr class="grand-total">
-            <td>Total Paid:</td>
-            <td style="text-align: right;">{:.2} {}</td>
-        </tr>
-    </table>
+    <!-- Totals Summary -->
+    <div class="totals-section">
+        <table class="totals-table">
+            <tr>
+                <td class="label">Subtotal</td>
+                <td class="val">{}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td class="label">Shipping</td>
+                <td class="val">{} via DHL</td>
+            </tr>
+            <tr class="total-row">
+                <td class="label">Total</td>
+                <td class="val" style="font-weight: 800;">{}</td>
+            </tr>
+        </table>
+    </div>
 
-    <div class="footer">
-        Thank you for purchasing from {}! For warranty or inquiries, reach out to {}.
+    <div style="margin-top: 35px; font-size: 11px; color: #64748b; font-style: italic;">
+        {}
     </div>
 </body>
 </html>"#,
             order.order_number,
+            logo_html,
             settings.store_name,
-            settings.company_address,
-            settings.vat_id,
-            settings.support_email,
+            addr_lines,
+            if !settings.support_email.is_empty() { format!("<div>E-Mail: {}</div>", settings.support_email) } else { String::new() },
+            if !settings.phone.is_empty() { format!("<div>Phone: {}</div>", settings.phone) } else { String::new() },
+            if !settings.vat_id.is_empty() { format!("<div>VAT Number: {}</div>", settings.vat_id) } else { String::new() },
+            customer_name,
+            if !street.is_empty() { format!("<div>{}</div>", street) } else { String::new() },
+            if !postal_code.is_empty() || !city.is_empty() { format!("<div>{} {}</div>", postal_code, city) } else { String::new() },
+            if !country.is_empty() { format!("<div>{}</div>", country) } else { String::new() },
+            customer_email,
+            if !customer_phone.is_empty() { format!("<div>{}</div>", customer_phone) } else { String::new() },
             order.order_number,
-            order.created_at.format("%B %d, %Y - %H:%M UTC"),
-            billing_addr.get("full_name").and_then(|v| v.as_str()).unwrap_or(&order.customer_name),
-            billing_addr.get("street_address").and_then(|v| v.as_str()).unwrap_or(""),
-            billing_addr.get("city").and_then(|v| v.as_str()).unwrap_or(""),
-            billing_addr.get("state_province").and_then(|v| v.as_str()).unwrap_or(""),
-            billing_addr.get("postal_code").and_then(|v| v.as_str()).unwrap_or(""),
-            billing_addr.get("country_code").and_then(|v| v.as_str()).unwrap_or(""),
-            order.customer_email,
-            shipping_addr.get("full_name").and_then(|v| v.as_str()).unwrap_or(&order.customer_name),
-            shipping_addr.get("street_address").and_then(|v| v.as_str()).unwrap_or(""),
-            shipping_addr.get("city").and_then(|v| v.as_str()).unwrap_or(""),
-            shipping_addr.get("state_province").and_then(|v| v.as_str()).unwrap_or(""),
-            shipping_addr.get("postal_code").and_then(|v| v.as_str()).unwrap_or(""),
-            shipping_addr.get("country_code").and_then(|v| v.as_str()).unwrap_or(""),
-            order.payment_provider,
+            order.created_at.format("%B %d, %Y"),
+            payment_provider_display,
             items_rows,
-            (order.subtotal_cents as f64) / 100.0,
-            settings.currency_symbol,
-            (order.shipping_cost_cents as f64) / 100.0,
-            settings.currency_symbol,
-            settings.tax_rate_percent,
-            (order.tax_cents as f64) / 100.0,
-            settings.currency_symbol,
-            (order.total_cents as f64) / 100.0,
-            settings.currency_symbol,
-            settings.store_name,
-            settings.support_email
+            subtotal_str,
+            shipping_str,
+            total_str,
+            if !settings.tax_notice.is_empty() { &settings.tax_notice } else { "" }
         )
     }
 
@@ -183,87 +403,272 @@ impl DocumentGenerator {
     ) -> String {
         let shipping_addr = &order.shipping_address;
 
+        let customer_name = shipping_addr
+            .get("full_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&order.customer_name);
+
+        let street = shipping_addr
+            .get("street_address")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let postal_code = shipping_addr
+            .get("postal_code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let city = shipping_addr
+            .get("city")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let country = shipping_addr
+            .get("country_code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Germany");
+
+        let addr_lines = settings
+            .company_address
+            .split(',')
+            .map(|s| format!("<div>{}</div>", s.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         let items_rows = items
             .iter()
             .map(|item| {
+                let variant_display = if !item.variant_title.is_empty() && item.variant_title != "Standard" && item.variant_title != "Default" {
+                    format!(r#"<div style="font-size: 11px; color: #475569; margin-top: 2px;">Variant: {}</div>"#, item.variant_title)
+                } else {
+                    String::new()
+                };
+
+                let license_tag = if item.is_digital {
+                    r#"<div style="font-size: 11px; color: #0284c7; margin-top: 2px;">[Digital License - Do not pack physical]</div>"#
+                } else {
+                    ""
+                };
+
                 format!(
-                    r#"<tr>
-                        <td style="padding: 14px; border-bottom: 1px solid #cbd5e1; text-align: center; width: 40px;">
-                            <div style="width: 20px; height: 20px; border: 2px solid #64748b; border-radius: 4px; margin: auto;"></div>
-                        </td>
-                        <td style="padding: 14px; border-bottom: 1px solid #cbd5e1;">
-                            <strong style="font-size: 15px;">{}</strong><br/>
-                            <span style="color: #475569; font-size: 13px;">Variant: {}</span><br/>
-                            <span style="font-family: monospace; font-size: 12px; background: #e2e8f0; padding: 2px 6px; border-radius: 4px;">SKU: {}</span>
+                    r#"<tr style="border-bottom: 1px solid #e2e8f0;">
+                        <td style="padding: 14px 10px 14px 0; vertical-align: top;">
+                            <div style="font-size: 13px; font-weight: 600; color: #000;">{}</div>
+                            <div style="font-size: 11px; color: #475569; margin-top: 4px;"><strong>SKU:</strong> {}</div>
+                            <div style="font-size: 11px; color: #475569;">Weight: 0.1kg</div>
+                            {}
                             {}
                         </td>
-                        <td style="padding: 14px; border-bottom: 1px solid #cbd5e1; text-align: center; font-size: 18px; font-weight: 800; color: #0f172a;">
+                        <td style="padding: 14px 10px; vertical-align: top; text-align: center; font-size: 13px; font-weight: 600; color: #000;">
                             {}
                         </td>
                     </tr>"#,
                     item.product_title,
-                    item.variant_title,
                     item.sku,
-                    if item.is_digital { "<br/><span style='color: #0284c7; font-size: 12px;'>[Digital License - Do not pack physical]</span>" } else { "" },
+                    variant_display,
+                    license_tag,
                     item.quantity
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
 
+        let logo_html = if !settings.logo_url.is_empty() {
+            format!(
+                r#"<img src="{}" alt="{}" style="max-height: 85px; max-width: 220px; object-fit: contain;" />"#,
+                settings.logo_url, settings.store_name
+            )
+        } else {
+            format!(
+                r#"<div style="font-size: 24px; font-weight: 900; color: #000; letter-spacing: -0.5px;">{}</div>"#,
+                settings.store_name
+            )
+        };
+
         format!(
             r#"<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>Packing Slip - {}</title>
+    <title>Packing Slip {}</title>
     <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #0f172a; margin: 0; padding: 40px; background: #fff; }}
-        .header {{ display: flex; justify-content: space-between; border-bottom: 3px solid #0f172a; padding-bottom: 20px; margin-bottom: 25px; }}
-        .title {{ font-size: 28px; font-weight: 900; letter-spacing: -0.5px; text-transform: uppercase; }}
-        .meta-box {{ background: #f8fafc; border: 2px dashed #94a3b8; border-radius: 8px; padding: 18px; margin-bottom: 30px; font-size: 14px; line-height: 1.6; }}
-        table {{ width: 100%; border-collapse: collapse; margin-bottom: 30px; }}
-        th {{ background: #0f172a; color: #fff; padding: 12px; text-align: left; font-size: 13px; text-transform: uppercase; }}
-        .signoff {{ display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-top: 50px; font-size: 13px; }}
-        .sign-line {{ border-bottom: 1px solid #64748b; height: 35px; margin-top: 10px; }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: #111827;
+            background: #fff;
+            margin: 0;
+            padding: 40px 50px;
+            font-size: 13px;
+            line-height: 1.5;
+        }}
+        .no-print {{
+            text-align: right;
+            margin-bottom: 25px;
+        }}
+        .print-btn {{
+            background: #000;
+            color: #fff;
+            border: none;
+            padding: 10px 22px;
+            font-size: 13px;
+            font-weight: 700;
+            border-radius: 6px;
+            cursor: pointer;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+        }}
+        .top-row {{
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 45px;
+        }}
+        .company-info {{
+            text-align: right;
+            font-size: 12px;
+            color: #1f2937;
+            line-height: 1.45;
+        }}
+        .company-name {{
+            font-weight: 700;
+            font-size: 14px;
+            color: #000;
+            margin-bottom: 2px;
+        }}
+        .tax-notice {{
+            font-size: 11px;
+            color: #374151;
+            margin-top: 6px;
+            max-width: 320px;
+            line-height: 1.35;
+        }}
+        .meta-row {{
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 40px;
+        }}
+        .doc-title {{
+            font-size: 22px;
+            font-weight: 800;
+            letter-spacing: -0.3px;
+            color: #000;
+            margin-bottom: 15px;
+        }}
+        .customer-block {{
+            font-size: 13px;
+            color: #1f2937;
+            line-height: 1.45;
+        }}
+        .order-meta {{
+            text-align: right;
+            font-size: 13px;
+            color: #1f2937;
+            line-height: 1.6;
+        }}
+        .order-meta-table {{
+            margin-left: auto;
+            border-collapse: collapse;
+        }}
+        .order-meta-table td {{
+            padding: 2px 0;
+        }}
+        .order-meta-table td.label {{
+            color: #4b5563;
+            padding-right: 18px;
+            text-align: left;
+        }}
+        .order-meta-table td.val {{
+            font-weight: 600;
+            color: #000;
+            text-align: left;
+        }}
+        table.items-table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 25px;
+        }}
+        table.items-table th {{
+            background: #000;
+            color: #fff;
+            padding: 10px 10px;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.2px;
+        }}
+        table.items-table th:first-child {{
+            text-align: left;
+            padding-left: 12px;
+        }}
+        table.items-table th:last-child {{
+            text-align: center;
+            width: 20%;
+        }}
         @media print {{
-            body {{ padding: 0; }}
-            .no-print {{ display: none; }}
+            body {{
+                padding: 10px 20px;
+            }}
+            .no-print {{
+                display: none;
+            }}
         }}
     </style>
 </head>
 <body>
-    <div class="no-print" style="margin-bottom: 20px; text-align: right;">
-        <button onclick="window.print()" style="background: #0f172a; color: #fff; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer; font-weight: 600;">Print Packing Slip</button>
+    <div class="no-print">
+        <button class="print-btn" onclick="window.print()">Print Packing Slip</button>
     </div>
 
-    <div class="header">
+    <!-- Top Row: Logo (Left) & Store Info (Right) -->
+    <div class="top-row">
         <div>
-            <div class="title">PACKING SLIP</div>
-            <div style="font-size: 14px; font-weight: 600; color: #475569; margin-top: 4px;">{}</div>
+            {}
         </div>
-        <div style="text-align: right;">
-            <div style="font-size: 18px; font-weight: 800;">Order: {}</div>
-            <div style="font-size: 13px; color: #64748b;">Order Date: {}</div>
-            <div style="font-size: 13px; color: #64748b;">Status: <span style="text-transform: uppercase; font-weight: 700;">{}</span></div>
+        <div class="company-info">
+            <div class="company-name">{}</div>
+            {}
+            {}
+            {}
+            {}
+            <div class="tax-notice">Value added tax is not collected, as small businesses according to §19 (1) UStG.</div>
         </div>
     </div>
 
-    <div class="meta-box">
-        <strong style="font-size: 15px; color: #0f172a;">SHIP TO DESTINATION:</strong><br/>
-        <strong style="font-size: 16px;">{}</strong><br/>
-        {}<br/>
-        {}, {} {}<br/>
-        <strong>Country: {}</strong><br/>
-        Customer Contact: {}
+    <!-- Heading & Meta Columns -->
+    <div class="meta-row">
+        <div>
+            <div class="doc-title">PACKING SLIP</div>
+            <div class="customer-block">
+                <div style="font-weight: 600; color: #000;">{}</div>
+                {}
+                {}
+                {}
+            </div>
+        </div>
+        <div class="order-meta">
+            <table class="order-meta-table">
+                <tr>
+                    <td class="label">Order Number:</td>
+                    <td class="val">{}</td>
+                </tr>
+                <tr>
+                    <td class="label">Order Date:</td>
+                    <td class="val">{}</td>
+                </tr>
+                <tr>
+                    <td class="label">Shipping Method:</td>
+                    <td class="val">DHL</td>
+                </tr>
+            </table>
+        </div>
     </div>
 
-    <table>
+    <!-- Items Table with Solid Black Header -->
+    <table class="items-table">
         <thead>
             <tr>
-                <th style="text-align: center; width: 50px;">Check</th>
-                <th>Item Description, Variant & SKU</th>
-                <th style="text-align: center; width: 100px;">Qty to Pack</th>
+                <th>Product</th>
+                <th>Quantity</th>
             </tr>
         </thead>
         <tbody>
@@ -271,31 +676,26 @@ impl DocumentGenerator {
         </tbody>
     </table>
 
-    <div class="signoff">
-        <div>
-            Packed By (Name):
-            <div class="sign-line"></div>
-        </div>
-        <div>
-            Fulfillment Verification Signature:
-            <div class="sign-line"></div>
-        </div>
+    <div style="margin-top: 35px; font-size: 11px; color: #64748b; font-style: italic;">
+        {}
     </div>
 </body>
 </html>"#,
             order.order_number,
+            logo_html,
             settings.store_name,
+            addr_lines,
+            if !settings.support_email.is_empty() { format!("<div>E-Mail: {}</div>", settings.support_email) } else { String::new() },
+            if !settings.phone.is_empty() { format!("<div>Phone: {}</div>", settings.phone) } else { String::new() },
+            if !settings.vat_id.is_empty() { format!("<div>VAT Number: {}</div>", settings.vat_id) } else { String::new() },
+            customer_name,
+            if !street.is_empty() { format!("<div>{}</div>", street) } else { String::new() },
+            if !postal_code.is_empty() || !city.is_empty() { format!("<div>{} {}</div>", postal_code, city) } else { String::new() },
+            if !country.is_empty() { format!("<div>{}</div>", country) } else { String::new() },
             order.order_number,
-            order.created_at.format("%Y-%m-%d %H:%M"),
-            order.order_status,
-            shipping_addr.get("full_name").and_then(|v| v.as_str()).unwrap_or(&order.customer_name),
-            shipping_addr.get("street_address").and_then(|v| v.as_str()).unwrap_or(""),
-            shipping_addr.get("city").and_then(|v| v.as_str()).unwrap_or(""),
-            shipping_addr.get("state_province").and_then(|v| v.as_str()).unwrap_or(""),
-            shipping_addr.get("postal_code").and_then(|v| v.as_str()).unwrap_or(""),
-            shipping_addr.get("country_code").and_then(|v| v.as_str()).unwrap_or(""),
-            order.customer_email,
-            items_rows
+            order.created_at.format("%B %d, %Y"),
+            items_rows,
+            if !settings.tax_notice.is_empty() { &settings.tax_notice } else { "" }
         )
     }
 }
