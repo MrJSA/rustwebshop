@@ -363,12 +363,13 @@ impl DocumentGenerator {
     <div class="totals-section">
         <table class="totals-table">
             <tr>
-                <td class="label">Subtotal</td>
+                <td class="label">{}</td>
                 <td class="val">{}</td>
             </tr>
+            {}
             <tr style="border-bottom: 1px solid #e2e8f0;">
                 <td class="label">Shipping</td>
-                <td class="val">{} via DHL</td>
+                <td class="val">{}</td>
             </tr>
             <tr class="total-row">
                 <td class="label">Total</td>
@@ -394,7 +395,12 @@ impl DocumentGenerator {
             if !settings.support_email.is_empty() { format!("<div>E-Mail: {}</div>", settings.support_email) } else { String::new() },
             if !settings.phone.is_empty() { format!("<div>Phone: {}</div>", settings.phone) } else { String::new() },
             if !settings.vat_id.is_empty() { format!("<div>VAT Number: {}</div>", settings.vat_id) } else { String::new() },
-            if !settings.tax_notice.is_empty() { &settings.tax_notice } else { "Value added tax is not collected, as small businesses according to §19 (1) UStG." },
+            match settings.tax_mode.as_str() {
+                "kleingewerbe" => if !settings.tax_notice.is_empty() { &settings.tax_notice } else { "Gemäß § 19 UStG wird keine Umsatzsteuer berechnet." },
+                "included" => "Preise inkl. gesetzl. MwSt.",
+                "excluded" => "Preise zzgl. gesetzl. MwSt.",
+                _ => &settings.tax_notice,
+            },
             customer_name,
             if !street.is_empty() { format!("<div>{}</div>", street) } else { String::new() },
             if !postal_code.is_empty() || !city.is_empty() { format!("<div>{} {}</div>", postal_code, city) } else { String::new() },
@@ -405,10 +411,32 @@ impl DocumentGenerator {
             order.created_at.format("%B %d, %Y"),
             payment_provider_display,
             items_rows,
+            if settings.tax_mode == "excluded" { "Subtotal (Net)" } else { "Subtotal" },
             subtotal_str,
+            match settings.tax_mode.as_str() {
+                "kleingewerbe" => String::new(),
+                "included" => format!(
+                    "<tr><td class=\"label\">Enthaltene MwSt. ({:.1}%)</td><td class=\"val\">{:.2} {}</td></tr>",
+                    settings.tax_rate_percent,
+                    (order.tax_cents as f64) / 100.0,
+                    settings.currency_symbol
+                ),
+                "excluded" => format!(
+                    "<tr><td class=\"label\">zzgl. MwSt. ({:.1}%)</td><td class=\"val\">{:.2} {}</td></tr>",
+                    settings.tax_rate_percent,
+                    (order.tax_cents as f64) / 100.0,
+                    settings.currency_symbol
+                ),
+                _ => String::new(),
+            },
             shipping_str,
             total_str,
-            if !settings.tax_notice.is_empty() { &settings.tax_notice } else { "" }
+            match settings.tax_mode.as_str() {
+                "kleingewerbe" => if !settings.tax_notice.is_empty() { &settings.tax_notice } else { "Gemäß § 19 UStG wird keine Umsatzsteuer berechnet." },
+                "included" => "Der Rechnungsbetrag enthält die gesetzliche Mehrwertsteuer.",
+                "excluded" => "Preise verstehen sich zzgl. der gesetzlichen Mehrwertsteuer.",
+                _ => &settings.tax_notice,
+            }
         )
     }
 
@@ -642,7 +670,7 @@ impl DocumentGenerator {
 </head>
 <body>
     <div class="no-print">
-        <button class="print-btn" onclick="window.print()">Print Packing Slip</button>
+        <button class="print-btn" onclick="window.print()">Download / Save as PDF</button>
     </div>
 
     <!-- Top Row: Logo (Left) & Store Info (Right) -->

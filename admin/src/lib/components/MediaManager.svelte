@@ -58,11 +58,16 @@
         });
 
         if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          uploadError = errData.error || 'Upload failed for one or more files.';
+          const errText = await res.text();
+          try {
+            const errJson = JSON.parse(errText);
+            uploadError = errJson.error || errJson.message || errText;
+          } catch {
+            uploadError = errText || `Upload failed with status code ${res.status}`;
+          }
         }
       } catch (err) {
-        uploadError = 'Connection error during image upload.';
+        uploadError = 'Connection error during image upload. Check network or server status.';
       }
     }
 
@@ -208,15 +213,23 @@
     <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
       {#each filteredItems as item}
         <div class="group rounded-2xl bg-slate-900 border border-slate-800/90 hover:border-orange-500/50 overflow-hidden flex flex-col transition-all shadow-md hover:shadow-xl">
-          <!-- Thumbnail Aspect Square -->
-          <div class="relative aspect-square bg-slate-950 overflow-hidden flex items-center justify-center">
+          <!-- Thumbnail Aspect Square with Transparency Checkerboard -->
+          <div class="relative aspect-square overflow-hidden flex items-center justify-center checkerboard-pattern">
             <img
               src={item.url}
               alt={item.original_name}
-              class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+              class="w-full h-full object-contain p-2.5 group-hover:scale-105 transition-transform duration-300"
               loading="lazy"
             />
-            <div class="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+
+            <!-- Format Badge (PNG / WEBP / SVG / etc) -->
+            <div class="absolute top-2 left-2 pointer-events-none">
+              <span class="px-1.5 py-0.5 rounded-md bg-slate-950/80 backdrop-blur-sm border border-slate-800 text-[9px] font-mono font-bold text-slate-300 uppercase">
+                {item.mime_type ? item.mime_type.split('/')[1] : (item.filename ? item.filename.split('.').pop() : 'IMG')}
+              </span>
+            </div>
+
+            <div class="absolute inset-0 bg-slate-950/70 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
               <button
                 type="button"
                 on:click={() => copyToClipboard(item.url, item.id)}
@@ -254,8 +267,8 @@
               {item.original_name}
             </p>
             <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono">
-              <span>{item.width && item.height ? `${item.width}×${item.height}` : 'WebP'}</span>
-              <span>{formatBytes(item.file_size_bytes)}</span>
+              <span>{item.mime_type ? item.mime_type.split('/')[1].toUpperCase() : 'IMAGE'}</span>
+              <span>{formatBytes(item.size_bytes || item.file_size_bytes || 0)}</span>
             </div>
           </div>
         </div>
@@ -263,3 +276,16 @@
     </div>
   {/if}
 </div>
+
+<style>
+  .checkerboard-pattern {
+    background-color: #0b0f19;
+    background-image: 
+      linear-gradient(45deg, #1e293b 25%, transparent 25%), 
+      linear-gradient(-45deg, #1e293b 25%, transparent 25%), 
+      linear-gradient(45deg, transparent 75%, #1e293b 75%), 
+      linear-gradient(-45deg, transparent 75%, #1e293b 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+  }
+</style>

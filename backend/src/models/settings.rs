@@ -39,12 +39,16 @@ pub struct StoreSettings {
     pub cookie_deny_label: String,
     pub cookie_preferences_label: String,
     pub tax_notice: String,
+    pub tax_mode: String,
     pub legal_name: String,
     pub store_owner: String,
     pub commercial_register: String,
     pub dispute_resolution_notice: String,
     pub odr_url: String,
     pub footer_config: serde_json::Value,
+    pub order_prefix_enabled: bool,
+    pub order_prefix: String,
+    pub order_date_enabled: bool,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -54,6 +58,7 @@ pub struct StoreSettingsDTO {
     pub currency: String,
     pub currency_symbol: String,
     pub tax_rate_percent: f64,
+    pub tax_mode: String,
     pub deployment_mode: String,
     pub debug_mode: bool,
     pub support_email: String,
@@ -88,6 +93,9 @@ pub struct StoreSettingsDTO {
     pub dispute_resolution_notice: String,
     pub odr_url: String,
     pub footer_config: serde_json::Value,
+    pub order_prefix_enabled: bool,
+    pub order_prefix: String,
+    pub order_date_enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +104,7 @@ pub struct UpdateStoreSettingsRequest {
     pub currency: Option<String>,
     pub currency_symbol: Option<String>,
     pub tax_rate_percent: Option<f64>,
+    pub tax_mode: Option<String>,
     pub deployment_mode: Option<String>,
     pub debug_mode: Option<bool>,
     pub support_email: Option<String>,
@@ -132,6 +141,9 @@ pub struct UpdateStoreSettingsRequest {
     pub dispute_resolution_notice: Option<String>,
     pub odr_url: Option<String>,
     pub footer_config: Option<serde_json::Value>,
+    pub order_prefix_enabled: Option<bool>,
+    pub order_prefix: Option<String>,
+    pub order_date_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

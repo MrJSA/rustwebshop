@@ -164,8 +164,16 @@
   $: hasPhysicalItems = $cart.some((i) => !i.is_digital);
 
   $: taxRatePercent = store.tax_rate_percent || 19.0;
-  $: taxCents = Math.round(($cartSubtotal * (taxRatePercent / 100)));
-  $: grandTotalCents = $cartSubtotal + shippingCostCents + taxCents;
+  $: taxMode = store.tax_mode || 'kleingewerbe';
+  $: taxCents = taxMode === 'kleingewerbe'
+    ? 0
+    : taxMode === 'included'
+      ? Math.round($cartSubtotal - ($cartSubtotal / (1 + (taxRatePercent / 100))))
+      : Math.round($cartSubtotal * (taxRatePercent / 100));
+
+  $: grandTotalCents = taxMode === 'excluded'
+    ? $cartSubtotal + shippingCostCents + taxCents
+    : $cartSubtotal + shippingCostCents;
 
   async function handleSubmitOrder() {
     if ($cart.length === 0) {
@@ -662,10 +670,23 @@
               <span>Shipping ({countryCode})</span>
               <span class="font-mono text-slate-200">{(shippingCostCents / 100).toFixed(2)} €</span>
             </div>
-            <div class="flex justify-between text-slate-400">
-              <span>Estimated Tax ({taxRatePercent}%)</span>
-              <span class="font-mono text-slate-200">{(taxCents / 100).toFixed(2)} €</span>
-            </div>
+            {#if taxMode === 'kleingewerbe'}
+              <div class="flex justify-between text-slate-400">
+                <span>VAT (§ 19 UStG)</span>
+                <span class="font-mono text-slate-400">0.00 €</span>
+              </div>
+              <p class="text-[10px] text-slate-500 italic">No VAT collected under § 19 UStG (Small Business Exemption).</p>
+            {:else if taxMode === 'included'}
+              <div class="flex justify-between text-slate-400">
+                <span>Included VAT ({taxRatePercent}%)</span>
+                <span class="font-mono text-slate-200">{(taxCents / 100).toFixed(2)} €</span>
+              </div>
+            {:else}
+              <div class="flex justify-between text-slate-400">
+                <span>VAT ({taxRatePercent}%)</span>
+                <span class="font-mono text-slate-200">{(taxCents / 100).toFixed(2)} €</span>
+              </div>
+            {/if}
             <div class="border-t border-slate-800 pt-3 flex justify-between text-base font-bold text-white">
               <span>Total</span>
               <span class="font-mono text-orange-400">{(grandTotalCents / 100).toFixed(2)} €</span>

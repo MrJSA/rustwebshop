@@ -25,6 +25,7 @@ pub struct Product {
     pub long_description: String,
     pub images: JsonValue,
     pub has_multiple_variants: bool,
+    pub tax_rate_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -67,6 +68,7 @@ pub struct CreateProductRequest {
     pub long_description: Option<String>,
     pub images: Option<JsonValue>,
     pub has_multiple_variants: Option<bool>,
+    pub tax_rate_percent: Option<f64>,
     pub variants: Option<Vec<CreateVariantRequest>>,
 }
 
@@ -86,6 +88,7 @@ pub struct UpdateProductRequest {
     pub long_description: Option<String>,
     pub images: Option<JsonValue>,
     pub has_multiple_variants: Option<bool>,
+    pub tax_rate_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

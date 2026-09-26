@@ -7,7 +7,10 @@
 
   export let initialProviders = [];
 
-  let providers = initialProviders;
+  let providers = Array.isArray(initialProviders) ? initialProviders : [];
+  $: if (Array.isArray(initialProviders) && initialProviders.length > 0 && providers.length === 0) {
+    providers = initialProviders;
+  }
   let loading = false;
   let notice = '';
   let errorMsg = '';
@@ -99,7 +102,7 @@
     providerCode = '';
     trackingUrlTemplate = 'https://www.dhl.com/track?id={tracking_number}';
     providerIsActive = true;
-    providerSortOrder = providers.length;
+    providerSortOrder = (providers || []).length;
     modalError = '';
     isSubmitting = false;
     isAddProviderOpen = true;
@@ -719,7 +722,7 @@
           <input
             type="text"
             bind:value={trackingUrlTemplate}
-            placeholder="https://www.dhl.com/track?id={tracking_number}"
+            placeholder={'https://www.dhl.com/track?id={tracking_number}'}
             class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-[11px] focus:outline-none focus:border-orange-500"
           />
           <p class="text-[10px] text-slate-500 mt-1">Use <code class="bg-black/30 px-1 py-0.5 rounded text-orange-400">&#123;tracking_number&#125;</code> as placeholder</p>

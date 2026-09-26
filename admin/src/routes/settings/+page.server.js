@@ -44,6 +44,9 @@ export async function load({ fetch }) {
       currency: 'EUR',
       currency_symbol: '€',
       tax_rate_percent: 19.0,
+      order_prefix_enabled: true,
+      order_prefix: 'ORD',
+      order_date_enabled: true,
       logo_url: ''
     },
     paymentConfigs,

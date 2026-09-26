@@ -1,4 +1,5 @@
 <script>
+  import { onMount, onDestroy } from "svelte";
   import ProductCard from "$lib/components/ProductCard.svelte";
   import {
     ArrowRight,
@@ -83,9 +84,36 @@
   };
 
   let activeSlide = 0;
+  let autoRotateTimer = null;
+  let isCarouselHovered = false;
+
   $: carouselItems = (heroConfig && heroConfig.carousel_items && heroConfig.carousel_items.length > 0)
     ? heroConfig.carousel_items
     : [];
+
+  onMount(() => {
+    startAutoRotate();
+  });
+
+  onDestroy(() => {
+    stopAutoRotate();
+  });
+
+  function startAutoRotate() {
+    stopAutoRotate();
+    autoRotateTimer = setInterval(() => {
+      if (!isCarouselHovered && carouselItems.length > 1) {
+        nextSlide();
+      }
+    }, 6500); // Auto-rotates every 6.5s
+  }
+
+  function stopAutoRotate() {
+    if (autoRotateTimer) {
+      clearInterval(autoRotateTimer);
+      autoRotateTimer = null;
+    }
+  }
 
   function nextSlide() {
     if (carouselItems.length === 0) return;
@@ -115,7 +143,13 @@
   <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-6">
     {#if heroConfig.layout === 'carousel'}
       <!-- Option A: Full-Width Widescreen Carousel (8BitDo style) -->
-      <div class="relative rounded-3xl overflow-hidden shadow-2xl bg-slate-950 border border-slate-800/80 aspect-[21/9] min-h-[380px] max-h-[560px]">
+      <div
+        role="region"
+        aria-label="Product Showcase Carousel"
+        on:mouseenter={() => isCarouselHovered = true}
+        on:mouseleave={() => isCarouselHovered = false}
+        class="relative rounded-3xl overflow-hidden shadow-2xl bg-slate-950 border border-slate-800/80 aspect-[21/9] min-h-[380px] max-h-[560px]"
+      >
         {#each carouselItems as item, idx}
           <div
             class="absolute inset-0 transition-opacity duration-700 ease-in-out {idx === activeSlide ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}"
@@ -187,7 +221,13 @@
       <!-- Option B: Split Hero (60% Carousel + 40% 4 Featured Product Buttons, 8BitMods style) -->
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
         <!-- Left: 60% Width Carousel Slider (7 cols on lg) -->
-        <div class="lg:col-span-7 relative rounded-3xl overflow-hidden shadow-2xl bg-slate-950 border border-slate-800/80 min-h-[360px] lg:min-h-[440px]">
+        <div
+          role="region"
+          aria-label="Product Showcase Carousel"
+          on:mouseenter={() => isCarouselHovered = true}
+          on:mouseleave={() => isCarouselHovered = false}
+          class="lg:col-span-7 relative rounded-3xl overflow-hidden shadow-2xl bg-slate-950 border border-slate-800/80 min-h-[360px] lg:min-h-[440px]"
+        >
           {#each carouselItems as item, idx}
             <div
               class="absolute inset-0 transition-opacity duration-700 ease-in-out {idx === activeSlide ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}"

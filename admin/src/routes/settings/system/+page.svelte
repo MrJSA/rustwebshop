@@ -488,7 +488,11 @@
                   <label class="block text-slate-400 mb-1">Target Link URL</label>
                   <input type="text" bind:value={slide.link_url} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-[11px]" />
                 </div>
-                <div class="sm:col-span-2">
+                <div>
+                  <label class="block text-slate-400 mb-1">Button Text (CTA)</label>
+                  <input type="text" bind:value={slide.button_text} placeholder="e.g. Discover Precision, Buy Now" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white" />
+                </div>
+                <div>
                   <label class="block text-slate-400 mb-1">Slide Subtitle</label>
                   <input type="text" bind:value={slide.subtitle} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white" />
                 </div>
@@ -697,6 +701,7 @@
       menuItems={data.menuItems || []}
       categories={data.categories || []}
       pages={data.pages || []}
+      settings={settings}
     />
   {:else if activeTab === 'policies'}
     <PolicyManager

@@ -131,12 +131,12 @@
                   onSelect(item.url);
                   onClose();
                 }}
-                class="group aspect-square rounded-xl bg-slate-950 border border-slate-800 hover:border-orange-500 overflow-hidden relative transition-all focus:outline-none focus:ring-2 focus:ring-orange-500"
+                class="group aspect-square rounded-xl bg-slate-950 border border-slate-800 hover:border-orange-500 overflow-hidden relative transition-all focus:outline-none focus:ring-2 focus:ring-orange-500 checkerboard-pattern"
               >
                 <img
                   src={item.url}
                   alt={item.original_name}
-                  class="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                  class="w-full h-full object-contain p-2 group-hover:scale-105 transition-transform"
                 />
                 <div class="absolute inset-x-0 bottom-0 bg-slate-950/80 p-1 text-[9px] text-slate-300 font-mono truncate text-center opacity-0 group-hover:opacity-100 transition-opacity">
                   {item.original_name}
@@ -159,3 +159,16 @@
     </div>
   </div>
 {/if}
+
+<style>
+  .checkerboard-pattern {
+    background-color: #0b0f19;
+    background-image: 
+      linear-gradient(45deg, #1e293b 25%, transparent 25%), 
+      linear-gradient(-45deg, #1e293b 25%, transparent 25%), 
+      linear-gradient(45deg, transparent 75%, #1e293b 75%), 
+      linear-gradient(-45deg, transparent 75%, #1e293b 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+  }
+</style>

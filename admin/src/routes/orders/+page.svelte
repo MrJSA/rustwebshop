@@ -148,7 +148,30 @@
     }
   }
 
-  // Open PDF / Printable slip with authentication token
+  // Document Live Preview State
+  let isDocPreviewOpen = false;
+  let docPreviewType = 'packing-slip'; // 'packing-slip' or 'invoice'
+  let docPreviewUrl = '';
+  let previewIframeRef = null;
+
+  function openDocumentPreview(type) {
+    if (!selectedOrder) return;
+    docPreviewType = type;
+    const token = localStorage.getItem('admin_token') || '';
+    docPreviewUrl = `/api/v1/admin/orders/${selectedOrder.id}/${type}?token=${encodeURIComponent(token)}&t=${Date.now()}`;
+    isDocPreviewOpen = true;
+  }
+
+  function printPreviewDocument() {
+    if (previewIframeRef && previewIframeRef.contentWindow) {
+      previewIframeRef.contentWindow.focus();
+      previewIframeRef.contentWindow.print();
+    } else {
+      window.open(docPreviewUrl, '_blank');
+    }
+  }
+
+  // Fallback download direct
   async function downloadSlip(type) {
     const token = localStorage.getItem('admin_token') || '';
     const endpoint = `/api/v1/admin/orders/${selectedOrder.id}/${type}?token=${encodeURIComponent(token)}`;
@@ -157,21 +180,17 @@
         headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) }
       });
       if (!res.ok) {
-        // Fallback open with query token
         window.open(endpoint, '_blank');
         return;
       }
       const blob = await res.blob();
       const objectUrl = URL.createObjectURL(blob);
-      const win = window.open(objectUrl, '_blank');
-      if (!win) {
-        const a = document.createElement('a');
-        a.href = objectUrl;
-        a.download = `${type}-${selectedOrder.order_number}.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      }
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = `${type}-${selectedOrder.order_number}.html`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
     } catch (e) {
       window.open(endpoint, '_blank');
@@ -554,31 +573,101 @@
         </div>
       </div>
 
-      <!-- Downloadable Documents Section -->
+      <!-- Fulfillment Documents Preview & PDF Section -->
       <div class="border-t border-slate-800 pt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <span class="text-xs font-bold text-white block">Downloadable Fulfillment Documents (PDF)</span>
-          <span class="text-[11px] text-slate-400">Generate warehouse packing slips and legal tax invoices.</span>
+          <span class="text-xs font-bold text-white block">Fulfillment & Invoicing Documents</span>
+          <span class="text-[11px] text-slate-400">Preview document layout in DIN A4 portrait format and export official PDF documents.</span>
         </div>
 
         <div class="flex items-center gap-3">
           <button
             type="button"
-            on:click={() => downloadSlip('packing-slip')}
-            class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700 transition-colors shadow-sm flex items-center gap-2"
+            on:click={() => openDocumentPreview('packing-slip')}
+            class="px-4 py-2.5 rounded-xl bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold transition-all shadow-lg shadow-orange-600/25 flex items-center gap-2"
           >
-            <Printer size={15} class="text-orange-400" />
-            <span>Download Packing Slip (PDF)</span>
+            <Printer size={15} />
+            <span>Preview Packing Slip</span>
           </button>
 
           <button
             type="button"
-            on:click={() => downloadSlip('invoice')}
+            on:click={() => openDocumentPreview('invoice')}
             class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700 transition-colors shadow-sm flex items-center gap-2"
           >
             <FileText size={15} class="text-emerald-400" />
-            <span>Download Tax Invoice (PDF)</span>
+            <span>Preview Tax Invoice</span>
           </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- FULLSCREEN / HIGH-RES DOCUMENT PREVIEW MODAL -->
+{#if isDocPreviewOpen && selectedOrder}
+  <div class="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/85 backdrop-blur-md animate-in fade-in duration-150">
+    <div class="w-full max-w-5xl h-[92vh] rounded-2xl bg-slate-900 border border-slate-800 flex flex-col shadow-2xl overflow-hidden">
+      <!-- Modal Header -->
+      <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/70">
+        <div class="flex items-center gap-3">
+          <div class="p-2 rounded-xl {docPreviewType === 'packing-slip' ? 'bg-orange-600/20 text-orange-400 border border-orange-500/30' : 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30'}">
+            {#if docPreviewType === 'packing-slip'}
+              <Printer size={18} />
+            {:else}
+              <FileText size={18} />
+            {/if}
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span>{docPreviewType === 'packing-slip' ? 'Packing Slip Document Preview' : 'Tax Invoice Document Preview'}</span>
+              <span class="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-orange-400 border border-slate-700">#{selectedOrder.order_number}</span>
+            </h3>
+            <p class="text-[11px] text-slate-400">DIN A4 vertical format with exact warehouse & customer dispatch data.</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <!-- Primary Download / Save as PDF Button -->
+          <button
+            type="button"
+            on:click={printPreviewDocument}
+            class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-xs shadow-lg shadow-orange-600/30 transition-all flex items-center gap-2"
+          >
+            <Download size={15} />
+            <span>Download PDF</span>
+          </button>
+
+          <!-- Native Print Option -->
+          <button
+            type="button"
+            on:click={printPreviewDocument}
+            class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs border border-slate-700 transition-colors flex items-center gap-2"
+          >
+            <Printer size={15} />
+            <span>Print</span>
+          </button>
+
+          <!-- Close Modal -->
+          <button
+            type="button"
+            on:click={() => isDocPreviewOpen = false}
+            class="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+          >
+            <X size={18} />
+          </button>
+        </div>
+      </div>
+
+      <!-- Modal Body: High Fidelity Live Iframe Preview -->
+      <div class="flex-1 p-4 sm:p-6 bg-slate-950 overflow-auto flex justify-center items-start">
+        <div class="w-full max-w-4xl h-full rounded-xl bg-white shadow-2xl overflow-hidden border border-slate-700">
+          <iframe
+            bind:this={previewIframeRef}
+            src={docPreviewUrl}
+            title="Document Live Preview"
+            class="w-full h-full border-0"
+          ></iframe>
         </div>
       </div>
     </div>

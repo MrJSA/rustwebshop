@@ -1,9 +1,34 @@
 <script>
-  import { Menu, Plus, Trash2, Check, ExternalLink, ArrowRight, X, Link, HelpCircle, Compass, ArrowUp, ArrowDown, Edit2, CornerDownRight, FolderPlus } from 'lucide-svelte';
+  import {
+    Menu,
+    Plus,
+    Trash2,
+    Check,
+    ExternalLink,
+    ArrowRight,
+    X,
+    Link,
+    HelpCircle,
+    Compass,
+    ArrowUp,
+    ArrowDown,
+    Edit2,
+    CornerDownRight,
+    FolderPlus,
+    Building,
+    Share2,
+    Globe,
+    Save,
+    CheckCircle2,
+    AlertCircle,
+    Layout,
+    ShieldCheck
+  } from 'lucide-svelte';
 
   export let menuItems = [];
   export let categories = [];
   export let pages = [];
+  export let settings = {};
 
   let activeTab = 'header'; // 'header' or 'footer'
   let isModalOpen = false;
@@ -280,6 +305,106 @@
       }
     } catch (e) {
       console.error('Failed to reorder menu items:', e);
+    }
+  }
+
+  // --- Footer & Social Architecture State ---
+  let footerConfig = {
+    branding_mode: 'full',
+    menu_layout: 'columns',
+    columns: [
+      { title: 'Customer Service', links: [] },
+      { title: 'Legal & Policies', links: [] },
+      { title: 'Store & Support', links: [] }
+    ],
+    show_socials: true,
+    enabled_socials: ['github', 'twitter', 'discord'],
+    social_links: {
+      github: 'https://github.com',
+      twitter: 'https://x.com',
+      instagram: '',
+      youtube: '',
+      facebook: '',
+      discord: 'https://discord.gg',
+      whatsapp: ''
+    },
+    show_payments: true,
+    copyright_format: 'standard',
+    custom_copyright: ''
+  };
+
+  let footerConfigInitialized = false;
+  $: if (settings && settings.footer_config && !footerConfigInitialized) {
+    footerConfigInitialized = true;
+    footerConfig = {
+      ...footerConfig,
+      ...settings.footer_config
+    };
+    if (!footerConfig.columns || !Array.isArray(footerConfig.columns)) {
+      footerConfig.columns = [];
+    }
+    if (!footerConfig.social_links) {
+      footerConfig.social_links = {};
+    }
+    if (!footerConfig.enabled_socials) {
+      footerConfig.enabled_socials = [];
+    }
+  }
+
+  let isSavingFooter = false;
+  let footerSuccessNotice = '';
+  let footerErrorNotice = '';
+
+  const socialPlatforms = [
+    { id: 'github', name: 'GitHub', placeholder: 'https://github.com/your-username' },
+    { id: 'twitter', name: 'Twitter / X', placeholder: 'https://x.com/your-handle' },
+    { id: 'instagram', name: 'Instagram', placeholder: 'https://instagram.com/your-profile' },
+    { id: 'youtube', name: 'YouTube', placeholder: 'https://youtube.com/@your-channel' },
+    { id: 'facebook', name: 'Facebook', placeholder: 'https://facebook.com/your-page' },
+    { id: 'discord', name: 'Discord', placeholder: 'https://discord.gg/your-invite' },
+    { id: 'whatsapp', name: 'WhatsApp', placeholder: 'https://wa.me/your-phone-number' }
+  ];
+
+  function toggleSocial(platformId) {
+    if (footerConfig.enabled_socials.includes(platformId)) {
+      footerConfig.enabled_socials = footerConfig.enabled_socials.filter(id => id !== platformId);
+    } else {
+      footerConfig.enabled_socials = [...footerConfig.enabled_socials, platformId];
+    }
+  }
+
+  async function handleSaveFooter() {
+    isSavingFooter = true;
+    footerSuccessNotice = '';
+    footerErrorNotice = '';
+
+    const token = localStorage.getItem('admin_token');
+    try {
+      const res = await fetch('/api/v1/admin/settings/system', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Dev-Mode': 'true',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({
+          ...settings,
+          footer_config: footerConfig
+        })
+      });
+
+      if (res.ok) {
+        settings = { ...settings, footer_config: footerConfig };
+        footerSuccessNotice = 'Footer architecture, social channels & payment badges saved!';
+        setTimeout(() => footerSuccessNotice = '', 4000);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        footerErrorNotice = err.error || 'Failed to save footer settings.';
+      }
+    } catch (e) {
+      footerErrorNotice = 'Failed to connect to backend server.';
+    } finally {
+      isSavingFooter = false;
     }
   }
 </script>
@@ -642,6 +767,216 @@
       </div>
     </div>
   </div>
+
+  <!-- When in Footer Tab: Footer Architecture & Social Media Presentation Panel -->
+  {#if activeTab === 'footer'}
+    <div class="mt-8 space-y-6 pt-6 border-t border-slate-800">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h3 class="text-lg font-bold text-white flex items-center gap-2">
+            <Layout size={20} class="text-orange-400" />
+            <span>Footer Brand Presentation, Social Media & Trust Badges</span>
+          </h3>
+          <p class="text-xs text-slate-400 mt-0.5">
+            Configure how your brand info, social networks, and verified payment badges render across the storefront footer.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          on:click={handleSaveFooter}
+          disabled={isSavingFooter}
+          class="px-6 py-2.5 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-xs shadow-lg shadow-orange-600/30 transition-all flex items-center gap-2 disabled:opacity-50 self-start sm:self-auto"
+        >
+          <Save size={15} />
+          <span>{isSavingFooter ? 'Saving Footer Settings...' : 'Save Footer Settings'}</span>
+        </button>
+      </div>
+
+      {#if footerSuccessNotice}
+        <div class="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold flex items-center gap-2">
+          <CheckCircle2 size={16} />
+          <span>{footerSuccessNotice}</span>
+        </div>
+      {/if}
+
+      {#if footerErrorNotice}
+        <div class="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs font-semibold flex items-center gap-2">
+          <AlertCircle size={16} />
+          <span>{footerErrorNotice}</span>
+        </div>
+      {/if}
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- Section 1: Storefront Branding Presentation -->
+        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
+          <h4 class="text-sm font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
+            <Building size={16} class="text-orange-400" />
+            <span>Left Section: Storefront Branding</span>
+          </h4>
+          <p class="text-xs text-slate-400">Choose how your brand identity appears on the left side of the footer.</p>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            <label class="p-3.5 rounded-xl border cursor-pointer transition-all {footerConfig.branding_mode === 'full' ? 'bg-orange-600/10 border-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'}">
+              <div class="flex items-center gap-2.5">
+                <input
+                  type="radio"
+                  name="branding_mode"
+                  value="full"
+                  bind:group={footerConfig.branding_mode}
+                  class="accent-orange-600"
+                />
+                <div>
+                  <div class="font-bold text-white text-xs">Full Store Identity</div>
+                  <div class="text-[11px] text-slate-400">Logo, address, email & phone</div>
+                </div>
+              </div>
+            </label>
+
+            <label class="p-3.5 rounded-xl border cursor-pointer transition-all {footerConfig.branding_mode === 'logo_only' ? 'bg-orange-600/10 border-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'}">
+              <div class="flex items-center gap-2.5">
+                <input
+                  type="radio"
+                  name="branding_mode"
+                  value="logo_only"
+                  bind:group={footerConfig.branding_mode}
+                  class="accent-orange-600"
+                />
+                <div>
+                  <div class="font-bold text-white text-xs">Logo Only</div>
+                  <div class="text-[11px] text-slate-400">Minimalist brand logo only</div>
+                </div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Section 2: Accepted Payments Badges -->
+        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h4 class="text-sm font-bold text-white flex items-center gap-2">
+              <ShieldCheck size={16} class="text-orange-400" />
+              <span>Accepted Payment Badges</span>
+            </h4>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" bind:checked={footerConfig.show_payments} class="sr-only peer" />
+              <div class="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-orange-600"></div>
+              <span class="ml-2 text-xs text-slate-300 font-semibold">{footerConfig.show_payments ? 'Visible' : 'Hidden'}</span>
+            </label>
+          </div>
+          <p class="text-xs text-slate-400">
+            Displays verified official logos for Stripe, PayPal, Apple Pay, Google Pay, and Amazon Pay in the storefront footer.
+          </p>
+          <div class="flex flex-wrap gap-2 pt-2">
+            <span class="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-300">Stripe</span>
+            <span class="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-300">PayPal</span>
+            <span class="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-300">Apple Pay</span>
+            <span class="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-300">Google Pay</span>
+            <span class="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-300">Amazon Pay</span>
+          </div>
+        </div>
+
+        <!-- Section 3: Social Media Channels (Full Width) -->
+        <div class="md:col-span-2 p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h4 class="text-sm font-bold text-white flex items-center gap-2">
+              <Share2 size={16} class="text-orange-400" />
+              <span>Social Media Profiles & Follow Channels</span>
+            </h4>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" bind:checked={footerConfig.show_socials} class="sr-only peer" />
+              <div class="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-orange-600"></div>
+              <span class="ml-2 text-xs text-slate-300 font-semibold">{footerConfig.show_socials ? 'Visible' : 'Hidden'}</span>
+            </label>
+          </div>
+
+          {#if footerConfig.show_socials}
+            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3.5">
+              {#each socialPlatforms as platform}
+                <div class="p-3.5 rounded-xl border transition-all space-y-2 {footerConfig.enabled_socials.includes(platform.id) ? 'bg-slate-950 border-orange-500/50 ring-1 ring-orange-500/20' : 'bg-slate-950/60 border-slate-800/80 opacity-60'}">
+                  <div class="flex items-center justify-between">
+                    <label class="flex items-center gap-2 font-bold text-white text-xs cursor-pointer">
+                      <Globe size={13} class="text-orange-400" />
+                      <span>{platform.name}</span>
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={footerConfig.enabled_socials.includes(platform.id)}
+                      on:change={() => toggleSocial(platform.id)}
+                      class="accent-orange-600 rounded"
+                    />
+                  </div>
+
+                  {#if footerConfig.enabled_socials.includes(platform.id)}
+                    <input
+                      type="text"
+                      bind:value={footerConfig.social_links[platform.id]}
+                      placeholder={platform.placeholder}
+                      class="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-200 font-mono text-xs focus:outline-none focus:border-orange-500"
+                    />
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+        <!-- Section 4: Copyright Bar (Full Width) -->
+        <div class="md:col-span-2 p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
+          <h4 class="text-sm font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
+            <ShieldCheck size={16} class="text-orange-400" />
+            <span>Full-Width Bottom Copyright Bar</span>
+          </h4>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            <label class="p-3.5 rounded-xl border cursor-pointer transition-all {footerConfig.copyright_format === 'standard' ? 'bg-orange-600/10 border-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400'}">
+              <div class="flex items-center gap-2.5">
+                <input
+                  type="radio"
+                  name="copyright_format"
+                  value="standard"
+                  bind:group={footerConfig.copyright_format}
+                  class="accent-orange-600"
+                />
+                <div>
+                  <div class="font-bold text-white text-xs">Dynamic Storefront Copyright</div>
+                  <div class="text-[11px] text-slate-400">© 2026 {settings.store_name || 'RustCraft'}. All rights reserved.</div>
+                </div>
+              </div>
+            </label>
+
+            <label class="p-3.5 rounded-xl border cursor-pointer transition-all {footerConfig.copyright_format === 'custom' ? 'bg-orange-600/10 border-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400'}">
+              <div class="flex items-center gap-2.5">
+                <input
+                  type="radio"
+                  name="copyright_format"
+                  value="custom"
+                  bind:group={footerConfig.copyright_format}
+                  class="accent-orange-600"
+                />
+                <div>
+                  <div class="font-bold text-white text-xs">Custom Copyright Line</div>
+                  <div class="text-[11px] text-slate-400">Explicit custom entity text</div>
+                </div>
+              </div>
+            </label>
+
+            {#if footerConfig.copyright_format === 'custom'}
+              <div class="sm:col-span-2">
+                <label class="block text-slate-300 font-semibold mb-1">Custom Copyright Text</label>
+                <input
+                  type="text"
+                  bind:value={footerConfig.custom_copyright}
+                  placeholder="e.g. Copyright © 2026 Example Store. All rights reserved."
+                  class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"
+                />
+              </div>
+            {/if}
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <!-- Add Navigation Item Modal -->

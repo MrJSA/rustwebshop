@@ -67,7 +67,8 @@ async fn main() -> anyhow::Result<()> {
     let app = routes::create_router(pool)
         .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))
         .layer(cors)
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("Axum Server listening on http://{}", addr);

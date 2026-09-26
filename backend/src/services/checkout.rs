@@ -21,11 +21,13 @@ impl CheckoutService {
         // Start strict ACID database transaction
         let mut tx = pool.begin().await?;
 
-        // 1. Fetch store settings for tax calculation
-        let tax_rate: f64 = sqlx::query_scalar("SELECT tax_rate_percent FROM store_settings WHERE id = 1")
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap_or(19.0);
+        // 1. Fetch store settings for tax calculation, tax mode, and order number format
+        let (store_tax_rate, tax_mode, prefix_enabled, order_prefix, date_enabled): (f64, String, bool, String, bool) = sqlx::query_as(
+            "SELECT tax_rate_percent, COALESCE(tax_mode, 'kleingewerbe'), COALESCE(order_prefix_enabled, true), COALESCE(order_prefix, 'ORD'), COALESCE(order_date_enabled, true) FROM store_settings WHERE id = 1"
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or((19.0, "kleingewerbe".to_string(), true, "ORD".to_string(), true));
 
         // 2. Fetch shipping rate if provided
         let mut shipping_cost_cents = 0;
@@ -43,6 +45,7 @@ impl CheckoutService {
         let mut subtotal_cents = 0;
         let mut order_items_to_insert = Vec::new();
         let mut digital_downloads = Vec::new();
+        let mut total_calculated_vat_cents = 0.0;
 
         for item in &req.items {
             if item.quantity <= 0 {
@@ -56,7 +59,7 @@ impl CheckoutService {
                     pv.id, pv.product_id, pv.sku, pv.title as variant_title, 
                     pv.price_override_cents, pv.stock_quantity,
                     p.title as product_title, p.base_price_cents, p.product_type,
-                    p.digital_download_url
+                    p.digital_download_url, p.tax_rate_percent
                 FROM product_variants pv
                 JOIN products p ON p.id = pv.product_id
                 WHERE pv.id = $1
@@ -78,6 +81,8 @@ impl CheckoutService {
             let base_price_cents: i32 = variant_row.get("base_price_cents");
             let product_type: String = variant_row.get("product_type");
             let digital_download_url: Option<String> = variant_row.get("digital_download_url");
+            let prod_tax_rate: Option<f64> = variant_row.get("tax_rate_percent");
+            let item_tax_rate = prod_tax_rate.unwrap_or(store_tax_rate);
 
             let is_digital = product_type == "digital";
 
@@ -96,6 +101,27 @@ impl CheckoutService {
             let unit_price = price_override_cents.unwrap_or(base_price_cents);
             let total_item_price = unit_price * item.quantity;
             subtotal_cents += total_item_price;
+
+            // Calculate item-level VAT according to store tax mode
+            match tax_mode.as_str() {
+                "included" => {
+                    // Price already includes VAT: VAT = gross - (gross / (1 + rate/100))
+                    let rate_fraction = item_tax_rate / 100.0;
+                    if rate_fraction > 0.0 {
+                        let item_vat = (total_item_price as f64) - ((total_item_price as f64) / (1.0 + rate_fraction));
+                        total_calculated_vat_cents += item_vat;
+                    }
+                }
+                "excluded" => {
+                    // Price is net: VAT = net * (rate/100)
+                    let rate_fraction = item_tax_rate / 100.0;
+                    let item_vat = (total_item_price as f64) * rate_fraction;
+                    total_calculated_vat_cents += item_vat;
+                }
+                _ => {
+                    // Kleingewerbe (§ 19 UStG): zero VAT collected
+                }
+            }
 
             // Deduct stock if physical product
             if !is_digital {
@@ -140,9 +166,22 @@ impl CheckoutService {
             ));
         }
 
-        // 4. Calculate Tax and Total
-        let tax_cents = ((subtotal_cents as f64) * (tax_rate / 100.0)).round() as i32;
-        let total_cents = subtotal_cents + shipping_cost_cents + tax_cents;
+        // 4. Calculate Tax and Total based on tax_mode
+        let (tax_cents, total_cents) = match tax_mode.as_str() {
+            "kleingewerbe" => {
+                (0, subtotal_cents + shipping_cost_cents)
+            }
+            "included" => {
+                // VAT is already included in subtotal: do not add on top
+                (total_calculated_vat_cents.round() as i32, subtotal_cents + shipping_cost_cents)
+            }
+            "excluded" => {
+                // VAT was not included: add on top of subtotal + shipping
+                let vat = total_calculated_vat_cents.round() as i32;
+                (vat, subtotal_cents + shipping_cost_cents + vat)
+            }
+            _ => (0, subtotal_cents + shipping_cost_cents),
+        };
 
         // 5. Verify & Process Payment
         let payment_row = sqlx::query(
@@ -175,12 +214,23 @@ impl CheckoutService {
             return Err(anyhow!("Payment failed: {}", payment_result.message));
         }
 
-        // 6. Generate Human-Readable Order Number (e.g. ORD-20260923-XXXX)
-        let order_number = format!(
-            "ORD-{}-{}",
-            Utc::now().format("%Y%m%d"),
-            Uuid::new_v4().simple().to_string()[..6].to_uppercase()
-        );
+        // 6. Generate Human-Readable Consecutive Order Number (GoBD Compliant)
+        let seq_num: i64 = sqlx::query_scalar("SELECT nextval('order_number_seq')")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap_or(10000);
+
+        let mut parts = Vec::new();
+        let clean_prefix = order_prefix.trim().to_uppercase();
+        if prefix_enabled && !clean_prefix.is_empty() {
+            parts.push(clean_prefix);
+        }
+        if date_enabled {
+            parts.push(Utc::now().format("%Y%m%d").to_string());
+        }
+        parts.push(seq_num.to_string());
+
+        let order_number = parts.join("-");
 
         let shipping_addr_json = serde_json::to_value(&req.shipping_address)?;
         let billing_addr_json = match req.billing_address {

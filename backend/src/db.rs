@@ -45,6 +45,8 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, sqlx::Error> {
         ("0007_tax_notice_and_migrations_table", include_str!("../migrations/0007_tax_notice_and_migrations_table.sql")),
         ("0008_legal_identity_fields", include_str!("../migrations/0008_legal_identity_fields.sql")),
         ("0009_footer_and_system_modes", include_str!("../migrations/0009_footer_and_system_modes.sql")),
+        ("0010_tax_modes_and_product_vat", include_str!("../migrations/0010_tax_modes_and_product_vat.sql")),
+        ("0011_custom_order_numbers", include_str!("../migrations/0011_custom_order_numbers.sql")),
     ];
 
     // If schema already existed prior to migration tracking, mark initial migrations 0001..0006 as applied if not tracked

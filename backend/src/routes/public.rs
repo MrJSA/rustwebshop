@@ -73,6 +73,7 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
         currency: settings.currency,
         currency_symbol: settings.currency_symbol,
         tax_rate_percent: settings.tax_rate_percent,
+        tax_mode: settings.tax_mode,
         deployment_mode: settings.deployment_mode,
         debug_mode: settings.debug_mode,
         support_email: settings.support_email,
@@ -107,6 +108,9 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
         dispute_resolution_notice: settings.dispute_resolution_notice,
         odr_url: settings.odr_url,
         footer_config: settings.footer_config,
+        order_prefix_enabled: settings.order_prefix_enabled,
+        order_prefix: settings.order_prefix,
+        order_date_enabled: settings.order_date_enabled,
     };
 
     let payment_providers = sqlx::query_as::<_, PaymentProviderRow>(
@@ -172,7 +176,7 @@ async fn list_products(
     State(pool): State<PgPool>,
     Query(query): Query<ProductQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let mut sql = "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE is_active = true".to_string();
+    let mut sql = "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE is_active = true".to_string();
 
     if let Some(cat) = &query.category {
         let descendant_names = get_category_and_descendants(&pool, cat).await;
@@ -227,7 +231,7 @@ async fn get_product_by_slug(
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let product = sqlx::query_as::<_, Product>(
-        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE slug = $1 AND is_active = true"
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE slug = $1 AND is_active = true"
     )
     .bind(slug)
     .fetch_optional(&pool)
@@ -1223,7 +1227,7 @@ async fn public_get_related_products(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let current_product = sqlx::query_as::<_, Product>(
-        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE id = $1"
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE id = $1"
     )
     .bind(id)
     .fetch_optional(&pool)
@@ -1233,7 +1237,7 @@ async fn public_get_related_products(
 
     let related = sqlx::query_as::<_, Product>(
         r#"
-        SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants
+        SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent
         FROM products 
         WHERE is_active = true AND id != $1
         ORDER BY (category = $2) DESC, (subcategory = $3) DESC, created_at DESC
@@ -1299,7 +1303,7 @@ async fn public_get_carousels(
                     .unwrap_or_default();
                 if !ids.is_empty() {
                     products = sqlx::query_as::<_, Product>(
-                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE is_active = true AND id = ANY($1)"
+                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE is_active = true AND id = ANY($1)"
                     )
                     .bind(&ids)
                     .fetch_all(&pool)
@@ -1307,7 +1311,7 @@ async fn public_get_carousels(
                     .unwrap_or_default();
                 } else {
                     products = sqlx::query_as::<_, Product>(
-                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE is_active = true ORDER BY created_at DESC LIMIT 10"
+                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE is_active = true ORDER BY created_at DESC LIMIT 10"
                     )
                     .fetch_all(&pool)
                     .await
@@ -1318,7 +1322,7 @@ async fn public_get_carousels(
                 let days = sec.get("days").and_then(|v| v.as_i64()).unwrap_or(30);
                 let limit = sec.get("limit").and_then(|v| v.as_i64()).unwrap_or(12);
                 products = sqlx::query_as::<_, Product>(
-                    "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products WHERE is_active = true AND created_at >= NOW() - ($1 || ' days')::INTERVAL ORDER BY created_at DESC LIMIT $2"
+                    "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE is_active = true AND created_at >= NOW() - ($1 || ' days')::INTERVAL ORDER BY created_at DESC LIMIT $2"
                 )
                 .bind(days.to_string())
                 .bind(limit)
@@ -1332,7 +1336,8 @@ async fn public_get_carousels(
                     r#"
                     SELECT p.id, p.title, p.slug, p.description, p.product_type, p.category, p.subcategory,
                            p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at,
-                           p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images, p.has_multiple_variants
+                           p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images, p.has_multiple_variants,
+                           p.tax_rate_percent
                     FROM products p
                     LEFT JOIN order_items oi ON oi.product_id = p.id
                     WHERE p.is_active = true
@@ -1352,7 +1357,8 @@ async fn public_get_carousels(
                     r#"
                     SELECT DISTINCT p.id, p.title, p.slug, p.description, p.product_type, p.category, p.subcategory,
                            p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at,
-                           p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images, p.has_multiple_variants
+                           p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images, p.has_multiple_variants,
+                           p.tax_rate_percent
                     FROM products p
                     JOIN product_variants pv ON pv.product_id = p.id
                     WHERE p.is_active = true AND (p.product_type = 'digital' OR pv.stock_quantity > 0)

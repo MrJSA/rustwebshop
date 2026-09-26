@@ -24,6 +24,7 @@
     Sparkles,
     Scale,
     Download,
+    Upload,
     FileArchive,
     Layout,
     Share2,
@@ -61,7 +62,23 @@
   let currency = settings.currency || 'EUR';
   let currencySymbol = settings.currency_symbol || '€';
   let taxRatePercent = settings.tax_rate_percent !== undefined ? settings.tax_rate_percent : 19.0;
+  let taxMode = settings.tax_mode || 'kleingewerbe';
   let logoUrl = settings.logo_url || '';
+
+  // Order Number Layout & GoBD Sequence Customization
+  let orderPrefixEnabled = settings.order_prefix_enabled !== undefined ? settings.order_prefix_enabled : true;
+  let orderPrefix = settings.order_prefix || 'ORD';
+  let orderDateEnabled = settings.order_date_enabled !== undefined ? settings.order_date_enabled : true;
+
+  $: todayDateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  $: sampleOrderNumber = (() => {
+    const parts = [];
+    const cleanP = (orderPrefix || '').trim().toUpperCase().slice(0, 7);
+    if (orderPrefixEnabled && cleanP) parts.push(cleanP);
+    if (orderDateEnabled) parts.push(todayDateStr);
+    parts.push('10000');
+    return parts.join('-');
+  })();
 
   // System Environment & Debugging Mode
   let deploymentMode = settings.deployment_mode || 'development';
@@ -71,6 +88,17 @@
   let identitySuccessNotice = '';
   let identityErrorNotice = '';
   let showLogoPicker = false;
+
+  function handleTaxModeChange(mode) {
+    taxMode = mode;
+    if (mode === 'kleingewerbe') {
+      taxNotice = 'Gemäß § 19 UStG wird keine Umsatzsteuer berechnet.';
+    } else if (mode === 'included') {
+      taxNotice = 'Preise verstehen sich inklusive der gesetzlichen Mehrwertsteuer.';
+    } else if (mode === 'excluded') {
+      taxNotice = 'Preise verstehen sich zuzüglich der gesetzlichen Mehrwertsteuer.';
+    }
+  }
 
   async function handleSaveIdentity() {
     isSavingIdentity = true;
@@ -96,6 +124,7 @@
         phone,
         vat_id: vatId,
         tax_notice: taxNotice,
+        tax_mode: taxMode,
         commercial_register: commercialRegister,
         odr_url: odrUrl,
         dispute_resolution_notice: disputeResolutionNotice,
@@ -103,6 +132,9 @@
         currency_symbol: currencySymbol,
         tax_rate_percent: parseFloat(taxRatePercent) || 0,
         logo_url: logoUrl,
+        order_prefix_enabled: orderPrefixEnabled,
+        order_prefix: (orderPrefix || '').trim().toUpperCase().slice(0, 7),
+        order_date_enabled: orderDateEnabled,
         deployment_mode: deploymentMode,
         debug_mode: debugMode
       };
@@ -115,7 +147,7 @@
 
       if (res.ok) {
         settings = payload;
-        identitySuccessNotice = 'Store Identity & Environment settings saved!';
+        identitySuccessNotice = 'Store Identity & Taxation settings saved!';
         setTimeout(() => identitySuccessNotice = '', 4500);
       } else {
         const err = await res.json();
@@ -128,133 +160,64 @@
     }
   }
 
-  // --- Footer & Social State ---
-  let footerConfig = {
-    branding_mode: 'full',
-    menu_layout: 'columns',
-    columns: [
-      {
-        title: 'Customer Service',
-        links: [
-          { label: 'Shipping Policy & Rates', url: '/policies/shipment-policy' },
-          { label: 'Return Policy', url: '/policies/return-policy' },
-          { label: 'Revocation Policy & Form', url: '/policies/revocation-policy' },
-          { label: 'Track Order', url: '/track' }
-        ]
-      },
-      {
-        title: 'Legal & Privacy',
-        links: [
-          { label: 'Legal Notice (Impressum)', url: '/policies/legal-notice' },
-          { label: 'Terms and Conditions (AGB)', url: '/policies/terms-conditions' },
-          { label: 'Privacy Policy (GDPR)', url: '/policies/privacy-policy' },
-          { label: 'Cookie Policy', url: '/policies/cookie-policy' }
-        ]
-      },
-      {
-        title: 'Store & Support',
-        links: [
-          { label: 'Contact Information', url: '/policies/contact' }
-        ]
-      }
-    ],
-    social_links: {
-      github: 'https://github.com',
-      twitter: 'https://x.com',
-      instagram: '',
-      youtube: '',
-      facebook: '',
-      discord: 'https://discord.gg',
-      whatsapp: ''
-    },
-    enabled_socials: ['github', 'twitter', 'discord'],
-    show_socials: true,
-    show_payments: true,
-    copyright_format: 'standard',
-    custom_copyright: '',
-    ...(settings.footer_config || {})
-  };
-
-  let isSavingFooter = false;
-  let footerSuccessNotice = '';
-  let footerErrorNotice = '';
-
-  function toggleSocial(platform) {
-    if (footerConfig.enabled_socials.includes(platform)) {
-      footerConfig.enabled_socials = footerConfig.enabled_socials.filter((p) => p !== platform);
-    } else {
-      footerConfig.enabled_socials = [...footerConfig.enabled_socials, platform];
-    }
-  }
-
-  function addColumn() {
-    if (footerConfig.columns.length < 3) {
-      footerConfig.columns = [
-        ...footerConfig.columns,
-        { title: `Section ${footerConfig.columns.length + 1}`, links: [{ label: 'New Link', url: '/' }] }
-      ];
-    }
-  }
-
-  function removeColumn(idx) {
-    footerConfig.columns = footerConfig.columns.filter((_, i) => i !== idx);
-  }
-
-  function addLinkToColumn(colIdx) {
-    footerConfig.columns[colIdx].links = [
-      ...footerConfig.columns[colIdx].links,
-      { label: 'New Link', url: '/' }
-    ];
-  }
-
-  function removeLinkFromColumn(colIdx, linkIdx) {
-    footerConfig.columns[colIdx].links = footerConfig.columns[colIdx].links.filter((_, i) => i !== linkIdx);
-  }
-
-  async function handleSaveFooter() {
-    isSavingFooter = true;
-    footerSuccessNotice = '';
-    footerErrorNotice = '';
-
-    const token = localStorage.getItem('admin_token');
-    const headers = {
-      'Content-Type': 'application/json',
-      'X-Dev-Mode': 'true',
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
-    };
-
-    try {
-      const payload = {
-        ...settings,
-        footer_config: footerConfig
-      };
-
-      const res = await fetch('/api/v1/admin/settings/system', {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify(payload)
-      });
-
-      if (res.ok) {
-        settings = payload;
-        footerSuccessNotice = 'Storefront Footer & Social settings saved successfully!';
-        setTimeout(() => footerSuccessNotice = '', 4500);
-      } else {
-        const err = await res.json();
-        footerErrorNotice = err.error || 'Failed to save footer settings.';
-      }
-    } catch (e) {
-      footerErrorNotice = 'Failed to connect to backend server.';
-    } finally {
-      isSavingFooter = false;
-    }
-  }
-
   // --- Export & Backups Handlers ---
   let isExportingData = false;
   let isExportingMedia = false;
+  let isImportingData = false;
+  let importFileInput;
   let exportSuccessNotice = '';
   let exportErrorNotice = '';
+
+  async function handleFileSelectForImport(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    exportErrorNotice = '';
+    exportSuccessNotice = '';
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+
+      // Strict schema version check to prevent data corruption
+      const version = parsed.version || '';
+      if (!version.startsWith('1.')) {
+        exportErrorNotice = `Incompatible backup schema: version '${version || 'unknown'}'. This store requires schema version 1.x. Import was safely aborted.`;
+        if (importFileInput) importFileInput.value = '';
+        return;
+      }
+
+      if (!confirm(`Are you sure you want to restore store data from '${file.name}' (Schema Version: ${version})?\n\nThis will update your store settings, products, categories, CMS policy pages, navigation menus, and shipping configuration.`)) {
+        if (importFileInput) importFileInput.value = '';
+        return;
+      }
+
+      isImportingData = true;
+      const token = localStorage.getItem('admin_token');
+      const res = await fetch('/api/v1/admin/import/store-data', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Dev-Mode': 'true',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: text
+      });
+
+      const resData = await res.json().catch(() => ({}));
+      if (res.ok) {
+        exportSuccessNotice = `Store restored successfully! Restored: ${resData.restored?.products || 0} products, ${resData.restored?.categories || 0} categories, ${resData.restored?.pages || 0} policy pages, ${resData.restored?.menu_items || 0} menu items. Reloading...`;
+        setTimeout(() => window.location.reload(), 2500);
+      } else {
+        exportErrorNotice = resData.error || 'Failed to restore store data.';
+      }
+    } catch (err) {
+      exportErrorNotice = 'Invalid JSON backup file or parse failure: ' + err.message;
+    } finally {
+      isImportingData = false;
+      if (importFileInput) importFileInput.value = '';
+    }
+  }
 
   async function handleExportStoreData() {
     isExportingData = true;
@@ -515,15 +478,6 @@
 
     <button
       type="button"
-      on:click={() => setTab('footer')}
-      class="px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 {activeTab === 'footer' ? 'bg-orange-600 text-white shadow-lg shadow-orange-600/25 ring-1 ring-orange-500' : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'}"
-    >
-      <Layout size={15} />
-      <span>Footer & Social</span>
-    </button>
-
-    <button
-      type="button"
       on:click={() => setTab('export')}
       class="px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 {activeTab === 'export' ? 'bg-orange-600 text-white shadow-lg shadow-orange-600/25 ring-1 ring-orange-500' : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'}"
     >
@@ -663,89 +617,254 @@
           </div>
         </div>
 
-        <!-- Card 2: Tax, Invoicing & Legal Notices -->
-        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
-          <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
-            <ShieldCheck size={18} class="text-orange-400" />
-            <span>Taxation, Currency & Invoice Disclosures</span>
+        <!-- Card 2: Taxation & VAT Configuration -->
+        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-5">
+          <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center justify-between">
+            <span class="flex items-center gap-2">
+              <ShieldCheck size={18} class="text-orange-400" />
+              <span>Taxation & VAT Configuration (Umsatzsteuer-Modus)</span>
+            </span>
+            <span class="text-[11px] font-mono px-2.5 py-0.5 rounded-full {taxMode === 'kleingewerbe' ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20' : 'bg-orange-500/15 text-orange-400 border border-orange-500/20'}">
+              {taxMode === 'kleingewerbe' ? '§ 19 UStG Active' : taxMode === 'included' ? 'Gross (Brutto) VAT' : 'Net (Netto) VAT'}
+            </span>
           </h2>
 
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+          <div class="space-y-4 text-xs">
             <div>
-              <label class="block text-slate-300 font-semibold mb-1">VAT Identification Number (USt-IdNr.)</label>
-              <input
-                type="text"
-                bind:value={vatId}
-                placeholder="e.g. DE314159265"
-                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-              />
+              <label class="block text-slate-300 font-semibold mb-2">Select Shop VAT / Tax Collection Regime:</label>
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+                <!-- Option 1: Kleingewerbe -->
+                <button
+                  type="button"
+                  on:click={() => handleTaxModeChange('kleingewerbe')}
+                  class="p-4 rounded-xl border text-left transition-all flex flex-col justify-between {taxMode === 'kleingewerbe' ? 'bg-orange-600/15 border-orange-500 ring-1 ring-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'}"
+                >
+                  <div class="space-y-1.5">
+                    <div class="flex items-center justify-between">
+                      <span class="font-bold text-white text-xs">German Kleingewerbe</span>
+                      <input type="radio" name="tax_mode_radio" checked={taxMode === 'kleingewerbe'} class="accent-orange-500" />
+                    </div>
+                    <div class="text-[11px] text-amber-400 font-medium">Without VAT (§ 19 UStG)</div>
+                    <p class="text-[11px] text-slate-400 leading-relaxed">
+                      No VAT is collected or added during checkout or payment. Official § 19 UStG exemption text is printed on invoices and packing slips.
+                    </p>
+                  </div>
+                </button>
+
+                <!-- Option 2: Included VAT (Brutto) -->
+                <button
+                  type="button"
+                  on:click={() => handleTaxModeChange('included')}
+                  class="p-4 rounded-xl border text-left transition-all flex flex-col justify-between {taxMode === 'included' ? 'bg-orange-600/15 border-orange-500 ring-1 ring-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'}"
+                >
+                  <div class="space-y-1.5">
+                    <div class="flex items-center justify-between">
+                      <span class="font-bold text-white text-xs">Included VAT (Brutto)</span>
+                      <input type="radio" name="tax_mode_radio" checked={taxMode === 'included'} class="accent-orange-500" />
+                    </div>
+                    <div class="text-[11px] text-emerald-400 font-medium">VAT inside product price (B2C)</div>
+                    <p class="text-[11px] text-slate-400 leading-relaxed">
+                      Display prices include VAT. Product tax percentage is extracted and shown as "Included VAT" on checkout, orders, and PDF invoices.
+                    </p>
+                  </div>
+                </button>
+
+                <!-- Option 3: Excluded VAT (Netto) -->
+                <button
+                  type="button"
+                  on:click={() => handleTaxModeChange('excluded')}
+                  class="p-4 rounded-xl border text-left transition-all flex flex-col justify-between {taxMode === 'excluded' ? 'bg-orange-600/15 border-orange-500 ring-1 ring-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'}"
+                >
+                  <div class="space-y-1.5">
+                    <div class="flex items-center justify-between">
+                      <span class="font-bold text-white text-xs">Excluded VAT (Netto)</span>
+                      <input type="radio" name="tax_mode_radio" checked={taxMode === 'excluded'} class="accent-orange-500" />
+                    </div>
+                    <div class="text-[11px] text-sky-400 font-medium">VAT added in cart & checkout (B2B)</div>
+                    <p class="text-[11px] text-slate-400 leading-relaxed">
+                      Catalog prices are net. Applicable product VAT percentages are calculated and added on top in the shopping cart and checkout total.
+                    </p>
+                  </div>
+                </button>
+              </div>
             </div>
 
-            <div>
-              <label class="block text-slate-300 font-semibold mb-1">Default Currency Code</label>
-              <input
-                type="text"
-                bind:value={currency}
-                placeholder="EUR"
-                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-              />
-            </div>
-
-            <div>
-              <label class="block text-slate-300 font-semibold mb-1">Currency Symbol</label>
-              <input
-                type="text"
-                bind:value={currencySymbol}
-                placeholder="€"
-                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-              />
-            </div>
-
-            <div class="sm:col-span-3">
-              <label class="block text-slate-300 font-semibold mb-1">
-                Small Business Regulation / Tax Exemption Notice (§ 19 UStG)
-              </label>
-              <textarea
-                bind:value={taxNotice}
-                rows="2"
-                placeholder="Gemäß § 19 UStG wird keine Umsatzsteuer berechnet (Kleinunternehmerstatus)."
-                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs leading-relaxed focus:outline-none focus:border-orange-500"
-              ></textarea>
-              <p class="text-[10px] text-slate-500 mt-1">
-                Appears automatically in the footer of all PDF Invoices and Packing Slips, and resolves into {"{{TAX_NOTICE}}"} in Policy pages.
-              </p>
-            </div>
-
-            <div class="sm:col-span-3 pt-2 border-t border-slate-800 space-y-3">
-              <div class="flex items-center gap-2 text-white font-semibold">
-                <Scale size={15} class="text-orange-400" />
-                <span>EU Consumer Dispute Resolution (ODR Platform)</span>
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-4 pt-2">
+              <div>
+                <label class="block text-slate-300 font-semibold mb-1">Standard Store VAT Rate (%)</label>
+                <div class="relative">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="100"
+                    bind:value={taxRatePercent}
+                    disabled={taxMode === 'kleingewerbe'}
+                    class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500 disabled:opacity-40"
+                  />
+                  <span class="absolute right-3 top-2.5 text-slate-500 font-mono">%</span>
+                </div>
+                <p class="text-[10px] text-slate-500 mt-1">Default rate for new products (e.g. 19% or 7%).</p>
               </div>
 
               <div>
-                <label class="block text-slate-300 font-semibold mb-1">Online Dispute Resolution Platform URL</label>
+                <label class="block text-slate-300 font-semibold mb-1">VAT ID (USt-IdNr.)</label>
                 <input
                   type="text"
-                  bind:value={odrUrl}
-                  placeholder="https://ec.europa.eu/odr"
+                  bind:value={vatId}
+                  placeholder="e.g. DE314159265"
                   class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
                 />
+                <p class="text-[10px] text-slate-500 mt-1">Leave blank if unregistered.</p>
               </div>
 
               <div>
-                <label class="block text-slate-300 font-semibold mb-1">Dispute Resolution Statement / Arbitration Notice</label>
+                <label class="block text-slate-300 font-semibold mb-1">Currency Code</label>
+                <input
+                  type="text"
+                  bind:value={currency}
+                  placeholder="EUR"
+                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+                />
+                <p class="text-[10px] text-slate-500 mt-1">ISO 4217 (EUR, USD, GBP).</p>
+              </div>
+
+              <div>
+                <label class="block text-slate-300 font-semibold mb-1">Currency Symbol</label>
+                <input
+                  type="text"
+                  bind:value={currencySymbol}
+                  placeholder="€"
+                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+                />
+                <p class="text-[10px] text-slate-500 mt-1">Formatted across storefront.</p>
+              </div>
+
+              <div class="sm:col-span-4">
+                <label class="block text-slate-300 font-semibold mb-1">
+                  Tax Exemption / Statutory Invoice Notice (§ 19 UStG Notice)
+                </label>
                 <textarea
-                  bind:value={disputeResolutionNotice}
+                  bind:value={taxNotice}
                   rows="2"
-                  placeholder="The European Commission provides a platform for out-of-court resolution of disputes..."
+                  placeholder="Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."
                   class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs leading-relaxed focus:outline-none focus:border-orange-500"
                 ></textarea>
+                <p class="text-[10px] text-slate-500 mt-1">
+                  Appears automatically in the footer of all PDF Invoices and Packing Slips, and replaces {"{{TAX_NOTICE}}"} in Policy pages.
+                </p>
+              </div>
+
+              <div class="sm:col-span-4 pt-2 border-t border-slate-800 space-y-3">
+                <div class="flex items-center gap-2 text-white font-semibold">
+                  <Scale size={15} class="text-orange-400" />
+                  <span>EU Consumer Dispute Resolution (ODR Platform)</span>
+                </div>
+
+                <div>
+                  <label class="block text-slate-300 font-semibold mb-1">Online Dispute Resolution Platform URL</label>
+                  <input
+                    type="text"
+                    bind:value={odrUrl}
+                    placeholder="https://ec.europa.eu/odr"
+                    class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+                  />
+                </div>
+
+                <div>
+                  <label class="block text-slate-300 font-semibold mb-1">Dispute Resolution Statement / Arbitration Notice</label>
+                  <textarea
+                    bind:value={disputeResolutionNotice}
+                    rows="2"
+                    placeholder="The European Commission provides a platform for out-of-court resolution of disputes..."
+                    class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs leading-relaxed focus:outline-none focus:border-orange-500"
+                  ></textarea>
+                </div>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Card 3: Logo & Header Brand Image -->
+        <!-- Card 3: Order Number Format & Sequential Layout (GoBD-konform) -->
+        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-5">
+          <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center justify-between">
+            <span class="flex items-center gap-2">
+              <Sliders size={18} class="text-orange-400" />
+              <span>Order Number Layout & Sequential Counter (GoBD)</span>
+            </span>
+            <span class="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 font-bold">
+              Ascending Numbers Active
+            </span>
+          </h2>
+
+          <div class="space-y-4 text-xs">
+            <p class="text-slate-400 leading-relaxed">
+              In accordance with German tax regulations (GoBD & § 14 UStG), every generated order receives a strictly ascending, consecutive counter starting at 10000. Customize whether to include a store prefix or daily date code in the final number string.
+            </p>
+
+            <!-- Live Order Number Preview Badge -->
+            <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">Live Next Order Number Preview:</span>
+                <span class="text-xl font-black font-mono text-orange-400 tracking-wider mt-0.5 block">{sampleOrderNumber}</span>
+              </div>
+              <div class="text-[11px] text-slate-500 font-mono space-y-0.5">
+                <div>Prefix: <span class="text-white">{orderPrefixEnabled ? (orderPrefix.trim().toUpperCase() || 'NONE') : 'OFF'}</span></div>
+                <div>Date Stamp: <span class="text-white">{orderDateEnabled ? todayDateStr : 'OFF'}</span></div>
+                <div>Sequence Counter: <span class="text-emerald-400 font-bold">10000+ (Ascending)</span></div>
+              </div>
+            </div>
+
+            <!-- Controls Grid -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-5 pt-1">
+              <!-- Prefix Settings -->
+              <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+                <div class="flex items-center justify-between">
+                  <span class="font-bold text-white">Custom Brand Prefix</span>
+                  <label class="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" bind:checked={orderPrefixEnabled} class="sr-only peer" />
+                    <div class="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-orange-600"></div>
+                  </label>
+                </div>
+                <p class="text-[11px] text-slate-400 leading-snug">
+                  Toggle on/off an alphanumeric brand prefix (up to 7 characters, e.g. <code class="text-orange-400 font-mono">ORD</code> or <code class="text-orange-400 font-mono">ABCDEFG</code>).
+                </p>
+                <div>
+                  <label class="block text-slate-400 mb-1 text-[11px]">Prefix Code (Max 7 Letters)</label>
+                  <input
+                    type="text"
+                    bind:value={orderPrefix}
+                    maxlength="7"
+                    disabled={!orderPrefixEnabled}
+                    placeholder="e.g. ORD"
+                    class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono uppercase text-xs focus:outline-none focus:border-orange-500 disabled:opacity-40"
+                  />
+                </div>
+              </div>
+
+              <!-- Date Code Settings -->
+              <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+                <div class="flex items-center justify-between">
+                  <span class="font-bold text-white">Date Code (YYYYMMDD)</span>
+                  <label class="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" bind:checked={orderDateEnabled} class="sr-only peer" />
+                    <div class="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-orange-600"></div>
+                  </label>
+                </div>
+                <p class="text-[11px] text-slate-400 leading-snug">
+                  Include or exclude the UTC date timestamp (<code class="text-orange-400 font-mono">{todayDateStr}</code>) in the order string.
+                </p>
+                <div class="pt-2">
+                  <div class="text-[11px] text-slate-400">
+                    Resulting Pattern: <code class="text-white font-mono">{orderPrefixEnabled ? '[PREFIX]-' : ''}{orderDateEnabled ? '[DATE]-' : ''}[10000]</code>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 4: Logo & Header Brand Image -->
         <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
           <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
             <Image size={18} class="text-orange-400" />
@@ -1144,366 +1263,7 @@
   {:else if activeTab === 'media'}
     <MediaManager />
 
-  <!-- TAB 6: Footer & Social -->
-  {:else if activeTab === 'footer'}
-    <div class="space-y-6">
-      {#if footerSuccessNotice}
-        <div class="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold flex items-center gap-2">
-          <CheckCircle2 size={16} />
-          <span>{footerSuccessNotice}</span>
-        </div>
-      {/if}
-
-      {#if footerErrorNotice}
-        <div class="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs font-semibold flex items-center gap-2">
-          <AlertCircle size={16} />
-          <span>{footerErrorNotice}</span>
-        </div>
-      {/if}
-
-      <form on:submit|preventDefault={handleSaveFooter} class="space-y-6">
-        <!-- Section 1: Left - Store Branding -->
-        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
-          <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
-            <Building size={18} class="text-orange-400" />
-            <span>Left Section: Storefront Branding Presentation</span>
-          </h2>
-          <p class="text-xs text-slate-400">Choose how your brand identity appears on the left side of the storefront footer.</p>
-
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <label class="p-4 rounded-xl border cursor-pointer transition-all {footerConfig.branding_mode === 'full' ? 'bg-orange-600/10 border-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'}">
-              <div class="flex items-center gap-3">
-                <input
-                  type="radio"
-                  name="branding_mode"
-                  value="full"
-                  bind:group={footerConfig.branding_mode}
-                  class="accent-orange-600"
-                />
-                <div>
-                  <div class="text-xs font-bold text-white">Full Store Identity & Details</div>
-                  <div class="text-[11px] text-slate-400 mt-0.5">Logo, store name, address, support email, and phone number</div>
-                </div>
-              </div>
-            </label>
-
-            <label class="p-4 rounded-xl border cursor-pointer transition-all {footerConfig.branding_mode === 'logo_only' ? 'bg-orange-600/10 border-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'}">
-              <div class="flex items-center gap-3">
-                <input
-                  type="radio"
-                  name="branding_mode"
-                  value="logo_only"
-                  bind:group={footerConfig.branding_mode}
-                  class="accent-orange-600"
-                />
-                <div>
-                  <div class="text-xs font-bold text-white">Logo Only (Minimalist)</div>
-                  <div class="text-[11px] text-slate-400 mt-0.5">Displays only the brand logo or store title without address details</div>
-                </div>
-              </div>
-            </label>
-          </div>
-        </div>
-
-        <!-- Section 2: Middle - Footer Menu (Columns vs Single Line) -->
-        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
-            <h2 class="text-base font-bold text-white flex items-center gap-2">
-              <Layout size={18} class="text-orange-400" />
-              <span>Middle Section: Footer Menu & Column Architecture</span>
-            </h2>
-            <div class="flex items-center gap-2">
-              <label class="inline-flex items-center gap-2 text-xs text-slate-300">
-                <input
-                  type="radio"
-                  name="menu_layout"
-                  value="columns"
-                  bind:group={footerConfig.menu_layout}
-                  class="accent-orange-600"
-                />
-                <span>Up to 3 Columns</span>
-              </label>
-              <label class="inline-flex items-center gap-2 text-xs text-slate-300 ml-3">
-                <input
-                  type="radio"
-                  name="menu_layout"
-                  value="single_line"
-                  bind:group={footerConfig.menu_layout}
-                  class="accent-orange-600"
-                />
-                <span>Single Line Menu</span>
-              </label>
-            </div>
-          </div>
-
-          {#if footerConfig.menu_layout === 'columns'}
-            <div class="space-y-4">
-              <div class="flex items-center justify-between">
-                <p class="text-xs text-slate-400">Configure up to 3 top-aligned navigation columns with customized headings.</p>
-                {#if footerConfig.columns.length < 3}
-                  <button
-                    type="button"
-                    on:click={addColumn}
-                    class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors"
-                  >
-                    <Plus size={13} class="text-orange-400" />
-                    <span>Add Column ({footerConfig.columns.length}/3)</span>
-                  </button>
-                {/if}
-              </div>
-
-              <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {#each footerConfig.columns as col, colIdx}
-                  <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
-                    <div class="flex items-center justify-between gap-2 border-b border-slate-800/80 pb-2">
-                      <input
-                        type="text"
-                        bind:value={col.title}
-                        placeholder="Column Heading"
-                        class="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white font-bold text-xs focus:outline-none focus:border-orange-500"
-                      />
-                      {#if footerConfig.columns.length > 1}
-                        <button
-                          type="button"
-                          on:click={() => removeColumn(colIdx)}
-                          class="p-1.5 text-slate-500 hover:text-rose-400 transition-colors"
-                          title="Remove Column"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      {/if}
-                    </div>
-
-                    <div class="space-y-2">
-                      {#each col.links as link, lIdx}
-                        <div class="flex items-center gap-2">
-                          <input
-                            type="text"
-                            bind:value={link.label}
-                            placeholder="Link Title"
-                            class="w-1/2 px-2 py-1 rounded bg-slate-900 border border-slate-800 text-white text-[11px] focus:outline-none focus:border-orange-500"
-                          />
-                          <input
-                            type="text"
-                            bind:value={link.url}
-                            placeholder="/path"
-                            class="w-1/2 px-2 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300 font-mono text-[11px] focus:outline-none focus:border-orange-500"
-                          />
-                          <button
-                            type="button"
-                            on:click={() => removeLinkFromColumn(colIdx, lIdx)}
-                            class="p-1 text-slate-600 hover:text-rose-400 transition-colors"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        </div>
-                      {/each}
-
-                      <button
-                        type="button"
-                        on:click={() => addLinkToColumn(colIdx)}
-                        class="w-full py-1.5 rounded border border-dashed border-slate-800 hover:border-orange-500 text-slate-400 hover:text-orange-400 text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors mt-2"
-                      >
-                        <Plus size={11} />
-                        <span>Add Link</span>
-                      </button>
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            </div>
-          {:else}
-            <!-- Single Line Mode -->
-            <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
-              <p class="text-xs text-slate-400">Links will be displayed horizontally in a single bar across the middle section.</p>
-              <div class="space-y-2">
-                {#if footerConfig.columns[0]}
-                  {#each footerConfig.columns[0].links as link, lIdx}
-                    <div class="flex items-center gap-2">
-                      <input
-                        type="text"
-                        bind:value={link.label}
-                        placeholder="Link Title"
-                        class="w-1/3 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"
-                      />
-                      <input
-                        type="text"
-                        bind:value={link.url}
-                        placeholder="/path or https://..."
-                        class="flex-1 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 font-mono text-xs focus:outline-none focus:border-orange-500"
-                      />
-                      <button
-                        type="button"
-                        on:click={() => removeLinkFromColumn(0, lIdx)}
-                        class="p-1.5 text-slate-600 hover:text-rose-400 transition-colors"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  {/each}
-
-                  <button
-                    type="button"
-                    on:click={() => addLinkToColumn(0)}
-                    class="py-2 px-4 rounded-xl border border-dashed border-slate-800 hover:border-orange-500 text-slate-400 hover:text-orange-400 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors mt-2"
-                  >
-                    <Plus size={13} />
-                    <span>Add Horizontal Link</span>
-                  </button>
-                {/if}
-              </div>
-            </div>
-          {/if}
-        </div>
-
-        <!-- Section 3: Right - Follow Us Platforms & Supported Payment Gateways -->
-        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-6">
-          <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
-            <Share2 size={18} class="text-orange-400" />
-            <span>Right Section: "Follow Us" Social Channels & Payment Badges</span>
-          </h2>
-
-          <!-- Part A: Social Follow Links -->
-          <div class="space-y-4">
-            <div class="flex items-center justify-between">
-              <div>
-                <h3 class="text-xs font-bold text-white uppercase tracking-wider">Follow Us Platforms</h3>
-                <p class="text-[11px] text-slate-400 mt-0.5">Toggle platforms on/off and provide your official profile URL.</p>
-              </div>
-              <label class="relative inline-flex items-center cursor-pointer">
-                <input type="checkbox" bind:checked={footerConfig.show_socials} class="sr-only peer" />
-                <div class="w-10 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-orange-600"></div>
-                <span class="ml-2 text-xs text-slate-300 font-semibold">{footerConfig.show_socials ? 'Section Enabled' : 'Disabled'}</span>
-              </label>
-            </div>
-
-            {#if footerConfig.show_socials}
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                {#each [
-                  { id: 'github', name: 'GitHub', placeholder: 'https://github.com/your-username' },
-                  { id: 'twitter', name: 'Twitter / X', placeholder: 'https://x.com/your-handle' },
-                  { id: 'instagram', name: 'Instagram', placeholder: 'https://instagram.com/your-profile' },
-                  { id: 'youtube', name: 'YouTube', placeholder: 'https://youtube.com/@your-channel' },
-                  { id: 'facebook', name: 'Facebook', placeholder: 'https://facebook.com/your-page' },
-                  { id: 'discord', name: 'Discord', placeholder: 'https://discord.gg/your-invite' },
-                  { id: 'whatsapp', name: 'WhatsApp', placeholder: 'https://wa.me/your-phone-number' }
-                ] as platform}
-                  <div class="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-                    <div class="flex items-center justify-between">
-                      <label class="flex items-center gap-2 font-bold text-white cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={footerConfig.enabled_socials.includes(platform.id)}
-                          on:change={() => toggleSocial(platform.id)}
-                          class="accent-orange-600 rounded"
-                        />
-                        <span>{platform.name}</span>
-                      </label>
-                      <span class="text-[10px] font-mono {footerConfig.enabled_socials.includes(platform.id) ? 'text-emerald-400' : 'text-slate-600'}">
-                        {footerConfig.enabled_socials.includes(platform.id) ? 'ACTIVE' : 'OFF'}
-                      </span>
-                    </div>
-                    {#if footerConfig.enabled_socials.includes(platform.id)}
-                      <input
-                        type="text"
-                        bind:value={footerConfig.social_links[platform.id]}
-                        placeholder={platform.placeholder}
-                        class="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-200 font-mono text-xs focus:outline-none focus:border-orange-500"
-                      />
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-
-          <!-- Part B: Accepted Payments Badges -->
-          <div class="space-y-3 pt-4 border-t border-slate-800">
-            <div class="flex items-center justify-between">
-              <div>
-                <h3 class="text-xs font-bold text-white uppercase tracking-wider">Accepted Payment Badges</h3>
-                <p class="text-[11px] text-slate-400 mt-0.5">Render verified official provider logos (Stripe, PayPal, Apple Pay, Google Pay, Amazon Pay) directly beneath Follow Us.</p>
-              </div>
-              <label class="relative inline-flex items-center cursor-pointer">
-                <input type="checkbox" bind:checked={footerConfig.show_payments} class="sr-only peer" />
-                <div class="w-10 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-orange-600"></div>
-                <span class="ml-2 text-xs text-slate-300 font-semibold">{footerConfig.show_payments ? 'Visible' : 'Hidden'}</span>
-              </label>
-            </div>
-          </div>
-        </div>
-
-        <!-- Section 4: Full-Width Bottom Copyright Bar -->
-        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
-          <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
-            <ShieldCheck size={18} class="text-orange-400" />
-            <span>Bottom Bar: Full-Width Copyright Line</span>
-          </h2>
-
-          <div class="space-y-4 text-xs">
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <label class="p-3.5 rounded-xl border cursor-pointer transition-all {footerConfig.copyright_format === 'standard' ? 'bg-orange-600/10 border-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400'}">
-                <div class="flex items-center gap-2.5">
-                  <input
-                    type="radio"
-                    name="copyright_format"
-                    value="standard"
-                    bind:group={footerConfig.copyright_format}
-                    class="accent-orange-600"
-                  />
-                  <div>
-                    <div class="font-bold text-white">Dynamic Storefront Copyright</div>
-                    <div class="text-[11px] text-slate-400">© 2026 {storeName || 'RustCraft'}. All rights reserved.</div>
-                  </div>
-                </div>
-              </label>
-
-              <label class="p-3.5 rounded-xl border cursor-pointer transition-all {footerConfig.copyright_format === 'custom' ? 'bg-orange-600/10 border-orange-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400'}">
-                <div class="flex items-center gap-2.5">
-                  <input
-                    type="radio"
-                    name="copyright_format"
-                    value="custom"
-                    bind:group={footerConfig.copyright_format}
-                    class="accent-orange-600"
-                  />
-                  <div>
-                    <div class="font-bold text-white">Custom Copyright Text</div>
-                    <div class="text-[11px] text-slate-400">Explicit custom entity line (e.g. Copyright © 2026 Example Store...)</div>
-                  </div>
-                </div>
-              </label>
-            </div>
-
-            {#if footerConfig.copyright_format === 'custom'}
-              <div>
-                <label class="block text-slate-300 font-semibold mb-1">Custom Copyright Text</label>
-                <input
-                  type="text"
-                  bind:value={footerConfig.custom_copyright}
-                  placeholder="e.g. Copyright © 2026 Example Store. All rights reserved."
-                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"
-                />
-              </div>
-            {/if}
-          </div>
-        </div>
-
-        <!-- Submit Button -->
-        <div class="flex justify-end">
-          <button
-            type="submit"
-            disabled={isSavingFooter}
-            class="px-8 py-3 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-xs shadow-lg shadow-orange-600/30 transition-all flex items-center gap-2 disabled:opacity-50"
-          >
-            <Save size={16} />
-            <span>{isSavingFooter ? 'Saving Footer Architecture...' : 'Save Footer & Social Settings'}</span>
-          </button>
-        </div>
-      </form>
-    </div>
-
-  <!-- TAB 7: Export & Backups -->
+  <!-- TAB 6: Export & Backups -->
   {:else if activeTab === 'export'}
     <div class="space-y-6">
       <div class="p-4 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-start gap-3">
@@ -1530,7 +1290,16 @@
         </div>
       {/if}
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <!-- Hidden file input for schema-verified import -->
+      <input
+        type="file"
+        bind:this={importFileInput}
+        on:change={handleFileSelectForImport}
+        accept=".json,application/json"
+        class="hidden"
+      />
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <!-- Card 1: Store Configuration & Content Export -->
         <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4 flex flex-col justify-between">
           <div class="space-y-3">
@@ -1539,12 +1308,12 @@
             </div>
             <h3 class="text-base font-bold text-white">Export Store Settings & Catalog (JSON)</h3>
             <p class="text-xs text-slate-400 leading-relaxed">
-              Generates a single comprehensive JSON file with all store configuration parameters, active/inactive products, variants, categories, CMS policy markdown revisions, header & footer navigation structures, and shipping providers.
+              Generates a single comprehensive JSON file with all store configuration parameters, active products, variants, categories, CMS policy revisions, header & footer navigation structures, and shipping providers.
             </p>
             <div class="text-[11px] text-slate-500 space-y-1 pt-1 font-mono">
               <div>&bull; Store Settings & Legal Disclosures</div>
               <div>&bull; Product Catalog & Variant SKUs</div>
-              <div>&bull; Legal Policy CMS Revisions (AGB, Privacy, Impressum)</div>
+              <div>&bull; Legal Policy CMS Revisions</div>
               <div>&bull; Shipping Zones & Carrier Profiles</div>
             </div>
           </div>
@@ -1562,7 +1331,46 @@
           </div>
         </div>
 
-        <!-- Card 2: Media Library ZIP Export -->
+        <!-- Card 2: Import Store Settings & Catalog -->
+        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4 flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="w-12 h-12 rounded-2xl bg-emerald-600/15 text-emerald-400 border border-emerald-500/20 flex items-center justify-center">
+              <Upload size={24} />
+            </div>
+            <div class="flex items-center justify-between">
+              <h3 class="text-base font-bold text-white">Import Store Settings & Data</h3>
+              <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-bold">v1.x Schema Check</span>
+            </div>
+            <p class="text-xs text-slate-400 leading-relaxed">
+              Restore your store data from an exported JSON backup. An automated schema version check ensures incompatible backups cannot corrupt your database.
+            </p>
+            <div class="text-[11px] text-slate-500 space-y-1 pt-1 font-mono">
+              <div>&bull; Strict Schema Version Verification (1.x)</div>
+              <div>&bull; Restores Settings, Products & SKUs</div>
+              <div>&bull; Restores Categories & Navigation Menus</div>
+              <div>&bull; Restores Legal Markdown Revisions</div>
+            </div>
+          </div>
+
+          <div class="pt-4 border-t border-slate-800">
+            <button
+              type="button"
+              on:click={() => importFileInput && importFileInput.click()}
+              disabled={isImportingData}
+              class="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              {#if isImportingData}
+                <div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                <span>Restoring Store Data...</span>
+              {:else}
+                <Upload size={15} />
+                <span>Upload & Import JSON Backup</span>
+              {/if}
+            </button>
+          </div>
+        </div>
+
+        <!-- Card 3: Media Library ZIP Export -->
         <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4 flex flex-col justify-between">
           <div class="space-y-3">
             <div class="w-12 h-12 rounded-2xl bg-indigo-600/15 text-indigo-400 border border-indigo-500/20 flex items-center justify-center">

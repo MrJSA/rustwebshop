@@ -83,6 +83,7 @@ pub fn admin_router() -> Router<PgPool> {
         .route("/settings/email/test", post(admin_test_email))
         .route("/export/store-data", get(admin_export_store_data))
         .route("/export/media", get(admin_export_media_library))
+        .route("/import/store-data", post(admin_import_store_data))
         .layer(axum::middleware::from_fn(crate::middleware::admin_auth_middleware));
 
     Router::new()
@@ -336,7 +337,7 @@ async fn get_sales_analytics(State(pool): State<PgPool>) -> Result<impl IntoResp
 // 3. Products Management
 async fn admin_list_products(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let products = sqlx::query_as::<_, Product>(
-        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants FROM products ORDER BY created_at DESC"
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products ORDER BY created_at DESC"
     )
     .fetch_all(&pool)
     .await
@@ -398,10 +399,12 @@ async fn admin_create_product(
     });
     let has_multiple = payload.has_multiple_variants.unwrap_or(false);
 
+    let tax_rate = payload.tax_rate_percent.unwrap_or(19.0);
+
     sqlx::query(
         r#"
-        INSERT INTO products (id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11, $12, $13, $14, $15, $16)
+        INSERT INTO products (id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11, $12, $13, $14, $15, $16, $17)
         "#
     )
     .bind(product_id)
@@ -420,6 +423,7 @@ async fn admin_create_product(
     .bind(&long_desc)
     .bind(&images)
     .bind(has_multiple)
+    .bind(tax_rate)
     .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to create product: {}", e)))?;
@@ -508,8 +512,9 @@ async fn admin_update_product(
             long_description = COALESCE($12, long_description),
             images = COALESCE($13, images),
             has_multiple_variants = COALESCE($14, has_multiple_variants),
+            tax_rate_percent = COALESCE($15, tax_rate_percent),
             updated_at = NOW()
-        WHERE id = $15
+        WHERE id = $16
         "#
     )
     .bind(payload.title)
@@ -526,6 +531,7 @@ async fn admin_update_product(
     .bind(payload.long_description)
     .bind(payload.images)
     .bind(payload.has_multiple_variants)
+    .bind(payload.tax_rate_percent)
     .bind(id)
     .execute(&pool)
     .await
@@ -1359,12 +1365,16 @@ async fn admin_update_system_settings(
             cookie_deny_label = COALESCE($32, cookie_deny_label),
             cookie_preferences_label = COALESCE($33, cookie_preferences_label),
             tax_notice = COALESCE($34, tax_notice),
-            legal_name = COALESCE($35, legal_name),
-            store_owner = COALESCE($36, store_owner),
-            commercial_register = COALESCE($37, commercial_register),
-            dispute_resolution_notice = COALESCE($38, dispute_resolution_notice),
-            odr_url = COALESCE($39, odr_url),
-            footer_config = COALESCE($40, footer_config),
+            tax_mode = COALESCE($35, tax_mode),
+            legal_name = COALESCE($36, legal_name),
+            store_owner = COALESCE($37, store_owner),
+            commercial_register = COALESCE($38, commercial_register),
+            dispute_resolution_notice = COALESCE($39, dispute_resolution_notice),
+            odr_url = COALESCE($40, odr_url),
+            footer_config = COALESCE($41, footer_config),
+            order_prefix_enabled = COALESCE($42, order_prefix_enabled),
+            order_prefix = COALESCE($43, order_prefix),
+            order_date_enabled = COALESCE($44, order_date_enabled),
             updated_at = NOW()
         WHERE id = 1
         "#
@@ -1403,12 +1413,16 @@ async fn admin_update_system_settings(
     .bind(payload.cookie_deny_label)
     .bind(payload.cookie_preferences_label)
     .bind(payload.tax_notice)
+    .bind(payload.tax_mode)
     .bind(payload.legal_name)
     .bind(payload.store_owner)
     .bind(payload.commercial_register)
     .bind(payload.dispute_resolution_notice)
     .bind(payload.odr_url)
     .bind(payload.footer_config)
+    .bind(payload.order_prefix_enabled)
+    .bind(payload.order_prefix)
+    .bind(payload.order_date_enabled)
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2499,6 +2513,407 @@ async fn admin_export_media_library(
     ];
 
     Ok((headers, buf))
+}
+
+async fn admin_import_store_data(
+    State(pool): State<PgPool>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // 1. Strict version compatibility check
+    let version = payload.get("version").and_then(|v| v.as_str()).unwrap_or("");
+    if !version.starts_with("1.") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Incompatible backup schema version: '{}'. This store supports version 1.x exports only. Import was safely aborted to prevent data corruption.",
+                if version.is_empty() { "unknown / missing" } else { version }
+            ),
+        ));
+    }
+
+    let mut tx = pool.begin().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut restored_products = 0;
+    let mut restored_variants = 0;
+    let mut restored_categories = 0;
+    let mut restored_pages = 0;
+    let mut restored_menu = 0;
+    let mut restored_shipping = 0;
+
+    // 2. Restore store settings if provided
+    if let Some(s) = payload.get("store_settings") {
+        if s.is_object() {
+            let store_name = s.get("store_name").and_then(|v| v.as_str());
+            let store_subtitle = s.get("store_subtitle").and_then(|v| v.as_str());
+            let tax_rate = s.get("tax_rate_percent").and_then(|v| v.as_f64());
+            let tax_mode = s.get("tax_mode").and_then(|v| v.as_str());
+            let tax_notice = s.get("tax_notice").and_then(|v| v.as_str());
+            let legal_name = s.get("legal_name").and_then(|v| v.as_str());
+            let store_owner = s.get("store_owner").and_then(|v| v.as_str());
+            let company_address = s.get("company_address").and_then(|v| v.as_str());
+            let support_email = s.get("support_email").and_then(|v| v.as_str());
+            let phone = s.get("phone").and_then(|v| v.as_str());
+            let vat_id = s.get("vat_id").and_then(|v| v.as_str());
+            let commercial_register = s.get("commercial_register").and_then(|v| v.as_str());
+            let odr_url = s.get("odr_url").and_then(|v| v.as_str());
+            let dispute = s.get("dispute_resolution_notice").and_then(|v| v.as_str());
+            let footer_config = s.get("footer_config");
+            let hero_config = s.get("hero_config");
+            let carousels_config = s.get("carousels_config");
+
+            let _ = sqlx::query(
+                r#"
+                UPDATE store_settings
+                SET
+                    store_name = COALESCE($1, store_name),
+                    store_subtitle = COALESCE($2, store_subtitle),
+                    tax_rate_percent = COALESCE($3, tax_rate_percent),
+                    tax_mode = COALESCE($4, tax_mode),
+                    tax_notice = COALESCE($5, tax_notice),
+                    legal_name = COALESCE($6, legal_name),
+                    store_owner = COALESCE($7, store_owner),
+                    company_address = COALESCE($8, company_address),
+                    support_email = COALESCE($9, support_email),
+                    phone = COALESCE($10, phone),
+                    vat_id = COALESCE($11, vat_id),
+                    commercial_register = COALESCE($12, commercial_register),
+                    odr_url = COALESCE($13, odr_url),
+                    dispute_resolution_notice = COALESCE($14, dispute_resolution_notice),
+                    footer_config = COALESCE($15, footer_config),
+                    hero_config = COALESCE($16, hero_config),
+                    carousels_config = COALESCE($17, carousels_config),
+                    updated_at = NOW()
+                WHERE id = 1
+                "#
+            )
+            .bind(store_name)
+            .bind(store_subtitle)
+            .bind(tax_rate)
+            .bind(tax_mode)
+            .bind(tax_notice)
+            .bind(legal_name)
+            .bind(store_owner)
+            .bind(company_address)
+            .bind(support_email)
+            .bind(phone)
+            .bind(vat_id)
+            .bind(commercial_register)
+            .bind(odr_url)
+            .bind(dispute)
+            .bind(footer_config)
+            .bind(hero_config)
+            .bind(carousels_config)
+            .execute(&mut *tx)
+            .await;
+        }
+    }
+
+    // 3. Restore Categories
+    if let Some(cats) = payload.get("categories").and_then(|v| v.as_array()) {
+        for c in cats {
+            if let (Some(id_str), Some(name), Some(slug)) = (
+                c.get("id").and_then(|v| v.as_str()),
+                c.get("name").and_then(|v| v.as_str()),
+                c.get("slug").and_then(|v| v.as_str())
+            ) {
+                if let Ok(id) = Uuid::parse_str(id_str) {
+                    let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    let img = c.get("image_url").and_then(|v| v.as_str()).unwrap_or("");
+                    let parent_id = c.get("parent_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+                    let order = c.get("display_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO categories (id, name, slug, description, image_url, parent_id, display_order)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        ON CONFLICT (id) DO UPDATE SET
+                            name = EXCLUDED.name,
+                            slug = EXCLUDED.slug,
+                            description = EXCLUDED.description,
+                            image_url = EXCLUDED.image_url,
+                            parent_id = EXCLUDED.parent_id,
+                            display_order = EXCLUDED.display_order
+                        "#
+                    )
+                    .bind(id)
+                    .bind(name)
+                    .bind(slug)
+                    .bind(desc)
+                    .bind(img)
+                    .bind(parent_id)
+                    .bind(order)
+                    .execute(&mut *tx)
+                    .await;
+
+                    restored_categories += 1;
+                }
+            }
+        }
+    }
+
+    // 4. Restore Products
+    if let Some(prods) = payload.get("products").and_then(|v| v.as_array()) {
+        for p in prods {
+            if let (Some(id_str), Some(title), Some(slug)) = (
+                p.get("id").and_then(|v| v.as_str()),
+                p.get("title").and_then(|v| v.as_str()),
+                p.get("slug").and_then(|v| v.as_str())
+            ) {
+                if let Ok(id) = Uuid::parse_str(id_str) {
+                    let desc = p.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    let ptype = p.get("product_type").and_then(|v| v.as_str()).unwrap_or("physical");
+                    let cat = p.get("category").and_then(|v| v.as_str()).unwrap_or("Hardware");
+                    let subcat = p.get("subcategory").and_then(|v| v.as_str()).unwrap_or("");
+                    let price = p.get("base_price_cents").and_then(|v| v.as_i64()).unwrap_or(4999) as i32;
+                    let dig_url = p.get("digital_download_url").and_then(|v| v.as_str());
+                    let img = p.get("image_url").and_then(|v| v.as_str()).unwrap_or("");
+                    let active = p.get("is_active").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let subtitle = p.get("subtitle").and_then(|v| v.as_str()).unwrap_or("");
+                    let var_lbl = p.get("variant_selector_label").and_then(|v| v.as_str()).unwrap_or("Choose Variant:");
+                    let short_desc = p.get("short_description").and_then(|v| v.as_str()).unwrap_or("");
+                    let long_desc = p.get("long_description").and_then(|v| v.as_str()).unwrap_or("");
+                    let images = p.get("images").cloned().unwrap_or(json!([]));
+                    let has_multi = p.get("has_multiple_variants").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let tax_rate = p.get("tax_rate_percent").and_then(|v| v.as_f64()).unwrap_or(19.0);
+
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO products (id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                        ON CONFLICT (id) DO UPDATE SET
+                            title = EXCLUDED.title,
+                            slug = EXCLUDED.slug,
+                            description = EXCLUDED.description,
+                            product_type = EXCLUDED.product_type,
+                            category = EXCLUDED.category,
+                            subcategory = EXCLUDED.subcategory,
+                            base_price_cents = EXCLUDED.base_price_cents,
+                            digital_download_url = EXCLUDED.digital_download_url,
+                            image_url = EXCLUDED.image_url,
+                            is_active = EXCLUDED.is_active,
+                            subtitle = EXCLUDED.subtitle,
+                            variant_selector_label = EXCLUDED.variant_selector_label,
+                            short_description = EXCLUDED.short_description,
+                            long_description = EXCLUDED.long_description,
+                            images = EXCLUDED.images,
+                            has_multiple_variants = EXCLUDED.has_multiple_variants,
+                            tax_rate_percent = EXCLUDED.tax_rate_percent
+                        "#
+                    )
+                    .bind(id)
+                    .bind(title)
+                    .bind(slug)
+                    .bind(desc)
+                    .bind(ptype)
+                    .bind(cat)
+                    .bind(subcat)
+                    .bind(price)
+                    .bind(dig_url)
+                    .bind(img)
+                    .bind(active)
+                    .bind(subtitle)
+                    .bind(var_lbl)
+                    .bind(short_desc)
+                    .bind(long_desc)
+                    .bind(&images)
+                    .bind(has_multi)
+                    .bind(tax_rate)
+                    .execute(&mut *tx)
+                    .await;
+
+                    restored_products += 1;
+                }
+            }
+        }
+    }
+
+    // 5. Restore Product Variants
+    if let Some(vars) = payload.get("product_variants").and_then(|v| v.as_array()) {
+        for v in vars {
+            if let (Some(id_str), Some(pid_str), Some(sku), Some(title)) = (
+                v.get("id").and_then(|x| x.as_str()),
+                v.get("product_id").and_then(|x| x.as_str()),
+                v.get("sku").and_then(|x| x.as_str()),
+                v.get("title").and_then(|x| x.as_str())
+            ) {
+                if let (Ok(id), Ok(pid)) = (Uuid::parse_str(id_str), Uuid::parse_str(pid_str)) {
+                    let price_ov = v.get("price_override_cents").and_then(|x| x.as_i64()).map(|x| x as i32);
+                    let attrs = v.get("attributes").cloned().unwrap_or(json!({}));
+                    let stock = v.get("stock_quantity").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+                    let low_stock = v.get("low_stock_threshold").and_then(|x| x.as_i64()).unwrap_or(5) as i32;
+                    let img = v.get("image_url").and_then(|x| x.as_str());
+                    let images = v.get("images").cloned().unwrap_or(json!([]));
+
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, images)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        ON CONFLICT (id) DO UPDATE SET
+                            product_id = EXCLUDED.product_id,
+                            sku = EXCLUDED.sku,
+                            title = EXCLUDED.title,
+                            price_override_cents = EXCLUDED.price_override_cents,
+                            attributes = EXCLUDED.attributes,
+                            stock_quantity = EXCLUDED.stock_quantity,
+                            low_stock_threshold = EXCLUDED.low_stock_threshold,
+                            image_url = EXCLUDED.image_url,
+                            images = EXCLUDED.images
+                        "#
+                    )
+                    .bind(id)
+                    .bind(pid)
+                    .bind(sku)
+                    .bind(title)
+                    .bind(price_ov)
+                    .bind(&attrs)
+                    .bind(stock)
+                    .bind(low_stock)
+                    .bind(img)
+                    .bind(&images)
+                    .execute(&mut *tx)
+                    .await;
+
+                    restored_variants += 1;
+                }
+            }
+        }
+    }
+
+    // 6. Restore Policy Pages
+    if let Some(pages) = payload.get("pages").and_then(|v| v.as_array()) {
+        for p in pages {
+            if let (Some(slug), Some(title)) = (
+                p.get("slug").and_then(|v| v.as_str()),
+                p.get("title").and_then(|v| v.as_str())
+            ) {
+                let id = p.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_else(Uuid::new_v4);
+                let content = p.get("content_markdown").and_then(|v| v.as_str()).unwrap_or("");
+                let publ = p.get("is_published").and_then(|v| v.as_bool()).unwrap_or(true);
+
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO pages (id, slug, title, content_markdown, is_published)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (slug) DO UPDATE SET
+                        title = EXCLUDED.title,
+                        content_markdown = EXCLUDED.content_markdown,
+                        is_published = EXCLUDED.is_published
+                    "#
+                )
+                .bind(id)
+                .bind(slug)
+                .bind(title)
+                .bind(content)
+                .bind(publ)
+                .execute(&mut *tx)
+                .await;
+
+                restored_pages += 1;
+            }
+        }
+    }
+
+    // 7. Restore Navigation Menu
+    if let Some(menu) = payload.get("navigation_menu").and_then(|v| v.as_array()) {
+        for m in menu {
+            if let (Some(id_str), Some(label), Some(url)) = (
+                m.get("id").and_then(|v| v.as_str()),
+                m.get("label").and_then(|v| v.as_str()),
+                m.get("url").and_then(|v| v.as_str())
+            ) {
+                if let Ok(id) = Uuid::parse_str(id_str) {
+                    let parent_id = m.get("parent_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+                    let sort_order = m.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+                    let is_active = m.get("is_active").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let location = m.get("location").and_then(|v| v.as_str()).unwrap_or("header");
+
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO navigation_items (id, label, url, parent_id, sort_order, is_active, location)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        ON CONFLICT (id) DO UPDATE SET
+                            label = EXCLUDED.label,
+                            url = EXCLUDED.url,
+                            parent_id = EXCLUDED.parent_id,
+                            sort_order = EXCLUDED.sort_order,
+                            is_active = EXCLUDED.is_active,
+                            location = EXCLUDED.location
+                        "#
+                    )
+                    .bind(id)
+                    .bind(label)
+                    .bind(url)
+                    .bind(parent_id)
+                    .bind(sort_order)
+                    .bind(is_active)
+                    .bind(location)
+                    .execute(&mut *tx)
+                    .await;
+
+                    restored_menu += 1;
+                }
+            }
+        }
+    }
+
+    // 8. Restore Shipping Providers
+    if let Some(shipping) = payload.get("shipping") {
+        if let Some(providers) = shipping.get("providers").and_then(|v| v.as_array()) {
+            for p in providers {
+                if let (Some(id_str), Some(name), Some(code)) = (
+                    p.get("id").and_then(|v| v.as_str()),
+                    p.get("name").and_then(|v| v.as_str()),
+                    p.get("code").and_then(|v| v.as_str())
+                ) {
+                    if let Ok(id) = Uuid::parse_str(id_str) {
+                        let tracking = p.get("tracking_url_template").and_then(|v| v.as_str()).unwrap_or("");
+                        let active = p.get("is_active").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let order = p.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+                        let _ = sqlx::query(
+                            r#"
+                            INSERT INTO shipping_providers (id, name, code, tracking_url_template, is_active, sort_order)
+                            VALUES ($1, $2, $3, $4, $5, $6)
+                            ON CONFLICT (id) DO UPDATE SET
+                                name = EXCLUDED.name,
+                                code = EXCLUDED.code,
+                                tracking_url_template = EXCLUDED.tracking_url_template,
+                                is_active = EXCLUDED.is_active,
+                                sort_order = EXCLUDED.sort_order
+                            "#
+                        )
+                        .bind(id)
+                        .bind(name)
+                        .bind(code)
+                        .bind(tracking)
+                        .bind(active)
+                        .bind(order)
+                        .execute(&mut *tx)
+                        .await;
+
+                        restored_shipping += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    tx.commit().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({
+        "success": true,
+        "message": "Store configuration, catalog, and CMS data successfully restored.",
+        "version": version,
+        "restored": {
+            "settings": true,
+            "products": restored_products,
+            "variants": restored_variants,
+            "categories": restored_categories,
+            "pages": restored_pages,
+            "menu_items": restored_menu,
+            "shipping_providers": restored_shipping
+        }
+    })))
 }
 
 

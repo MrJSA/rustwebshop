@@ -65,6 +65,7 @@
   let createProductName = '';
   let createProductMultiVariant = false;
   let createProductBasePrice = 49.99;
+  let createProductTaxRate = 19.0;
 
   // Form State (Product)
   let editingProductId = null;
@@ -81,6 +82,7 @@
   let description = '';
   let productType = 'physical';
   let basePriceEuros = 49.99;
+  let taxRatePercent = 19.0;
   let imageUrl = '';
   let digitalDownloadUrl = '';
   let hasMultipleVariants = false;
@@ -299,6 +301,7 @@
     description = product.description || '';
     productType = product.product_type || 'physical';
     basePriceEuros = (product.base_price_cents / 100);
+    taxRatePercent = product.tax_rate_percent !== undefined && product.tax_rate_percent !== null ? product.tax_rate_percent : 19.0;
     imageUrl = product.image_url || '';
     digitalDownloadUrl = product.digital_download_url || '';
     currentProductVariants = product.variants || [];
@@ -352,7 +355,8 @@
         body: JSON.stringify({
           title: createProductName.trim(),
           has_multiple_variants: createProductMultiVariant,
-          base_price_cents: Math.round(createProductBasePrice * 100)
+          base_price_cents: Math.round(createProductBasePrice * 100),
+          tax_rate_percent: parseFloat(createProductTaxRate) || 19.0
         })
       });
 
@@ -400,6 +404,7 @@
           category,
           subcategory,
           base_price_cents: basePriceCents,
+          tax_rate_percent: parseFloat(taxRatePercent) || 0.0,
           digital_download_url: productType === 'digital' ? digitalDownloadUrl : null,
           image_url: primaryImg,
           images: productImages.length > 0 ? productImages : [primaryImg],
@@ -1277,15 +1282,34 @@
             </label>
           </div>
 
-          <div>
-            <label class="block text-slate-300 font-semibold mb-1">Base Price (EUR)</label>
-            <input
-              type="number"
-              step="0.01"
-              bind:value={createProductBasePrice}
-              required
-              class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-            />
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-slate-300 font-semibold mb-1">Base Price (EUR)</label>
+              <input
+                type="number"
+                step="0.01"
+                bind:value={createProductBasePrice}
+                required
+                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <div>
+              <label class="block text-slate-300 font-semibold mb-1">VAT Rate (%)</label>
+              <div class="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="100"
+                  bind:value={createProductTaxRate}
+                  required
+                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+                />
+                <button type="button" on:click={() => createProductTaxRate = 19.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">19%</button>
+                <button type="button" on:click={() => createProductTaxRate = 7.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">7%</button>
+                <button type="button" on:click={() => createProductTaxRate = 0.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">0%</button>
+              </div>
+            </div>
           </div>
 
           <p class="text-[11px] text-slate-400 bg-slate-950/60 p-3 rounded-xl border border-slate-800/80">
@@ -1324,7 +1348,7 @@
 
         <!-- Section 1: Main Product Fields -->
         <form on:submit|preventDefault={handleUpdateProduct} class="space-y-4 text-xs">
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <label class="block text-slate-300 font-semibold mb-1">Product Title</label>
               <input type="text" bind:value={title} required class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
@@ -1332,6 +1356,23 @@
             <div>
               <label class="block text-slate-300 font-semibold mb-1">Base Price (EUR)</label>
               <input type="number" step="0.01" bind:value={basePriceEuros} required class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+            </div>
+            <div>
+              <label class="block text-slate-300 font-semibold mb-1">VAT Rate (%)</label>
+              <div class="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="100"
+                  bind:value={taxRatePercent}
+                  required
+                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+                />
+                <button type="button" on:click={() => taxRatePercent = 19.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">19%</button>
+                <button type="button" on:click={() => taxRatePercent = 7.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">7%</button>
+                <button type="button" on:click={() => taxRatePercent = 0.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">0%</button>
+              </div>
             </div>
           </div>
 
