@@ -159,9 +159,15 @@
     fetchShippingRates();
   });
 
-  $: selectedRate = availableRates.find((r) => r.id === selectedShippingRateId);
-  $: shippingCostCents = selectedRate ? selectedRate.price_cents : (hasPhysicalItems ? 499 : 0);
+  let acceptedTerms = false;
+  let acceptedDigitalWaiver = false;
+
   $: hasPhysicalItems = $cart.some((i) => !i.is_digital);
+  $: hasDigitalItems = $cart.some((i) => i.is_digital);
+  $: isDigitalOnly = $cart.length > 0 && !hasPhysicalItems;
+
+  $: selectedRate = availableRates.find((r) => r.id === selectedShippingRateId);
+  $: shippingCostCents = hasPhysicalItems ? (selectedRate ? selectedRate.price_cents : 499) : 0;
 
   $: taxRatePercent = store.tax_rate_percent || 19.0;
   $: taxMode = store.tax_mode || 'kleingewerbe';
@@ -181,6 +187,16 @@
       return;
     }
 
+    if (!acceptedTerms) {
+      errorMessage = 'Please accept the Terms and Conditions and acknowledge the Revocation Policy to place your order.';
+      return;
+    }
+
+    if (hasDigitalItems && !acceptedDigitalWaiver) {
+      errorMessage = 'Please confirm the immediate execution and revocation waiver for digital products to continue.';
+      return;
+    }
+
     isSubmitting = true;
     errorMessage = '';
 
@@ -196,7 +212,7 @@
         postal_code: postalCode,
         country_code: countryCode
       },
-      shipping_rate_id: selectedShippingRateId || null,
+      shipping_rate_id: hasPhysicalItems ? (selectedShippingRateId || null) : null,
       payment_provider: selectedProvider,
       payment_token: `tok_mock_${Date.now()}`,
       items: $cart.map((i) => ({
@@ -469,6 +485,19 @@
                 </div>
               {/if}
             </div>
+          {:else}
+            <!-- Digital Only Delivery Banner -->
+            <div class="mt-6 pt-5 border-t border-slate-800">
+              <div class="p-4 rounded-xl bg-sky-500/10 border border-sky-500/30 text-sky-200 text-xs flex items-start gap-3">
+                <div class="text-sky-400 text-lg mt-0.5">⚡</div>
+                <div class="space-y-1">
+                  <div class="font-bold text-white text-sm">Instant Digital Delivery (No Shipping Required)</div>
+                  <p class="text-slate-300 text-[11px] leading-relaxed">
+                    All items in your cart are digital products. Shipping fee is <strong>0.00 €</strong>. Download links and assets will be instantly available in your customer account and email upon payment confirmation.
+                  </p>
+                </div>
+              </div>
+            </div>
           {/if}
         </div>
 
@@ -667,15 +696,17 @@
               <span class="font-mono text-slate-200">{($cartSubtotal / 100).toFixed(2)} €</span>
             </div>
             <div class="flex justify-between text-slate-400">
-              <span>Shipping ({countryCode})</span>
-              <span class="font-mono text-slate-200">{(shippingCostCents / 100).toFixed(2)} €</span>
+              <span>{hasPhysicalItems ? `Shipping (${countryCode})` : 'Digital Delivery'}</span>
+              <span class="font-mono {hasPhysicalItems ? 'text-slate-200' : 'text-emerald-400 font-bold'}">
+                {hasPhysicalItems ? `${(shippingCostCents / 100).toFixed(2)} €` : '0.00 € (Free)'}
+              </span>
             </div>
             {#if taxMode === 'kleingewerbe'}
               <div class="flex justify-between text-slate-400">
                 <span>VAT (§ 19 UStG)</span>
                 <span class="font-mono text-slate-400">0.00 €</span>
               </div>
-              <p class="text-[10px] text-slate-500 italic">No VAT collected under § 19 UStG (Small Business Exemption).</p>
+              <p class="text-[10px] text-slate-500 italic">According to § 19 UStG, no value-added tax is charged (small business regulation).</p>
             {:else if taxMode === 'included'}
               <div class="flex justify-between text-slate-400">
                 <span>Included VAT ({taxRatePercent}%)</span>
@@ -693,23 +724,53 @@
             </div>
           </div>
 
+          <!-- Statutory German & EU Legal Checkboxes -->
+          <div class="pt-2 border-t border-slate-800/80 space-y-3">
+            <label class="flex items-start gap-2.5 cursor-pointer text-xs">
+              <input
+                type="checkbox"
+                bind:checked={acceptedTerms}
+                required
+                class="mt-0.5 w-4 h-4 rounded bg-slate-950 border border-slate-700 text-orange-600 focus:ring-orange-500 accent-orange-600 flex-shrink-0 cursor-pointer"
+              />
+              <span class="text-[11px] text-slate-400 leading-relaxed">
+                I have read and agree to the <a href="/policies/terms" target="_blank" class="text-orange-400 underline hover:text-orange-300">Terms & Conditions (AGB)</a> and acknowledge the <a href="/policies/revocation-policy" target="_blank" class="text-orange-400 underline hover:text-orange-300">Revocation Policy (Widerrufsbelehrung)</a>.
+              </span>
+            </label>
+
+            {#if hasDigitalItems}
+              <label class="flex items-start gap-2.5 cursor-pointer text-xs">
+                <input
+                  type="checkbox"
+                  bind:checked={acceptedDigitalWaiver}
+                  required
+                  class="mt-0.5 w-4 h-4 rounded bg-slate-950 border border-slate-700 text-orange-600 focus:ring-orange-500 accent-orange-600 flex-shrink-0 cursor-pointer"
+                />
+                <span class="text-[11px] text-sky-300/90 leading-relaxed">
+                  I expressly agree and demand that the execution of the contract for digital content begins before the expiration of the 14-day statutory revocation period. I confirm my knowledge that I lose my right of revocation with the start of execution (§ 356 Abs. 5 BGB).
+                </span>
+              </label>
+            {/if}
+          </div>
+
+          <!-- Button-Lösung gem. § 312j Abs. 3 BGB -->
           <button
             id="submit-order-btn"
             on:click={handleSubmitOrder}
-            disabled={isSubmitting}
+            disabled={isSubmitting || !acceptedTerms || (hasDigitalItems && !acceptedDigitalWaiver)}
             class="w-full py-4 px-6 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-sm shadow-xl shadow-orange-600/30 transition-all flex items-center justify-center gap-2 hover:scale-[1.01] disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {#if isSubmitting}
               <div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
               <span>Locking Inventory & Processing...</span>
             {:else}
-              <span>Pay {(grandTotalCents / 100).toFixed(2)} €</span>
+              <span>Order with Obligation to Pay ({(grandTotalCents / 100).toFixed(2)} €)</span>
               <ArrowRight size={16} />
             {/if}
           </button>
 
           <p class="text-[11px] text-slate-400 text-center leading-relaxed">
-            By placing this order you authorize RustCraft to capture payment through {selectedProvider}. ACID row-level locking ensures stock is held instantly.
+            By clicking "Order with Obligation to Pay", you conclude a legally binding purchase contract. Payment is processed securely via {selectedProvider}.
           </p>
         </div>
       </div>

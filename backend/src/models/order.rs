@@ -30,8 +30,8 @@ pub struct Order {
 pub struct OrderItem {
     pub id: Uuid,
     pub order_id: Uuid,
-    pub product_id: Uuid,
-    pub variant_id: Uuid,
+    pub product_id: Option<Uuid>,
+    pub variant_id: Option<Uuid>,
     pub product_title: String,
     pub variant_title: String,
     pub sku: String,

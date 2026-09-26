@@ -49,6 +49,7 @@ pub struct StoreSettings {
     pub order_prefix_enabled: bool,
     pub order_prefix: String,
     pub order_date_enabled: bool,
+    pub stock_display_template: String,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -96,6 +97,7 @@ pub struct StoreSettingsDTO {
     pub order_prefix_enabled: bool,
     pub order_prefix: String,
     pub order_date_enabled: bool,
+    pub stock_display_template: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +146,7 @@ pub struct UpdateStoreSettingsRequest {
     pub order_prefix_enabled: Option<bool>,
     pub order_prefix: Option<String>,
     pub order_date_enabled: Option<bool>,
+    pub stock_display_template: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

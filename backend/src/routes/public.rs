@@ -1,7 +1,7 @@
 use crate::models::{
     CartItemInput, Category, CheckoutRequest, Claims, CreateStockNotificationRequest, CustomerAddress,
     CustomerChangePasswordRequest, CustomerLoginRequest, CustomerRegisterRequest, EstimateShippingRequest,
-    NavigationItem, PageContent, Product, ProductPart, ProductVariant, ProductWithVariants,
+    NavigationItem, OrderItem, PageContent, Product, ProductPart, ProductVariant, ProductWithVariants,
     PublicPaymentProviderInfo, ResetPasswordRequest, SaveAddressRequest, ShippingProvider,
     ShippingProviderWithZones, ShippingRate, ShippingZone, ShippingZoneWithRates, StoreSettings,
     StoreSettingsDTO, ToggleWishlistRequest, UpdateCustomerProfileRequest,
@@ -111,6 +111,7 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
         order_prefix_enabled: settings.order_prefix_enabled,
         order_prefix: settings.order_prefix,
         order_date_enabled: settings.order_date_enabled,
+        stock_display_template: settings.stock_display_template,
     };
 
     let payment_providers = sqlx::query_as::<_, PaymentProviderRow>(
@@ -995,27 +996,60 @@ async fn public_get_customer_orders(
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))?;
 
     let orders = sqlx::query(
-        "SELECT id, order_number, customer_name, customer_email, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, created_at FROM orders WHERE customer_email = $1 ORDER BY created_at DESC"
+        r#"
+        SELECT 
+            id, order_number, customer_name, customer_email, shipping_address,
+            shipping_cost_cents, subtotal_cents, tax_cents, total_cents, 
+            payment_provider, payment_status, order_status, tracking_number, notes, created_at 
+        FROM orders 
+        WHERE customer_email = $1 
+        ORDER BY created_at DESC
+        "#
     )
     .bind(&email)
     .fetch_all(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let list = orders.into_iter().map(|r| {
-        json!({
-            "id": r.get::<Uuid, _>("id"),
+    let mut list = Vec::new();
+    for r in orders {
+        let order_id: Uuid = r.get("id");
+        let items = sqlx::query_as::<_, OrderItem>(
+            r#"
+            SELECT 
+                id, order_id, product_id, variant_id, product_title, variant_title, 
+                sku, unit_price_cents, quantity, total_price_cents, is_digital, download_url
+            FROM order_items
+            WHERE order_id = $1
+            ORDER BY id ASC
+            "#
+        )
+        .bind(order_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+        let shipping_addr: serde_json::Value = r.try_get("shipping_address").unwrap_or(json!({}));
+
+        list.push(json!({
+            "id": order_id,
             "order_number": r.get::<String, _>("order_number"),
             "customer_name": r.get::<String, _>("customer_name"),
             "customer_email": r.get::<String, _>("customer_email"),
+            "shipping_address": shipping_addr,
+            "shipping_cost_cents": r.get::<i32, _>("shipping_cost_cents"),
+            "subtotal_cents": r.get::<i32, _>("subtotal_cents"),
+            "tax_cents": r.get::<i32, _>("tax_cents"),
             "total_cents": r.get::<i32, _>("total_cents"),
             "payment_provider": r.get::<String, _>("payment_provider"),
             "payment_status": r.get::<String, _>("payment_status"),
             "order_status": r.get::<String, _>("order_status"),
             "tracking_number": r.get::<Option<String>, _>("tracking_number"),
+            "notes": r.get::<Option<String>, _>("notes"),
             "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
-        })
-    }).collect::<Vec<_>>();
+            "items": items
+        }));
+    }
 
     Ok(Json(list))
 }

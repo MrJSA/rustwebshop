@@ -76,6 +76,7 @@ pub struct CreateProductRequest {
 pub struct UpdateProductRequest {
     pub title: Option<String>,
     pub description: Option<String>,
+    pub product_type: Option<String>,
     pub category: Option<String>,
     pub subcategory: Option<String>,
     pub base_price_cents: Option<i32>,

@@ -23,10 +23,13 @@ export async function load({ fetch }) {
     console.error('Failed to load categories in admin products:', e);
   }
 
+  let storeSettings = {};
+
   try {
     const setRes = await fetch(`${backendUrl}/api/v1/admin/settings`, { headers });
     if (setRes.ok) {
       const settings = await setRes.json();
+      storeSettings = settings;
       const sections = settings?.carousels_config?.sections || [];
       const feat = sections.find(s => s.id === 'featured');
       if (feat && Array.isArray(feat.product_ids)) {
@@ -48,6 +51,6 @@ export async function load({ fetch }) {
     console.error('Failed to load inventory in admin products:', e);
   }
 
-  return { products, categories, featuredProductIds, inventory };
+  return { products, categories, featuredProductIds, inventory, storeSettings };
 }
 

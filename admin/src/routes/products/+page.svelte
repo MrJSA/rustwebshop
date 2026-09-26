@@ -35,6 +35,12 @@
   let categories = data.categories || [];
   let featuredProductIds = data.featuredProductIds || [];
   let inventory = data.inventory || [];
+  let storeSettings = data.storeSettings || {};
+
+  $: isKleingewerbe = (storeSettings?.tax_mode === 'kleingewerbe');
+  $: if (isKleingewerbe) {
+    createProductTaxRate = 0.0;
+  }
 
   $: activeTab = $page.url.searchParams.get('tab') || 'catalog';
   function setTab(tab) {
@@ -85,6 +91,8 @@
   let taxRatePercent = 19.0;
   let imageUrl = '';
   let digitalDownloadUrl = '';
+  let digitalFiles = [];
+  let isUploadingDigital = false;
   let hasMultipleVariants = false;
   let singleVariantStock = 20;
   let singleVariantSku = '';
@@ -97,15 +105,18 @@
 
   // Parts (Bill of Materials) state for editing product
   let productParts = [];
+  let newPartType = 'physical'; // 'physical' or 'digital'
   let newPartName = '';
   let newPartSku = '';
   let newPartQuantity = 1;
   let newPartVariantId = '';
   let newPartNotes = '';
+  let isUploadingBomFile = false;
 
   // Edit Part Modal State
   let isEditPartOpen = false;
   let editingPartId = null;
+  let editPartType = 'physical';
   let editPartName = '';
   let editPartSku = '';
   let editPartQuantity = 1;
@@ -278,6 +289,71 @@
     }
   }
 
+  // Digital product files management
+  function addDigitalFile() {
+    digitalFiles = [...digitalFiles, { name: '', url: '' }];
+  }
+
+  function removeDigitalFile(index) {
+    digitalFiles = digitalFiles.filter((_, i) => i !== index);
+  }
+
+  async function handleDigitalFileUpload(event) {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    isUploadingDigital = true;
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/v1/admin/media/upload', {
+        method: 'POST',
+        headers: { 'X-Dev-Mode': 'true' },
+        body: formData
+      });
+      if (res.ok) {
+        const data = await res.json();
+        digitalFiles = [...digitalFiles, { name: file.name, url: data.url }];
+      } else {
+        alert('File upload failed.');
+      }
+    } catch (e) {
+      console.error('Digital file upload error:', e);
+      alert('Upload failed: ' + e.message);
+    } finally {
+      isUploadingDigital = false;
+      event.target.value = '';
+    }
+  }
+
+  async function handleBomFileUpload(event) {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    isUploadingBomFile = true;
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/v1/admin/media/upload', {
+        method: 'POST',
+        headers: { 'X-Dev-Mode': 'true' },
+        body: formData
+      });
+      if (res.ok) {
+        const data = await res.json();
+        newPartNotes = data.url;
+        if (!newPartName) newPartName = file.name;
+        newPartSku = 'DIGITAL_FILE';
+      } else {
+        alert('BOM file upload failed.');
+      }
+    } catch (e) {
+      console.error('BOM file upload error:', e);
+      alert('Upload failed: ' + e.message);
+    } finally {
+      isUploadingBomFile = false;
+      event.target.value = '';
+    }
+  }
+
   // --- Modal Openers ---
   function openCreateModal() {
     createProductName = '';
@@ -299,18 +375,31 @@
     category = product.category || 'Hardware';
     subcategory = product.subcategory || 'Keyboards';
     description = product.description || '';
-    productType = product.product_type || 'physical';
+    productType = product.product_type || (product.digital_download_url ? 'digital' : 'physical');
     basePriceEuros = (product.base_price_cents / 100);
-    taxRatePercent = product.tax_rate_percent !== undefined && product.tax_rate_percent !== null ? product.tax_rate_percent : 19.0;
+    taxRatePercent = isKleingewerbe ? 0.0 : (product.tax_rate_percent !== undefined && product.tax_rate_percent !== null ? product.tax_rate_percent : 19.0);
     imageUrl = product.image_url || '';
     digitalDownloadUrl = product.digital_download_url || '';
+    digitalFiles = [];
+    if (digitalDownloadUrl) {
+      try {
+        const parsed = JSON.parse(digitalDownloadUrl);
+        if (Array.isArray(parsed)) {
+          digitalFiles = parsed.map(f => typeof f === 'string' ? { name: 'Download File', url: f } : { name: f.name || 'Download File', url: f.url || '' });
+        } else if (typeof parsed === 'string') {
+          digitalFiles = [{ name: 'Download File', url: parsed }];
+        }
+      } catch (e) {
+        digitalFiles = [{ name: 'Download File', url: digitalDownloadUrl }];
+      }
+    }
     currentProductVariants = product.variants || [];
     hasMultipleVariants = !!product.has_multiple_variants;
     if (currentProductVariants.length > 0) {
       singleVariantStock = currentProductVariants[0].stock_quantity;
       singleVariantSku = currentProductVariants[0].sku;
     } else {
-      singleVariantStock = 20;
+      singleVariantStock = productType === 'digital' ? 999999 : 20;
       singleVariantSku = 'PRD-' + (product.id ? product.id.substring(0, 4).toUpperCase() : '0000');
     }
     uploadSavingsText = '';
@@ -356,7 +445,7 @@
           title: createProductName.trim(),
           has_multiple_variants: createProductMultiVariant,
           base_price_cents: Math.round(createProductBasePrice * 100),
-          tax_rate_percent: parseFloat(createProductTaxRate) || 19.0
+          tax_rate_percent: isKleingewerbe ? 0.0 : (parseFloat(createProductTaxRate) || 0.0)
         })
       });
 
@@ -386,6 +475,12 @@
     const primaryImg = productImages[0] || imageUrl || '';
     const token = localStorage.getItem('admin_token');
 
+    let serializedDownloads = null;
+    if (productType === 'digital') {
+      const validFiles = digitalFiles.filter(f => f.url && f.url.trim().length > 0);
+      serializedDownloads = validFiles.length > 0 ? JSON.stringify(validFiles) : null;
+    }
+
     try {
       const res = await fetch(`/api/v1/admin/products/${editingProductId}`, {
         method: 'PUT',
@@ -403,9 +498,10 @@
           description: shortDescription.trim() || description.trim(),
           category,
           subcategory,
+          product_type: productType,
           base_price_cents: basePriceCents,
-          tax_rate_percent: parseFloat(taxRatePercent) || 0.0,
-          digital_download_url: productType === 'digital' ? digitalDownloadUrl : null,
+          tax_rate_percent: isKleingewerbe ? 0.0 : (parseFloat(taxRatePercent) || 0.0),
+          digital_download_url: serializedDownloads,
           image_url: primaryImg,
           images: productImages.length > 0 ? productImages : [primaryImg],
           has_multiple_variants: hasMultipleVariants,
@@ -428,7 +524,7 @@
               sku: singleVariantSku || v.sku,
               title: 'Standard',
               price_override_cents: basePriceCents,
-              stock_quantity: parseInt(singleVariantStock) || 0,
+              stock_quantity: productType === 'digital' ? 999999 : (parseInt(singleVariantStock) || 0),
               low_stock_threshold: 5,
               image_url: primaryImg,
               images: productImages.length > 0 ? productImages : [primaryImg]
@@ -594,6 +690,7 @@
   // --- Parts / Bill of Materials (BOM) CRUD ---
   async function handleAddPart() {
     if (!newPartName) return;
+    const isDigital = newPartType === 'digital';
     try {
       const res = await fetch(`/api/v1/admin/products/${editingProductId}/parts`, {
         method: 'POST',
@@ -601,8 +698,8 @@
         body: JSON.stringify({
           variant_id: newPartVariantId || null,
           part_name: newPartName,
-          part_sku: newPartSku || null,
-          quantity: parseInt(newPartQuantity) || 1,
+          part_sku: isDigital ? 'DIGITAL_FILE' : (newPartSku || null),
+          quantity: isDigital ? 1 : (parseInt(newPartQuantity) || 1),
           notes: newPartNotes || null
         })
       });
@@ -615,6 +712,7 @@
         newPartSku = '';
         newPartNotes = '';
         newPartQuantity = 1;
+        newPartType = 'physical';
       }
     } catch (e) {
       console.error('Failed to add part:', e);
@@ -628,10 +726,12 @@
     editPartQuantity = part.quantity;
     editPartVariantId = part.variant_id || '';
     editPartNotes = part.notes || '';
+    editPartType = (part.part_sku === 'DIGITAL_FILE') ? 'digital' : 'physical';
     isEditPartOpen = true;
   }
 
   async function handleSavePart() {
+    const isDigital = editPartType === 'digital';
     try {
       const res = await fetch(`/api/v1/admin/parts/${editingPartId}`, {
         method: 'PUT',
@@ -639,8 +739,8 @@
         body: JSON.stringify({
           variant_id: editPartVariantId || null,
           part_name: editPartName,
-          part_sku: editPartSku || null,
-          quantity: parseInt(editPartQuantity) || 1,
+          part_sku: isDigital ? 'DIGITAL_FILE' : (editPartSku || null),
+          quantity: isDigital ? 1 : (parseInt(editPartQuantity) || 1),
           notes: editPartNotes || null
         })
       });
@@ -1294,7 +1394,14 @@
               />
             </div>
             <div>
-              <label class="block text-slate-300 font-semibold mb-1">VAT Rate (%)</label>
+              <div class="flex items-center justify-between mb-1">
+                <label class="block text-slate-300 font-semibold">VAT Rate (%)</label>
+                {#if isKleingewerbe}
+                  <span class="text-[10px] font-bold text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20">
+                    § 19 UStG (0% Exempt)
+                  </span>
+                {/if}
+              </div>
               <div class="flex items-center gap-1.5">
                 <input
                   type="number"
@@ -1302,12 +1409,15 @@
                   min="0"
                   max="100"
                   bind:value={createProductTaxRate}
+                  disabled={isKleingewerbe}
                   required
-                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500 disabled:opacity-50 disabled:cursor-not-allowed"
                 />
-                <button type="button" on:click={() => createProductTaxRate = 19.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">19%</button>
-                <button type="button" on:click={() => createProductTaxRate = 7.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">7%</button>
-                <button type="button" on:click={() => createProductTaxRate = 0.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">0%</button>
+                {#if !isKleingewerbe}
+                  <button type="button" on:click={() => createProductTaxRate = 19.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">19%</button>
+                  <button type="button" on:click={() => createProductTaxRate = 7.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">7%</button>
+                  <button type="button" on:click={() => createProductTaxRate = 0.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">0%</button>
+                {/if}
               </div>
             </div>
           </div>
@@ -1358,7 +1468,14 @@
               <input type="number" step="0.01" bind:value={basePriceEuros} required class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
             </div>
             <div>
-              <label class="block text-slate-300 font-semibold mb-1">VAT Rate (%)</label>
+              <div class="flex items-center justify-between mb-1">
+                <label class="block text-slate-300 font-semibold">VAT Rate (%)</label>
+                {#if isKleingewerbe}
+                  <span class="text-[10px] font-bold text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20">
+                    § 19 UStG (0% Exempt)
+                  </span>
+                {/if}
+              </div>
               <div class="flex items-center gap-1.5">
                 <input
                   type="number"
@@ -1366,15 +1483,133 @@
                   min="0"
                   max="100"
                   bind:value={taxRatePercent}
+                  disabled={isKleingewerbe}
                   required
-                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500 disabled:opacity-50 disabled:cursor-not-allowed"
                 />
-                <button type="button" on:click={() => taxRatePercent = 19.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">19%</button>
-                <button type="button" on:click={() => taxRatePercent = 7.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">7%</button>
-                <button type="button" on:click={() => taxRatePercent = 0.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">0%</button>
+                {#if !isKleingewerbe}
+                  <button type="button" on:click={() => taxRatePercent = 19.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">19%</button>
+                  <button type="button" on:click={() => taxRatePercent = 7.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">7%</button>
+                  <button type="button" on:click={() => taxRatePercent = 0.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">0%</button>
+                {/if}
               </div>
             </div>
           </div>
+
+          <!-- Physical Product (OFF) vs Digital Product (ON) Toggle -->
+          <div class="p-3.5 rounded-2xl {productType === 'digital' ? 'bg-cyan-950/20 border-cyan-800/40' : 'bg-slate-950 border-slate-800'} border flex items-center justify-between transition-colors">
+            <div>
+              <div class="font-bold text-white text-xs flex items-center gap-2">
+                <span>Product Delivery Type:</span>
+                <span class="px-2.5 py-0.5 rounded text-[10px] font-bold {productType === 'digital' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'}">
+                  {productType === 'digital' ? '⚡ Digital Product (Files / Download)' : '📦 Physical Product (Shipping & Warehouse Stock)'}
+                </span>
+              </div>
+              <p class="text-[11px] text-slate-400 mt-0.5">
+                {productType === 'digital'
+                  ? 'Digital product: Stock tracking is disabled (unlimited downloads). Shipping cost is automatically waived (0.00 €) for digital-only orders.'
+                  : 'Physical product: Warehouse stock tracking and standard physical shipping apply.'}
+              </p>
+            </div>
+            <div class="flex items-center gap-3">
+              <span class="text-xs font-semibold {productType === 'digital' ? 'text-cyan-400 font-bold' : 'text-slate-400'}">
+                {productType === 'digital' ? 'Digital (ON)' : 'Physical (OFF)'}
+              </span>
+              <button
+                type="button"
+                on:click={() => productType = productType === 'digital' ? 'physical' : 'digital'}
+                class="relative inline-flex h-6 w-12 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none {productType === 'digital' ? 'bg-cyan-600' : 'bg-slate-800'}"
+              >
+                <span class="sr-only">Toggle Digital Product</span>
+                <span
+                  class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {productType === 'digital' ? 'translate-x-6' : 'translate-x-0'}"
+                />
+              </button>
+            </div>
+          </div>
+
+          <!-- Multi-File Digital Product Manager (When Digital Product is ON) -->
+          {#if productType === 'digital'}
+            <div class="p-4 rounded-2xl bg-cyan-950/20 border border-cyan-800/40 space-y-3">
+              <div class="flex items-center justify-between">
+                <div>
+                  <label class="text-cyan-300 font-bold flex items-center gap-1.5 text-xs">
+                    <Download size={15} class="text-cyan-400" />
+                    <span>Digital Download Files ({digitalFiles.length})</span>
+                  </label>
+                  <p class="text-[10px] text-cyan-400/70">
+                    Upload multiple files (PDFs, ZIPs, firmware, 3D STLs) or add download URLs for customers to access after purchase.
+                  </p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs flex items-center gap-1 cursor-pointer transition-colors shadow">
+                    <Upload size={13} />
+                    <span>Upload File</span>
+                    <input type="file" on:change={handleDigitalFileUpload} class="hidden" />
+                  </label>
+                  <button
+                    type="button"
+                    on:click={addDigitalFile}
+                    class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs flex items-center gap-1 transition-colors"
+                  >
+                    <Plus size={13} />
+                    <span>Add Link</span>
+                  </button>
+                </div>
+              </div>
+
+              {#if isUploadingDigital}
+                <div class="text-xs text-cyan-400 animate-pulse font-mono py-1">
+                  Uploading digital asset file to server...
+                </div>
+              {/if}
+
+              {#if digitalFiles.length === 0}
+                <div class="p-4 rounded-xl border border-dashed border-cyan-800/50 text-center text-xs text-cyan-300/60">
+                  No files added yet. Click <strong>Upload File</strong> or <strong>Add Link</strong> to attach downloadable files.
+                </div>
+              {:else}
+                <div class="space-y-2">
+                  {#each digitalFiles as file, idx}
+                    <div class="p-2.5 rounded-xl bg-slate-950 border border-cyan-900/30 flex items-center gap-2 text-xs">
+                      <span class="text-cyan-400 font-mono text-[10px] px-1.5 py-0.5 rounded bg-cyan-950/60 flex-shrink-0">#{idx + 1}</span>
+                      <input
+                        type="text"
+                        bind:value={file.name}
+                        placeholder="File Label (e.g. Firmware v2.1.hex or Assembly Manual.pdf)"
+                        class="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white focus:outline-none focus:border-cyan-500 text-xs"
+                      />
+                      <input
+                        type="text"
+                        bind:value={file.url}
+                        placeholder="URL or media path (/media/uploads/...)"
+                        class="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono focus:outline-none focus:border-cyan-500 text-xs"
+                      />
+                      {#if file.url}
+                        <a
+                          href={file.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-white"
+                          title="Preview file"
+                        >
+                          <Download size={14} />
+                        </a>
+                      {/if}
+                      <button
+                        type="button"
+                        on:click={() => removeDigitalFile(idx)}
+                        class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-400"
+                        title="Remove file"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
 
           <!-- Product Structure Toggle -->
           <div class="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-between">
@@ -1403,8 +1638,22 @@
                 <input type="text" bind:value={singleVariantSku} placeholder="e.g. PRD-8910" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
               </div>
               <div>
-                <label class="block text-slate-300 font-semibold mb-1">Available Warehouse Stock</label>
-                <input type="number" bind:value={singleVariantStock} min="0" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+                <div class="flex items-center justify-between mb-1">
+                  <label class="block text-slate-300 font-semibold">Available Warehouse Stock</label>
+                  {#if productType === 'digital'}
+                    <span class="text-[10px] font-bold text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded border border-cyan-500/20">
+                      Stock Disabled (Virtual / Unlimited)
+                    </span>
+                  {/if}
+                </div>
+                {#if productType === 'digital'}
+                  <div class="px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-cyan-400 font-mono text-xs flex items-center justify-between">
+                    <span>Virtual Stock (Tracking disabled for digital)</span>
+                    <span class="font-bold">∞</span>
+                  </div>
+                {:else}
+                  <input type="number" bind:value={singleVariantStock} min="0" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+                {/if}
               </div>
             </div>
           {:else}
@@ -1610,11 +1859,35 @@
 
           <!-- Add Part Form -->
           <div class="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3 text-xs">
-            <h4 class="font-bold text-slate-300">Attach Part to Product Bundle</h4>
+            <div class="flex items-center justify-between pb-2 border-b border-slate-800/80">
+              <h4 class="font-bold text-slate-300">Attach Part or Digital Asset to Product Bundle</h4>
+              <div class="flex items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
+                <button
+                  type="button"
+                  on:click={() => newPartType = 'physical'}
+                  class="px-2.5 py-1 rounded-lg text-xs font-bold transition-colors {newPartType === 'physical' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-white'}"
+                >
+                  📦 Physical Part
+                </button>
+                <button
+                  type="button"
+                  on:click={() => { newPartType = 'digital'; newPartSku = 'DIGITAL_FILE'; }}
+                  class="px-2.5 py-1 rounded-lg text-xs font-bold transition-colors {newPartType === 'digital' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'}"
+                >
+                  ⚡ Digital File
+                </button>
+              </div>
+            </div>
+
             <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
               <div class="sm:col-span-2">
-                <label class="block text-slate-400 mb-1">Part Name & Specs</label>
-                <input type="text" bind:value={newPartName} placeholder="e.g. CNC Aluminum Case 6063" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white" />
+                <label class="block text-slate-400 mb-1">{newPartType === 'digital' ? 'Digital Asset Name / Label' : 'Part Name & Specs'}</label>
+                <input
+                  type="text"
+                  bind:value={newPartName}
+                  placeholder={newPartType === 'digital' ? 'e.g. Firmware v2.0.hex or 3D Model STL' : 'e.g. CNC Aluminum Case 6063'}
+                  class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white"
+                />
               </div>
               <div>
                 <label class="block text-slate-400 mb-1">Assigned Version</label>
@@ -1626,25 +1899,45 @@
                 </select>
               </div>
               <div>
-                <label class="block text-slate-400 mb-1">Quantity</label>
-                <input type="number" bind:value={newPartQuantity} min="1" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono" />
+                {#if newPartType === 'physical'}
+                  <label class="block text-slate-400 mb-1">Quantity</label>
+                  <input type="number" bind:value={newPartQuantity} min="1" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono" />
+                {:else}
+                  <label class="block text-slate-400 mb-1">Upload Digital File</label>
+                  <label class="w-full px-3 py-2 rounded-lg bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-800/60 text-cyan-300 font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors">
+                    <Upload size={13} />
+                    <span>{isUploadingBomFile ? 'Uploading...' : 'Choose File'}</span>
+                    <input type="file" on:change={handleBomFileUpload} class="hidden" />
+                  </label>
+                {/if}
               </div>
             </div>
+
             <div>
-              <label class="block text-slate-400 mb-1">Part Notes / Details (Optional)</label>
-              <input type="text" bind:value={newPartNotes} placeholder="e.g. Pre-installed in chassis" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white" />
+              <label class="block text-slate-400 mb-1">{newPartType === 'digital' ? 'Download URL or File Path' : 'Part Notes / Details (Optional)'}</label>
+              <input
+                type="text"
+                bind:value={newPartNotes}
+                placeholder={newPartType === 'digital' ? 'https://... or /media/uploads/firmware.zip' : 'e.g. Pre-installed in chassis'}
+                class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-xs"
+              />
             </div>
+
             <div class="flex justify-end pt-1">
-              <button type="button" on:click={handleAddPart} class="px-4 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold flex items-center gap-1.5">
+              <button
+                type="button"
+                on:click={handleAddPart}
+                class="px-4 py-2 rounded-xl {newPartType === 'digital' ? 'bg-cyan-600 hover:bg-cyan-500' : 'bg-orange-600 hover:bg-orange-500'} text-white font-bold flex items-center gap-1.5 transition-colors"
+              >
                 <Plus size={14} />
-                <span>Add Part to BOM</span>
+                <span>{newPartType === 'digital' ? 'Add Digital Asset to BOM' : 'Add Part to BOM'}</span>
               </button>
             </div>
           </div>
 
           <!-- Existing Parts List -->
           {#if productParts.length === 0}
-            <div class="text-xs text-slate-500 py-3 text-center">No components added yet.</div>
+            <div class="text-xs text-slate-500 py-3 text-center">No components or digital assets added yet.</div>
           {:else}
             <div class="space-y-2">
               {#each productParts as part}
@@ -1652,18 +1945,34 @@
                   <div class="min-w-0 pr-3">
                     <div class="flex items-center gap-2">
                       <span class="font-bold text-white">{part.part_name}</span>
+                      {#if part.part_sku === 'DIGITAL_FILE'}
+                        <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                          ⚡ DIGITAL FILE
+                        </span>
+                      {/if}
                       <span class="px-2 py-0.5 rounded text-[10px] font-bold {part.variant_id ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20' : 'bg-slate-800 text-slate-400'}">
                         {part.variant_id ? 'Version Specific' : 'Universal'}
                       </span>
                     </div>
                     {#if part.notes}
-                      <p class="text-[11px] text-slate-400 mt-0.5">{part.notes}</p>
+                      <div class="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5 truncate">
+                        {#if part.part_sku === 'DIGITAL_FILE'}
+                          <a href={part.notes} target="_blank" rel="noreferrer" class="text-cyan-400 hover:underline flex items-center gap-1 truncate">
+                            <Download size={11} />
+                            <span>{part.notes}</span>
+                          </a>
+                        {:else}
+                          <span>{part.notes}</span>
+                        {/if}
+                      </div>
                     {/if}
                   </div>
                   <div class="flex items-center gap-3 flex-shrink-0">
-                    <span class="font-mono text-orange-400 font-bold px-2 py-0.5 rounded bg-slate-900">
-                      {part.quantity}x
-                    </span>
+                    {#if part.part_sku !== 'DIGITAL_FILE'}
+                      <span class="font-mono text-orange-400 font-bold px-2 py-0.5 rounded bg-slate-900">
+                        {part.quantity}x
+                      </span>
+                    {/if}
                     <button
                       type="button"
                       on:click={() => openEditPart(part)}
@@ -1838,21 +2147,43 @@
       </div>
 
       <form on:submit|preventDefault={handleSavePart} class="space-y-4 text-xs">
+        <div class="flex items-center justify-between pb-2 border-b border-slate-800">
+          <span class="text-slate-400 font-semibold">Part Delivery Type:</span>
+          <div class="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+            <button
+              type="button"
+              on:click={() => editPartType = 'physical'}
+              class="px-2.5 py-1 rounded-lg text-xs font-bold transition-colors {editPartType === 'physical' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-white'}"
+            >
+              📦 Physical
+            </button>
+            <button
+              type="button"
+              on:click={() => { editPartType = 'digital'; editPartSku = 'DIGITAL_FILE'; }}
+              class="px-2.5 py-1 rounded-lg text-xs font-bold transition-colors {editPartType === 'digital' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'}"
+            >
+              ⚡ Digital File
+            </button>
+          </div>
+        </div>
+
         <div>
-          <label class="block font-semibold text-slate-300 mb-1">Part Name & Specifications</label>
+          <label class="block font-semibold text-slate-300 mb-1">{editPartType === 'digital' ? 'Digital Asset Name' : 'Part Name & Specifications'}</label>
           <input type="text" bind:value={editPartName} required class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block font-semibold text-slate-300 mb-1">Part SKU / Number</label>
-            <input type="text" bind:value={editPartSku} placeholder="Optional" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+        {#if editPartType === 'physical'}
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block font-semibold text-slate-300 mb-1">Part SKU / Number</label>
+              <input type="text" bind:value={editPartSku} placeholder="Optional" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-300 mb-1">Quantity</label>
+              <input type="number" bind:value={editPartQuantity} min="1" required class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+            </div>
           </div>
-          <div>
-            <label class="block font-semibold text-slate-300 mb-1">Quantity</label>
-            <input type="number" bind:value={editPartQuantity} min="1" required class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
-          </div>
-        </div>
+        {/if}
 
         <div>
           <label class="block font-semibold text-slate-300 mb-1">Assigned Variant / Version</label>
@@ -1865,8 +2196,8 @@
         </div>
 
         <div>
-          <label class="block font-semibold text-slate-300 mb-1">Part Notes</label>
-          <input type="text" bind:value={editPartNotes} placeholder="e.g. Factory tuned stabilizers" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
+          <label class="block font-semibold text-slate-300 mb-1">{editPartType === 'digital' ? 'Download URL or File Path' : 'Part Notes'}</label>
+          <input type="text" bind:value={editPartNotes} placeholder={editPartType === 'digital' ? 'https://... or /media/uploads/file.zip' : 'e.g. Factory tuned stabilizers'} class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
         </div>
 
         <div class="flex justify-end gap-2 pt-2 border-t border-slate-800">

@@ -513,8 +513,9 @@ async fn admin_update_product(
             images = COALESCE($13, images),
             has_multiple_variants = COALESCE($14, has_multiple_variants),
             tax_rate_percent = COALESCE($15, tax_rate_percent),
+            product_type = COALESCE($16, product_type),
             updated_at = NOW()
-        WHERE id = $16
+        WHERE id = $17
         "#
     )
     .bind(payload.title)
@@ -532,6 +533,7 @@ async fn admin_update_product(
     .bind(payload.images)
     .bind(payload.has_multiple_variants)
     .bind(payload.tax_rate_percent)
+    .bind(payload.product_type)
     .bind(id)
     .execute(&pool)
     .await
@@ -1375,6 +1377,7 @@ async fn admin_update_system_settings(
             order_prefix_enabled = COALESCE($42, order_prefix_enabled),
             order_prefix = COALESCE($43, order_prefix),
             order_date_enabled = COALESCE($44, order_date_enabled),
+            stock_display_template = COALESCE($45, stock_display_template),
             updated_at = NOW()
         WHERE id = 1
         "#
@@ -1423,6 +1426,7 @@ async fn admin_update_system_settings(
     .bind(payload.order_prefix_enabled)
     .bind(payload.order_prefix)
     .bind(payload.order_date_enabled)
+    .bind(payload.stock_display_template)
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2303,12 +2307,12 @@ async fn admin_get_purchase_analysis(
     let cat_rows = sqlx::query(
         r#"
         SELECT 
-            p.category,
+            COALESCE(p.category, 'Uncategorized') AS category,
             SUM(oi.quantity)::BIGINT AS items_sold,
             SUM(oi.total_price_cents)::BIGINT AS sales_cents
         FROM order_items oi
-        JOIN products p ON p.id = oi.product_id
         JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN products p ON p.id = oi.product_id
         WHERE o.created_at >= $1 AND o.created_at <= $2
           AND o.payment_status != 'failed' AND o.payment_status != 'refunded'
         GROUP BY p.category
@@ -2324,9 +2328,9 @@ async fn admin_get_purchase_analysis(
 
     let mut top_categories = Vec::new();
     for r in cat_rows {
-        let cat: String = r.get("category");
-        let sold: i64 = r.get("items_sold");
-        let cents: i64 = r.get("sales_cents");
+        let cat: String = r.get::<Option<String>, _>("category").unwrap_or_else(|| "Uncategorized".to_string());
+        let sold: i64 = r.try_get("items_sold").unwrap_or(0);
+        let cents: i64 = r.try_get("sales_cents").unwrap_or(0);
         top_categories.push(CategoryLeaderboardItem {
             category: cat,
             items_sold: sold,
@@ -2338,8 +2342,8 @@ async fn admin_get_purchase_analysis(
     let prod_rows = sqlx::query(
         r#"
         SELECT 
-            oi.product_id::TEXT AS product_id,
-            oi.product_title AS title,
+            COALESCE(oi.product_id::TEXT, '') AS product_id,
+            COALESCE(oi.product_title, 'Product') AS title,
             COALESCE(p.image_url, '') AS image_url,
             SUM(oi.quantity)::BIGINT AS items_sold,
             SUM(oi.total_price_cents)::BIGINT AS sales_cents
@@ -2361,11 +2365,11 @@ async fn admin_get_purchase_analysis(
 
     let mut top_products = Vec::new();
     for r in prod_rows {
-        let pid: String = r.get("product_id");
-        let title: String = r.get("title");
-        let img: String = r.get("image_url");
-        let sold: i64 = r.get("items_sold");
-        let cents: i64 = r.get("sales_cents");
+        let pid: String = r.get::<Option<String>, _>("product_id").unwrap_or_default();
+        let title: String = r.get::<Option<String>, _>("title").unwrap_or_else(|| "Product".to_string());
+        let img: String = r.get::<Option<String>, _>("image_url").unwrap_or_default();
+        let sold: i64 = r.try_get("items_sold").unwrap_or(0);
+        let cents: i64 = r.try_get("sales_cents").unwrap_or(0);
         top_products.push(ProductLeaderboardItem {
             product_id: pid,
             title,

@@ -401,7 +401,7 @@
             {:else if inStock}
               <div class="w-2.5 h-2.5 rounded-full bg-emerald-400"></div>
               <span class="font-semibold text-slate-200">
-                In Stock ({currentVariant.stock_quantity} units available in central warehouse)
+                {(store?.stock_display_template || 'In Stock ({stock} units available in central warehouse)').replace('{stock}', String(currentVariant.stock_quantity))}
               </span>
             {:else}
               <div class="w-2.5 h-2.5 rounded-full bg-rose-500"></div>

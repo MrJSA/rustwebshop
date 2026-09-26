@@ -85,7 +85,9 @@
 
   let activeSlide = 0;
   let autoRotateTimer = null;
+  let productCarouselTimer = null;
   let isCarouselHovered = false;
+  let hoveredSectionId = null;
 
   $: carouselItems = (heroConfig && heroConfig.carousel_items && heroConfig.carousel_items.length > 0)
     ? heroConfig.carousel_items
@@ -105,13 +107,28 @@
       if (!isCarouselHovered && carouselItems.length > 1) {
         nextSlide();
       }
-    }, 6500); // Auto-rotates every 6.5s
+    }, 6500); // Hero slides auto-rotate every 6.5s
+
+    // Auto-scroll product carousels every 7 seconds to the next product
+    productCarouselTimer = setInterval(() => {
+      if (carousels && carousels.length > 0) {
+        for (const section of carousels) {
+          if (section.items && section.items.length > 5 && hoveredSectionId !== section.id) {
+            scrollCarousel(section.id, 1);
+          }
+        }
+      }
+    }, 7000);
   }
 
   function stopAutoRotate() {
     if (autoRotateTimer) {
       clearInterval(autoRotateTimer);
       autoRotateTimer = null;
+    }
+    if (productCarouselTimer) {
+      clearInterval(productCarouselTimer);
+      productCarouselTimer = null;
     }
   }
 
@@ -128,8 +145,23 @@
   function scrollCarousel(sectionId, direction) {
     const el = document.getElementById(`carousel-${sectionId}`);
     if (el) {
-      const scrollAmount = 480;
-      el.scrollBy({ left: direction * scrollAmount, behavior: 'smooth' });
+      const scrollAmount = 300;
+      const maxScroll = el.scrollWidth - el.clientWidth;
+      if (direction > 0) {
+        if (el.scrollLeft >= maxScroll - 20) {
+          // Endlessly loop back to the start
+          el.scrollTo({ left: 0, behavior: 'smooth' });
+        } else {
+          el.scrollBy({ left: scrollAmount, behavior: 'smooth' });
+        }
+      } else {
+        if (el.scrollLeft <= 20) {
+          // Loop to the end
+          el.scrollTo({ left: maxScroll, behavior: 'smooth' });
+        } else {
+          el.scrollBy({ left: -scrollAmount, behavior: 'smooth' });
+        }
+      }
     }
   }
 </script>
@@ -386,9 +418,11 @@
               {/each}
             </div>
           {:else}
-            <!-- Smooth scrollable horizontal carousel -->
+            <!-- Smooth scrollable horizontal carousel with endless loop and hover detection -->
             <div
               id="carousel-{section.id}"
+              on:mouseenter={() => hoveredSectionId = section.id}
+              on:mouseleave={() => hoveredSectionId = null}
               class="flex gap-3.5 sm:gap-4 overflow-x-auto scrollbar-none snap-x snap-mandatory scroll-smooth pb-3"
             >
               {#each section.items as itemWithV}

@@ -84,6 +84,8 @@
   let deploymentMode = settings.deployment_mode || 'development';
   let debugMode = settings.debug_mode !== undefined ? settings.debug_mode : false;
 
+  let stockDisplayTemplate = settings.stock_display_template || 'In Stock ({stock} units available in central warehouse)';
+
   let isSavingIdentity = false;
   let identitySuccessNotice = '';
   let identityErrorNotice = '';
@@ -92,11 +94,11 @@
   function handleTaxModeChange(mode) {
     taxMode = mode;
     if (mode === 'kleingewerbe') {
-      taxNotice = 'Gemäß § 19 UStG wird keine Umsatzsteuer berechnet.';
+      taxNotice = 'According to § 19 UStG, no value-added tax is charged (small business regulation).';
     } else if (mode === 'included') {
-      taxNotice = 'Preise verstehen sich inklusive der gesetzlichen Mehrwertsteuer.';
+      taxNotice = 'All prices include statutory value-added tax (VAT).';
     } else if (mode === 'excluded') {
-      taxNotice = 'Preise verstehen sich zuzüglich der gesetzlichen Mehrwertsteuer.';
+      taxNotice = 'All prices exclude statutory value-added tax (VAT).';
     }
   }
 
@@ -135,6 +137,7 @@
         order_prefix_enabled: orderPrefixEnabled,
         order_prefix: (orderPrefix || '').trim().toUpperCase().slice(0, 7),
         order_date_enabled: orderDateEnabled,
+        stock_display_template: stockDisplayTemplate,
         deployment_mode: deploymentMode,
         debug_mode: debugMode
       };
@@ -747,11 +750,27 @@
                 <textarea
                   bind:value={taxNotice}
                   rows="2"
-                  placeholder="Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."
+                  placeholder="According to § 19 UStG, no value-added tax is charged (small business regulation)."
                   class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs leading-relaxed focus:outline-none focus:border-orange-500"
                 ></textarea>
                 <p class="text-[10px] text-slate-500 mt-1">
                   Appears automatically in the footer of all PDF Invoices and Packing Slips, and replaces {"{{TAX_NOTICE}}"} in Policy pages.
+                </p>
+              </div>
+
+              <!-- Stock Availability Text Template -->
+              <div class="sm:col-span-4 p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+                <label class="block text-slate-300 font-semibold text-xs">
+                  Physical Product Stock Availability Message Template
+                </label>
+                <input
+                  type="text"
+                  bind:value={stockDisplayTemplate}
+                  placeholder="In Stock (25 units available in central warehouse)"
+                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500 font-mono"
+                />
+                <p class="text-[11px] text-slate-400">
+                  Custom text displayed on storefront product pages for available physical stock. Use <code class="text-orange-400 font-mono">&#123;stock&#125;</code> as the live quantity placeholder (e.g. <em>&#123;stock&#125; items in stock - ready to ship</em>).
                 </p>
               </div>
 

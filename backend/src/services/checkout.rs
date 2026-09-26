@@ -145,11 +145,45 @@ impl CheckoutService {
                 None
             };
 
-            if let Some(ref url) = download_url {
-                digital_downloads.push(DigitalDownloadItem {
-                    title: product_title.clone(),
-                    download_url: url.clone(),
-                });
+            if is_digital {
+                if let Some(ref url_str) = download_url {
+                    if let Ok(files) = serde_json::from_str::<Vec<serde_json::Value>>(url_str) {
+                        for f in files {
+                            let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("File");
+                            let u = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                            if !u.is_empty() {
+                                digital_downloads.push(DigitalDownloadItem {
+                                    title: format!("{} ({})", product_title, name),
+                                    download_url: u.to_string(),
+                                });
+                            }
+                        }
+                    } else if !url_str.trim().is_empty() {
+                        digital_downloads.push(DigitalDownloadItem {
+                            title: product_title.clone(),
+                            download_url: url_str.clone(),
+                        });
+                    }
+                }
+
+                // Check BOM product_parts for attached digital files
+                let parts = sqlx::query("SELECT part_name, notes FROM product_parts WHERE product_id = $1 AND part_sku = 'DIGITAL_FILE'")
+                    .bind(product_id)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .unwrap_or_default();
+                for p in parts {
+                    let pname: String = p.get("part_name");
+                    let file_url: Option<String> = p.get("notes");
+                    if let Some(furl) = file_url {
+                        if !furl.trim().is_empty() {
+                            digital_downloads.push(DigitalDownloadItem {
+                                title: format!("{} ({})", product_title, pname),
+                                download_url: furl,
+                            });
+                        }
+                    }
+                }
             }
 
             order_items_to_insert.push((
@@ -164,6 +198,13 @@ impl CheckoutService {
                 is_digital,
                 download_url,
             ));
+        }
+
+        // Check if order contains only digital products - if so, waive/zero-out all shipping charges
+        let is_digital_only = !order_items_to_insert.is_empty()
+            && order_items_to_insert.iter().all(|item| item.8);
+        if is_digital_only {
+            shipping_cost_cents = 0;
         }
 
         // 4. Calculate Tax and Total based on tax_mode
