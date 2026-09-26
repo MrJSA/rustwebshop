@@ -39,6 +39,12 @@ pub struct StoreSettings {
     pub cookie_deny_label: String,
     pub cookie_preferences_label: String,
     pub tax_notice: String,
+    pub legal_name: String,
+    pub store_owner: String,
+    pub commercial_register: String,
+    pub dispute_resolution_notice: String,
+    pub odr_url: String,
+    pub footer_config: serde_json::Value,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -76,6 +82,12 @@ pub struct StoreSettingsDTO {
     pub cookie_deny_label: String,
     pub cookie_preferences_label: String,
     pub tax_notice: String,
+    pub legal_name: String,
+    pub store_owner: String,
+    pub commercial_register: String,
+    pub dispute_resolution_notice: String,
+    pub odr_url: String,
+    pub footer_config: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +126,12 @@ pub struct UpdateStoreSettingsRequest {
     pub cookie_deny_label: Option<String>,
     pub cookie_preferences_label: Option<String>,
     pub tax_notice: Option<String>,
+    pub legal_name: Option<String>,
+    pub store_owner: Option<String>,
+    pub commercial_register: Option<String>,
+    pub dispute_resolution_notice: Option<String>,
+    pub odr_url: Option<String>,
+    pub footer_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]

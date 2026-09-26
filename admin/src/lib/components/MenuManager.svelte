@@ -33,6 +33,37 @@
       .sort((a, b) => a.sort_order - b.sort_order);
   }
 
+  function getItemDepth(item) {
+    if (!item || !item.parent_id) return 1;
+    const parent = currentTabItems.find(i => i.id === item.parent_id);
+    if (!parent || !parent.parent_id) return 2;
+    return 3;
+  }
+
+  $: parentOptions = currentTabItems
+    .filter(i => getItemDepth(i) <= 2)
+    .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+    .map(i => {
+      const depth = getItemDepth(i);
+      let label = i.label;
+      if (depth === 2) {
+        const p = currentTabItems.find(x => x.id === i.parent_id);
+        label = `↳ [${p ? p.label : 'Parent'}] > ${i.label} (Layer 2 -> creates 3rd Layer)`;
+      } else {
+        label = `${i.label} (Layer 1 Top)`;
+      }
+      return { id: i.id, label, depth };
+    });
+
+  function getDescendantIds(itemId) {
+    const children = currentTabItems.filter(i => i.parent_id === itemId);
+    let ids = children.map(c => c.id);
+    for (const c of children) {
+      ids = [...ids, ...getDescendantIds(c.id)];
+    }
+    return ids;
+  }
+
   // Predefined store routes
   const standardRoutes = [
     { label: 'Home / Overview', url: '/' },
@@ -403,8 +434,9 @@
                   </td>
                 </tr>
 
-                <!-- Sub-items Rows (Nested Children) -->
+                <!-- Sub-items Rows (Nested Children - Layer 2) -->
                 {#each children as child, cIdx}
+                  {@const grandchildren = getChildren(child.id)}
                   <tr class="bg-slate-950/40 text-slate-300 hover:bg-slate-950/80 transition-colors">
                     <td class="py-2.5 pl-6 font-mono text-slate-400 text-xs align-middle">
                       <div class="flex items-center gap-1.5">
@@ -436,8 +468,13 @@
                       <div class="flex items-center gap-2">
                         <span class="text-xs font-semibold text-slate-200">{child.label}</span>
                         <span class="px-1.5 py-0.5 rounded text-[9px] font-mono bg-slate-800 text-slate-400 border border-slate-700">
-                          dropdown item
+                          Layer 2
                         </span>
+                        {#if grandchildren.length > 0}
+                          <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-orange-500/10 text-orange-400 border border-orange-500/20">
+                            Flyout ({grandchildren.length})
+                          </span>
+                        {/if}
                       </div>
                     </td>
                     <td class="py-2.5 font-mono text-amber-400/90 text-xs align-middle">{child.url}</td>
@@ -452,6 +489,15 @@
                     </td>
                     <td class="py-2.5 text-right align-middle">
                       <div class="inline-flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          on:click={() => openCreateModal(child.id)}
+                          class="p-1.5 rounded-lg bg-orange-600/15 hover:bg-orange-600/25 text-orange-400 transition-colors border border-orange-500/20 flex items-center gap-1"
+                          title="Add 3rd-layer sub-link (Grandchild)"
+                        >
+                          <FolderPlus size={12} />
+                          <span class="text-[10px] font-bold hidden sm:inline">+ 3rd Layer</span>
+                        </button>
                         <button
                           type="button"
                           on:click={() => openEditModal(child)}
@@ -471,6 +517,76 @@
                       </div>
                     </td>
                   </tr>
+
+                  <!-- Grandchildren Rows (Layer 3 Flyout Items) -->
+                  {#each grandchildren as grand, gIdx}
+                    <tr class="bg-slate-950/70 text-slate-300 hover:bg-slate-950 transition-colors">
+                      <td class="py-2 pl-12 font-mono text-slate-400 text-xs align-middle">
+                        <div class="flex items-center gap-1.5">
+                          <CornerDownRight size={11} class="text-orange-400" />
+                          <span>{grand.sort_order}</span>
+                          <div class="flex flex-col gap-0.5">
+                            <button
+                              type="button"
+                              disabled={gIdx === 0}
+                              on:click={() => moveItem(grandchildren, gIdx, -1)}
+                              class="p-0.5 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800 text-slate-300 hover:text-white transition-colors"
+                              title="Move Grandchild Up"
+                            >
+                              <ArrowUp size={9} />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={gIdx === grandchildren.length - 1}
+                              on:click={() => moveItem(grandchildren, gIdx, 1)}
+                              class="p-0.5 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800 text-slate-300 hover:text-white transition-colors"
+                              title="Move Grandchild Down"
+                            >
+                              <ArrowDown size={9} />
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                      <td class="py-2 pl-8 align-middle">
+                        <div class="flex items-center gap-2">
+                          <span class="text-xs font-semibold text-slate-200">{grand.label}</span>
+                          <span class="px-1.5 py-0.5 rounded text-[9px] font-mono bg-orange-500/10 text-orange-400 border border-orange-500/20">
+                            Layer 3 (Flyout)
+                          </span>
+                        </div>
+                      </td>
+                      <td class="py-2 font-mono text-orange-400/80 text-xs align-middle">{grand.url}</td>
+                      <td class="py-2 text-center align-middle">
+                        <button
+                          type="button"
+                          on:click={() => handleToggleActive(grand)}
+                          class="px-2 py-0.5 rounded text-[10px] font-bold transition-colors {grand.is_active ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-slate-800 text-slate-500'}"
+                        >
+                          {grand.is_active ? 'Active' : 'Hidden'}
+                        </button>
+                      </td>
+                      <td class="py-2 text-right align-middle">
+                        <div class="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            on:click={() => openEditModal(grand)}
+                            class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors border border-slate-700"
+                            title="Edit 3rd Layer Link"
+                          >
+                            <Edit2 size={12} class="text-orange-400" />
+                          </button>
+                          <button
+                            type="button"
+                            on:click={() => handleDeleteItem(grand.id)}
+                            class="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 transition-colors border border-rose-500/20"
+                            title="Remove 3rd Layer Link"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  {/each}
                 {/each}
               {/each}
             </tbody>
@@ -599,18 +715,18 @@
         </div>
 
         <div>
-          <label class="block text-slate-300 font-semibold mb-1">Parent Item (For Dropdown Sub-menus)</label>
+          <label class="block text-slate-300 font-semibold mb-1">Parent Item (Up to 3 Navigation Layers)</label>
           <select
             bind:value={newParentId}
             class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500 text-xs"
           >
-            <option value="">[ None - Top Level Menu Link ]</option>
-            {#each topLevelItems as p}
-              <option value={p.id}>↳ Nest inside dropdown: "{p.label}"</option>
+            <option value="">[ None - Top Level Menu Link (Layer 1) ]</option>
+            {#each parentOptions as p}
+              <option value={p.id}>{p.label}</option>
             {/each}
           </select>
           <p class="text-[10px] text-slate-500 mt-1">
-            Select a top-level menu item above to turn it into a dropdown menu on your storefront.
+            Nesting under Layer 1 creates a Dropdown (Layer 2). Nesting under Layer 2 creates a Nested Flyout Submenu (Layer 3).
           </p>
         </div>
 
@@ -700,14 +816,14 @@
         </div>
 
         <div>
-          <label class="block text-slate-300 font-semibold mb-1">Parent Item (For Dropdown Sub-menus)</label>
+          <label class="block text-slate-300 font-semibold mb-1">Parent Item (Up to 3 Navigation Layers)</label>
           <select
             bind:value={editParentId}
             class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500 text-xs"
           >
-            <option value="">[ None - Top Level Menu Link ]</option>
-            {#each topLevelItems.filter(p => p.id !== editingItemId) as p}
-              <option value={p.id}>↳ Nest inside dropdown: "{p.label}"</option>
+            <option value="">[ None - Top Level Menu Link (Layer 1) ]</option>
+            {#each parentOptions.filter(p => p.id !== editingItemId && !getDescendantIds(editingItemId).includes(p.id)) as p}
+              <option value={p.id}>{p.label}</option>
             {/each}
           </select>
         </div>

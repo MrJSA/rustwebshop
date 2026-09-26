@@ -62,7 +62,7 @@ pub fn public_router() -> Router<PgPool> {
 
 async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, cookie_banner_enabled, cookie_banner_title, cookie_banner_description, cookie_banner_policy_url, cookie_accept_label, cookie_deny_label, cookie_preferences_label, tax_notice, updated_at FROM store_settings WHERE id = 1"
+        "SELECT * FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
@@ -101,6 +101,12 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
         cookie_deny_label: settings.cookie_deny_label,
         cookie_preferences_label: settings.cookie_preferences_label,
         tax_notice: settings.tax_notice,
+        legal_name: settings.legal_name,
+        store_owner: settings.store_owner,
+        commercial_register: settings.commercial_register,
+        dispute_resolution_notice: settings.dispute_resolution_notice,
+        odr_url: settings.odr_url,
+        footer_config: settings.footer_config,
     };
 
     let payment_providers = sqlx::query_as::<_, PaymentProviderRow>(
@@ -522,13 +528,18 @@ async fn public_get_page(
     if let Some(s) = settings_opt {
         let mut md = page.content_markdown;
         md = md.replace("{{STORE_NAME}}", &s.store_name);
+        md = md.replace("{{LEGAL_NAME}}", if !s.legal_name.is_empty() { &s.legal_name } else { &s.store_name });
+        md = md.replace("{{STORE_OWNER}}", &s.store_owner);
         md = md.replace("{{COMPANY_ADDRESS}}", &s.company_address);
         md = md.replace("{{SUPPORT_EMAIL}}", &s.support_email);
         md = md.replace("{{PHONE}}", &s.phone);
         md = md.replace("{{VAT_ID}}", &s.vat_id);
         md = md.replace("{{TAX_NOTICE}}", &s.tax_notice);
+        md = md.replace("{{COMMERCIAL_REGISTER}}", &s.commercial_register);
+        md = md.replace("{{DISPUTE_RESOLUTION_NOTICE}}", &s.dispute_resolution_notice);
+        md = md.replace("{{ODR_URL}}", if !s.odr_url.is_empty() { &s.odr_url } else { "https://ec.europa.eu/odr" });
         // Also update standard initial default strings if present
-        md = md.replace("RustCraft Gear & Software GmbH", &s.store_name);
+        md = md.replace("RustCraft Gear & Software GmbH", if !s.legal_name.is_empty() { &s.legal_name } else { &s.store_name });
         md = md.replace("RustCraft Gear & Software", &s.store_name);
         md = md.replace("support@rustwebshop.local", &s.support_email);
         md = md.replace("+49 (0) 30 123456-78", &s.phone);

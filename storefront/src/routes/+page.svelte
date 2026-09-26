@@ -256,47 +256,42 @@
             {#each heroConfig.featured_buttons as btn}
               <a
                 href={btn.link_url || '/'}
-                class="group relative rounded-2xl overflow-hidden p-4 sm:p-5 flex flex-col justify-between shadow-xl transition-all duration-300 hover:scale-[1.02] hover:shadow-2xl border border-white/15 min-h-[170px]"
+                class="group relative rounded-2xl overflow-hidden p-4 sm:p-5 flex flex-col justify-start shadow-xl transition-all duration-300 hover:scale-[1.02] hover:shadow-2xl border border-white/15 min-h-[185px]"
                 style="background-color: {btn.bg_color || '#ea580c'};"
               >
                 <!-- Depth Gradient & Highlights -->
-                <div class="absolute inset-0 bg-gradient-to-br from-white/15 via-transparent to-black/30 pointer-events-none"></div>
+                <div class="absolute inset-0 bg-gradient-to-br from-white/15 via-transparent to-black/35 pointer-events-none"></div>
 
-                <!-- Floating Product Image Aligned Center Right -->
+                <!-- Floating Product Image in Bottom Right Corner (66% - 75% of button) -->
                 {#if btn.image_url}
-                  <div class="absolute right-2 sm:right-3 top-1/2 -translate-y-1/2 w-24 h-24 sm:w-28 sm:h-28 z-10 transition-all duration-300 group-hover:scale-110 flex items-center justify-center pointer-events-none">
+                  <div class="absolute right-[-2%] bottom-[-2%] w-[70%] h-[72%] z-10 transition-transform duration-300 group-hover:scale-105 flex items-end justify-end pointer-events-none">
                     <img
                       src={btn.image_url}
                       alt={btn.title}
-                      class="w-full h-full object-contain drop-shadow-[0_12px_16px_rgba(0,0,0,0.5)]"
+                      class="max-w-full max-h-full object-contain object-right-bottom drop-shadow-[0_16px_24px_rgba(0,0,0,0.6)]"
                     />
                   </div>
                 {/if}
 
-                <!-- Text Header (No "Featured" badge) -->
-                <div class="relative z-20 max-w-[65%]">
+                <!-- Text Header (Full Width at Top) -->
+                <div class="relative z-20 w-full">
                   <h3 class="text-sm sm:text-base font-black text-white leading-tight drop-shadow group-hover:underline">
                     {btn.title}
                   </h3>
                   {#if btn.subtitle}
-                    <p class="text-[11px] text-white/80 font-medium mt-1 leading-snug drop-shadow line-clamp-2">
+                    <p class="text-[11px] text-white/90 font-medium mt-1 leading-snug drop-shadow line-clamp-2">
                       {btn.subtitle}
                     </p>
                   {/if}
-                </div>
 
-                <!-- Bottom Row: Price & Action -->
-                <div class="relative z-20 mt-4 flex items-center justify-between">
-                  <div>
-                    {#if btn.show_price !== false && btn.price}
-                      <span class="inline-block text-[11px] sm:text-xs font-mono font-black text-white bg-black/30 backdrop-blur-sm px-2 py-0.5 rounded-md border border-white/10 shadow-sm">
+                  <!-- Price Directly Underneath Subtitle at the Top -->
+                  {#if btn.show_price !== false && btn.price}
+                    <div class="mt-2.5">
+                      <span class="inline-block text-[11px] sm:text-xs font-mono font-black text-white bg-black/40 backdrop-blur-md px-2.5 py-0.5 rounded-lg border border-white/15 shadow-sm">
                         {btn.price}
                       </span>
-                    {/if}
-                  </div>
-                  <div class="w-7 h-7 rounded-lg bg-white/20 group-hover:bg-white text-white group-hover:text-slate-950 flex items-center justify-center transition-colors shadow">
-                    <ArrowRight size={13} />
-                  </div>
+                    </div>
+                  {/if}
                 </div>
               </a>
             {/each}

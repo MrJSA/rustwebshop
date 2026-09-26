@@ -7,7 +7,7 @@
     LayoutDashboard, Package, Warehouse, ShoppingCart, 
     CreditCard, Truck, Sliders, ExternalLink, ShieldCheck, Zap,
     FileText, Menu, FolderTree, Image, Mail, AlertTriangle, KeyRound,
-    LogOut, User, X, CheckCircle2, TrendingUp
+    LogOut, User, X, CheckCircle2, TrendingUp, ChevronDown, ChevronRight
   } from 'lucide-svelte';
 
   export let data;
@@ -84,6 +84,23 @@
   let changePasswordError = '';
   let changePasswordSuccess = '';
   let isSubmittingChange = false;
+
+  // Collapsible Submenu State
+  let expandedGroups = {};
+  $: {
+    for (const group of navGroups) {
+      if (group.match($page.url.pathname)) {
+        if (expandedGroups[group.id] === undefined) {
+          expandedGroups[group.id] = true;
+        }
+      }
+    }
+  }
+
+  function toggleGroup(groupId) {
+    expandedGroups[groupId] = !expandedGroups[groupId];
+    expandedGroups = { ...expandedGroups };
+  }
 
   $: isLoginPage = $page.url.pathname === '/login';
 
@@ -213,23 +230,41 @@
       <nav class="flex-1 px-3 py-6 space-y-2 overflow-y-auto">
         {#each navGroups as group}
           {@const isGroupActive = group.match($page.url.pathname)}
+          {@const isExpanded = expandedGroups[group.id] ?? isGroupActive}
           <div class="space-y-0.5">
-            <a
-              href={group.href}
-              class="flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all {isGroupActive ? 'bg-orange-600/15 text-orange-400 border border-orange-500/20' : 'text-slate-300 hover:text-white hover:bg-slate-800/80'}"
-            >
-              <div class="flex items-center gap-2.5">
-                <svelte:component this={group.icon} size={16} class={isGroupActive ? 'text-orange-400' : 'text-slate-400'} />
-                <span>{group.label}</span>
-              </div>
-              {#if group.subItems.length > 0}
-                <span class="text-[10px] text-slate-500 font-mono font-normal">{group.subItems.length}</span>
-              {/if}
-            </a>
+            <div class="flex items-center gap-1">
+              <a
+                href={group.href}
+                class="flex-1 flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all {isGroupActive ? 'bg-orange-600/15 text-orange-400 border border-orange-500/20' : 'text-slate-300 hover:text-white hover:bg-slate-800/80'}"
+              >
+                <div class="flex items-center gap-2.5">
+                  <svelte:component this={group.icon} size={16} class={isGroupActive ? 'text-orange-400' : 'text-slate-400'} />
+                  <span>{group.label}</span>
+                </div>
+                {#if group.subItems.length > 0}
+                  <span class="text-[10px] text-slate-500 font-mono font-normal">{group.subItems.length}</span>
+                {/if}
+              </a>
 
-            <!-- Submenu Items -->
-            {#if group.subItems.length > 0}
-              <div class="pl-7 pr-1 py-1 space-y-0.5 border-l border-slate-800/80 ml-5 my-0.5">
+              {#if group.subItems.length > 0}
+                <button
+                  type="button"
+                  on:click|stopPropagation={() => toggleGroup(group.id)}
+                  class="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800/80 transition-colors"
+                  title={isExpanded ? 'Collapse submenu' : 'Expand submenu'}
+                  aria-label={isExpanded ? 'Collapse submenu' : 'Expand submenu'}
+                >
+                  <ChevronDown
+                    size={14}
+                    class="transition-transform duration-200 {isExpanded ? 'rotate-180 text-orange-400' : 'text-slate-500'}"
+                  />
+                </button>
+              {/if}
+            </div>
+
+            <!-- Submenu Items (Collapsible) -->
+            {#if group.subItems.length > 0 && isExpanded}
+              <div class="pl-7 pr-1 py-1 space-y-0.5 border-l border-slate-800/80 ml-5 my-0.5 animate-in fade-in slide-in-from-top-1 duration-150">
                 {#each group.subItems as sub}
                   {@const isSubActive = sub.match($page.url.pathname, $page.url.searchParams.get('tab'))}
                   <a

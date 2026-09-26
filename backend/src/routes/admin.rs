@@ -81,6 +81,8 @@ pub fn admin_router() -> Router<PgPool> {
         .route("/menu/:id", put(admin_update_menu_item).delete(admin_delete_menu_item))
         .route("/settings/system", get(admin_get_system_settings).put(admin_update_system_settings))
         .route("/settings/email/test", post(admin_test_email))
+        .route("/export/store-data", get(admin_export_store_data))
+        .route("/export/media", get(admin_export_media_library))
         .layer(axum::middleware::from_fn(crate::middleware::admin_auth_middleware));
 
     Router::new()
@@ -230,7 +232,7 @@ async fn admin_change_credentials(
 // 2. Executive Dashboard Stats & Analytics
 async fn get_dashboard_stats(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let gross_sales: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(total_cents), 0)::BIGINT FROM orders WHERE payment_status = 'paid'"
+        "SELECT COALESCE(SUM(total_cents), 0)::BIGINT FROM orders WHERE payment_status != 'failed' AND payment_status != 'refunded'"
     )
     .fetch_one(&pool)
     .await
@@ -1357,6 +1359,12 @@ async fn admin_update_system_settings(
             cookie_deny_label = COALESCE($32, cookie_deny_label),
             cookie_preferences_label = COALESCE($33, cookie_preferences_label),
             tax_notice = COALESCE($34, tax_notice),
+            legal_name = COALESCE($35, legal_name),
+            store_owner = COALESCE($36, store_owner),
+            commercial_register = COALESCE($37, commercial_register),
+            dispute_resolution_notice = COALESCE($38, dispute_resolution_notice),
+            odr_url = COALESCE($39, odr_url),
+            footer_config = COALESCE($40, footer_config),
             updated_at = NOW()
         WHERE id = 1
         "#
@@ -1395,6 +1403,12 @@ async fn admin_update_system_settings(
     .bind(payload.cookie_deny_label)
     .bind(payload.cookie_preferences_label)
     .bind(payload.tax_notice)
+    .bind(payload.legal_name)
+    .bind(payload.store_owner)
+    .bind(payload.commercial_register)
+    .bind(payload.dispute_resolution_notice)
+    .bind(payload.odr_url)
+    .bind(payload.footer_config)
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2112,7 +2126,13 @@ async fn admin_get_purchase_analysis(
     Query(query): Query<PurchaseAnalysisQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let now = Utc::now();
-    let preset = query.preset.as_deref().unwrap_or("ytd");
+    let preset = if let Some(ref p) = query.preset {
+        p.as_str()
+    } else if query.start_date.is_some() || query.end_date.is_some() {
+        "custom"
+    } else {
+        "ytd"
+    };
 
     let (start_dt, end_dt, period_label) = match preset {
         "month" => {
@@ -2152,15 +2172,16 @@ async fn admin_get_purchase_analysis(
                 .and_hms_opt(23, 59, 59)
                 .unwrap();
             let start_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(start, Utc);
-            let end_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(end, Utc);
+            let end_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(end, Utc) + chrono::Duration::hours(24);
             (start_utc, end_utc, format!("{} to {}", s_date, e_date))
         }
         _ => {
-            // "ytd" (Default: Jan 1 of current year to current day)
+            // "ytd" (Default: Jan 1 of current year to end of current day with buffer)
             let y = chrono::Datelike::year(&now);
             let start = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
             let start_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(start, Utc);
-            (start_utc, now, format!("Year to Date ({})", y))
+            let end_utc = now + chrono::Duration::hours(24);
+            (start_utc, end_utc, format!("Year to Date ({})", y))
         }
     };
 
@@ -2350,4 +2371,134 @@ async fn admin_get_purchase_analysis(
         top_products,
     }))
 }
+
+// 16. Store Data & Media Library Export
+async fn admin_export_store_data(
+    State(pool): State<PgPool>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let settings = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1")
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let products = sqlx::query_as::<_, Product>("SELECT * FROM products ORDER BY created_at ASC")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+    let variants = sqlx::query_as::<_, ProductVariant>("SELECT * FROM product_variants ORDER BY created_at ASC")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+    let categories = sqlx::query_as::<_, Category>("SELECT * FROM categories ORDER BY display_order ASC, name ASC")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+    let pages = sqlx::query_as::<_, PageContent>("SELECT * FROM pages ORDER BY title ASC")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+    let menu_items = sqlx::query_as::<_, NavigationItem>("SELECT * FROM navigation_items ORDER BY sort_order ASC")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+    let shipping_providers = sqlx::query_as::<_, ShippingProvider>("SELECT * FROM shipping_providers ORDER BY sort_order ASC")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+    let shipping_zones = sqlx::query_as::<_, ShippingZone>("SELECT * FROM shipping_zones ORDER BY is_default DESC, zone_name ASC")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+    let shipping_rates = sqlx::query_as::<_, ShippingRate>("SELECT * FROM shipping_rates ORDER BY price_cents ASC")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+    let export_payload = json!({
+        "version": "1.0",
+        "exported_at": Utc::now().to_rfc3339(),
+        "store_settings": settings,
+        "products": products,
+        "product_variants": variants,
+        "categories": categories,
+        "pages": pages,
+        "navigation_menu": menu_items,
+        "shipping": {
+            "providers": shipping_providers,
+            "zones": shipping_zones,
+            "rates": shipping_rates,
+        }
+    });
+
+    let filename = format!("store-export-{}.json", Utc::now().format("%Y%m%d-%H%M%S"));
+    let json_bytes = serde_json::to_vec_pretty(&export_payload)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let headers = [
+        (axum::http::header::CONTENT_TYPE, "application/json".to_string()),
+        (
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        ),
+    ];
+
+    Ok((headers, json_bytes))
+}
+
+async fn admin_export_media_library(
+    State(pool): State<PgPool>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    let media_items = sqlx::query_as::<_, MediaItem>("SELECT * FROM media ORDER BY created_at ASC")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+    let mut buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o755);
+
+        // Include manifest.json
+        let manifest_bytes = serde_json::to_vec_pretty(&media_items).unwrap_or_default();
+        let _ = zip.start_file("manifest.json", options);
+        let _ = zip.write_all(&manifest_bytes);
+
+        // Add each file in uploads/
+        for item in &media_items {
+            let path = format!("uploads/{}", item.filename);
+            if let Ok(file_data) = tokio::fs::read(&path).await {
+                let arc_name = format!("files/{}", item.original_name);
+                if zip.start_file(&arc_name, options).is_ok() {
+                    let _ = zip.write_all(&file_data);
+                }
+            }
+        }
+
+        zip.finish().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    let filename = format!("media-library-{}.zip", Utc::now().format("%Y%m%d-%H%M%S"));
+    let headers = [
+        (axum::http::header::CONTENT_TYPE, "application/zip".to_string()),
+        (
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        ),
+    ];
+
+    Ok((headers, buf))
+}
+
 

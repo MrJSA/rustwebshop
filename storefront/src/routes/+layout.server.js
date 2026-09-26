@@ -15,6 +15,10 @@ function buildMenuTree(flatItems) {
     }
   });
 
+  map.forEach(item => {
+    item.children.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+  });
+
   return roots.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
 }
 

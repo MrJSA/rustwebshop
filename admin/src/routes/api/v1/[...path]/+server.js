@@ -2,9 +2,15 @@ export async function GET({ params, url, fetch, request }) {
   const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://backend:8000';
   const target = `${backendUrl}/api/v1/${params.path}${url.search}`;
   const res = await fetch(target, { headers: request.headers });
+  const forwardHeaders = {
+    'Content-Type': res.headers.get('content-type') || 'application/json'
+  };
+  const disp = res.headers.get('content-disposition');
+  if (disp) forwardHeaders['Content-Disposition'] = disp;
+
   return new Response(res.body, {
     status: res.status,
-    headers: { 'Content-Type': res.headers.get('content-type') || 'application/json' }
+    headers: forwardHeaders
   });
 }
 

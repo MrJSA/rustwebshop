@@ -1,22 +1,26 @@
 <script>
   import { cart, cartSubtotal, cartCount } from '$lib/stores/cart.js';
+  import { customer } from '$lib/stores/customer.js';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import { ShieldCheck, Lock, CreditCard, Truck, AlertCircle, CheckCircle2, ArrowRight } from 'lucide-svelte';
+  import { ShieldCheck, Lock, CreditCard, Truck, AlertCircle, CheckCircle2, ArrowRight, MapPin, UserCheck } from 'lucide-svelte';
 
   export let data;
   $: store = data.store || {};
   $: paymentProviders = data.paymentProviders || [];
 
   // Form State
-  let customerName = 'Joshua Rust';
-  let customerEmail = 'joshua@rustwebshop.local';
-  let streetAddress = 'Rustacean Strasse 10';
-  let apartmentSuite = 'Apt 4B';
-  let city = 'Berlin';
-  let stateProvince = 'Berlin';
-  let postalCode = '10115';
+  let customerName = '';
+  let customerEmail = '';
+  let streetAddress = '';
+  let apartmentSuite = '';
+  let city = '';
+  let stateProvince = '';
+  let postalCode = '';
   let countryCode = 'DE';
+
+  let savedAddresses = [];
+  let selectedAddressId = null;
 
   let selectedShippingRateId = '';
   let availableRates = [];
@@ -30,7 +34,7 @@
   let cardNumber = '4242 4242 4242 4242';
   let cardExpiry = '12/28';
   let cardCvc = '123';
-  let cardholderName = 'Joshua Rust';
+  let cardholderName = '';
 
   function handleCardInput(e) {
     const val = e.target.value.replace(/\D/g, '').replace(/(\d{4})(?=\d)/g, '$1 ').trim();
@@ -41,7 +45,7 @@
     cardNumber = '4242 4242 4242 4242';
     cardExpiry = '12/28';
     cardCvc = '123';
-    cardholderName = customerName || 'Joshua Rust';
+    cardholderName = customerName || 'Max Mustermann';
   }
 
   function getCardType(num) {
@@ -83,7 +87,75 @@
     }
   }
 
+  function selectSavedAddress(addr) {
+    if (!addr) return;
+    selectedAddressId = addr.id;
+    if (addr.full_name) customerName = addr.full_name;
+    streetAddress = addr.street_address || '';
+    apartmentSuite = addr.apartment_suite || '';
+    city = addr.city || '';
+    stateProvince = addr.state_province || '';
+    postalCode = addr.postal_code || '';
+    countryCode = addr.country_code || 'DE';
+    cardholderName = customerName || cardholderName;
+    fetchShippingRates();
+  }
+
+  async function loadCustomerProfileAndAddresses() {
+    if ($customer && $customer.isLoggedIn) {
+      if ($customer.full_name && !customerName) customerName = $customer.full_name;
+      if ($customer.email && !customerEmail) customerEmail = $customer.email;
+      if (!cardholderName) cardholderName = customerName;
+
+      try {
+        const res = await fetch('/api/v1/customer/addresses', {
+          headers: { Authorization: `Bearer ${$customer.token}` }
+        });
+        if (res.ok) {
+          const list = await res.json();
+          if (Array.isArray(list) && list.length > 0) {
+            savedAddresses = list;
+            const defaultAddr = list.find((a) => a.is_default) || list[0];
+            selectSavedAddress(defaultAddr);
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to fetch addresses from backend:', err);
+      }
+
+      // Local storage fallback for saved addresses
+      try {
+        const local = localStorage.getItem('rustwebshop_saved_addresses');
+        if (local) {
+          const list = JSON.parse(local);
+          if (Array.isArray(list) && list.length > 0) {
+            savedAddresses = list;
+            const defaultAddr = list.find((a) => a.is_default) || list[0];
+            selectSavedAddress(defaultAddr);
+            return;
+          }
+        }
+      } catch (_) {}
+    } else {
+      // Guest: if last used guest address stored in session
+      try {
+        const lastGuest = localStorage.getItem('rustwebshop_last_shipping');
+        if (lastGuest) {
+          const parsed = JSON.parse(lastGuest);
+          if (parsed.full_name) customerName = parsed.full_name;
+          if (parsed.email) customerEmail = parsed.email;
+          if (parsed.street_address) streetAddress = parsed.street_address;
+          if (parsed.city) city = parsed.city;
+          if (parsed.postal_code) postalCode = parsed.postal_code;
+          if (parsed.country_code) countryCode = parsed.country_code;
+        }
+      } catch (_) {}
+    }
+  }
+
   onMount(() => {
+    loadCustomerProfileAndAddresses();
     fetchShippingRates();
   });
 
@@ -138,6 +210,18 @@
       }
 
       const orderResult = await res.json();
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rustwebshop_last_shipping', JSON.stringify({
+          full_name: customerName,
+          email: customerEmail,
+          street_address: streetAddress,
+          apartment_suite: apartmentSuite,
+          city,
+          state_province: stateProvince,
+          postal_code: postalCode,
+          country_code: countryCode
+        }));
+      }
       cart.clear();
       goto(`/order-success/${orderResult.order_number}`);
     } catch (e) {
@@ -178,19 +262,29 @@
       <div class="lg:col-span-7 space-y-8">
         <!-- 1. Customer Details -->
         <div class="p-6 rounded-2xl bg-slate-900/60 border border-slate-800">
-          <h2 class="text-base font-bold text-white mb-4 flex items-center gap-2">
-            <span class="w-6 h-6 rounded-full bg-orange-600 text-white text-xs font-bold flex items-center justify-center">1</span>
-            Customer Information
-          </h2>
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="w-6 h-6 rounded-full bg-orange-600 text-white text-xs font-bold flex items-center justify-center">1</span>
+              Customer Information
+            </h2>
+            {#if $customer && $customer.isLoggedIn}
+              <span class="inline-flex items-center gap-1.5 text-[11px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 rounded-full font-semibold">
+                <UserCheck size={12} /> Logged in: {$customer.email}
+              </span>
+            {/if}
+          </div>
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label for="checkout-name" class="block text-xs font-semibold text-slate-400 mb-1">Full Name</label>
               <input
                 id="checkout-name"
+                name="name"
                 type="text"
+                autocomplete="name"
                 bind:value={customerName}
                 required
+                placeholder="e.g. Max Mustermann"
                 class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none focus:border-orange-500"
               />
             </div>
@@ -198,9 +292,12 @@
               <label for="checkout-email" class="block text-xs font-semibold text-slate-400 mb-1">Email Address</label>
               <input
                 id="checkout-email"
+                name="email"
                 type="email"
+                autocomplete="email"
                 bind:value={customerEmail}
                 required
+                placeholder="e.g. customer@example.com"
                 class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none focus:border-orange-500"
               />
             </div>
@@ -209,16 +306,52 @@
 
         <!-- 2. Shipping Address & Country Zone -->
         <div class="p-6 rounded-2xl bg-slate-900/60 border border-slate-800">
-          <h2 class="text-base font-bold text-white mb-4 flex items-center gap-2">
-            <span class="w-6 h-6 rounded-full bg-orange-600 text-white text-xs font-bold flex items-center justify-center">2</span>
-            Shipping Destination & Country Zone
-          </h2>
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="w-6 h-6 rounded-full bg-orange-600 text-white text-xs font-bold flex items-center justify-center">2</span>
+              Shipping Destination & Country Zone
+            </h2>
+            {#if selectedAddressId}
+              <span class="text-[11px] text-orange-400 bg-orange-500/10 border border-orange-500/20 px-2 py-0.5 rounded-full font-semibold">
+                Saved Address Selected
+              </span>
+            {/if}
+          </div>
+
+          <!-- Saved Address Selector for Logged In User -->
+          {#if savedAddresses.length > 0}
+            <div class="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800/80 space-y-2 mb-5">
+              <div class="flex items-center justify-between text-xs font-semibold text-slate-300">
+                <span class="flex items-center gap-1.5"><MapPin size={13} class="text-orange-400" /> Choose from your saved addresses:</span>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {#each savedAddresses as addr}
+                  <button
+                    type="button"
+                    on:click={() => selectSavedAddress(addr)}
+                    class="p-2.5 rounded-xl border text-left text-xs transition-all {selectedAddressId === addr.id ? 'bg-orange-600/15 border-orange-500 text-white ring-1 ring-orange-500 font-semibold' : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-700'}"
+                  >
+                    <div class="flex items-center justify-between">
+                      <span class="font-bold text-white truncate">{addr.full_name || customerName}</span>
+                      {#if addr.is_default}
+                        <span class="text-[9px] uppercase px-1.5 py-0.2 rounded bg-orange-500/20 text-orange-400 font-mono">Default</span>
+                      {/if}
+                    </div>
+                    <div class="text-[11px] text-slate-400 truncate mt-0.5">{addr.street_address}</div>
+                    <div class="text-[10px] text-slate-500 font-mono">{addr.postal_code} {addr.city} ({addr.country_code})</div>
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
 
           <div class="space-y-4">
             <div>
               <label for="checkout-country" class="block text-xs font-semibold text-slate-400 mb-1">Country / Region</label>
               <select
                 id="checkout-country"
+                name="country"
+                autocomplete="country"
                 bind:value={countryCode}
                 on:change={fetchShippingRates}
                 class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none focus:border-orange-500"
@@ -231,21 +364,27 @@
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div class="sm:col-span-2">
-                <label for="checkout-street" class="block text-xs font-semibold text-slate-400 mb-1">Street Address</label>
+                <label for="checkout-street" class="block text-xs font-semibold text-slate-400 mb-1">Street Address & House Number</label>
                 <input
                   id="checkout-street"
+                  name="address-line1"
                   type="text"
+                  autocomplete="street-address"
                   bind:value={streetAddress}
+                  placeholder="e.g. Musterstraße 123"
                   class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none focus:border-orange-500"
                 />
               </div>
 
-              <div>
-                <label for="checkout-city" class="block text-xs font-semibold text-slate-400 mb-1">City</label>
+              <div class="sm:col-span-2">
+                <label for="checkout-apartment" class="block text-xs font-semibold text-slate-400 mb-1">Apartment, Suite, Unit, Company (optional)</label>
                 <input
-                  id="checkout-city"
+                  id="checkout-apartment"
+                  name="address-line2"
                   type="text"
-                  bind:value={city}
+                  autocomplete="address-line2"
+                  bind:value={apartmentSuite}
+                  placeholder="e.g. Apt 4B or c/o Mustermann"
                   class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none focus:border-orange-500"
                 />
               </div>
@@ -254,8 +393,37 @@
                 <label for="checkout-postal" class="block text-xs font-semibold text-slate-400 mb-1">Postal Code</label>
                 <input
                   id="checkout-postal"
+                  name="postal-code"
                   type="text"
+                  autocomplete="postal-code"
                   bind:value={postalCode}
+                  placeholder="e.g. 10115"
+                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none focus:border-orange-500"
+                />
+              </div>
+
+              <div>
+                <label for="checkout-city" class="block text-xs font-semibold text-slate-400 mb-1">City</label>
+                <input
+                  id="checkout-city"
+                  name="city"
+                  type="text"
+                  autocomplete="address-level2"
+                  bind:value={city}
+                  placeholder="e.g. Berlin"
+                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none focus:border-orange-500"
+                />
+              </div>
+
+              <div class="sm:col-span-2">
+                <label for="checkout-state" class="block text-xs font-semibold text-slate-400 mb-1">State / Province / Region (optional)</label>
+                <input
+                  id="checkout-state"
+                  name="state"
+                  type="text"
+                  autocomplete="address-level1"
+                  bind:value={stateProvince}
+                  placeholder="e.g. Berlin or Bayern"
                   class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none focus:border-orange-500"
                 />
               </div>
@@ -377,7 +545,9 @@
                 <div class="relative">
                   <input
                     id="stripe-card-num"
+                    name="cc-number"
                     type="text"
+                    autocomplete="cc-number"
                     bind:value={cardNumber}
                     on:input={handleCardInput}
                     maxlength="19"
@@ -395,7 +565,9 @@
                   <label for="stripe-card-exp" class="block text-[11px] font-semibold text-slate-400 mb-1">Expiry (MM / YY)</label>
                   <input
                     id="stripe-card-exp"
+                    name="cc-exp"
                     type="text"
+                    autocomplete="cc-exp"
                     bind:value={cardExpiry}
                     maxlength="5"
                     placeholder="MM/YY"
@@ -406,7 +578,9 @@
                   <label for="stripe-card-cvc" class="block text-[11px] font-semibold text-slate-400 mb-1">CVC / CVV</label>
                   <input
                     id="stripe-card-cvc"
+                    name="cc-csc"
                     type="text"
+                    autocomplete="cc-csc"
                     bind:value={cardCvc}
                     maxlength="4"
                     placeholder="CVC"
@@ -419,7 +593,9 @@
                 <label for="stripe-card-name" class="block text-[11px] font-semibold text-slate-400 mb-1">Cardholder Name</label>
                 <input
                   id="stripe-card-name"
+                  name="cc-name"
                   type="text"
+                  autocomplete="cc-name"
                   bind:value={cardholderName}
                   placeholder="Full name on card"
                   class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"

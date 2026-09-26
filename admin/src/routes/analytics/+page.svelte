@@ -1,5 +1,5 @@
 <script>
-  import { goto } from '$app/navigation';
+  import { goto, invalidateAll } from '$app/navigation';
   import {
     DollarSign,
     ShoppingCart,
@@ -11,8 +11,19 @@
     TrendingUp,
     Filter,
     ArrowUpRight,
-    Award
+    Award,
+    RefreshCw
   } from 'lucide-svelte';
+
+  let isRefreshing = false;
+  async function handleRefresh() {
+    isRefreshing = true;
+    try {
+      await invalidateAll();
+    } finally {
+      setTimeout(() => isRefreshing = false, 400);
+    }
+  }
 
   export let data;
   $: analytics = data.analytics || {
@@ -198,6 +209,17 @@
           Filter
         </button>
       </div>
+
+      <!-- Live Refresh Button -->
+      <button
+        type="button"
+        on:click={handleRefresh}
+        class="px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-all shadow"
+        title="Refresh Analytics with latest purchases"
+      >
+        <RefreshCw size={13} class={isRefreshing ? 'animate-spin text-orange-400' : 'text-slate-400'} />
+        <span>{isRefreshing ? 'Refreshing...' : 'Refresh'}</span>
+      </button>
     </div>
   </div>
 

@@ -8,7 +8,7 @@ export async function load({ fetch, url }) {
   const selectedYear = url.searchParams.get('year') || String(new Date().getFullYear());
   const selectedMonth = url.searchParams.get('month') || String(new Date().getMonth() + 1).padStart(2, '0');
 
-  let queryUrl = `${backendUrl}/api/v1/admin/analytics/purchase-analysis?`;
+  let queryUrl = `${backendUrl}/api/v1/admin/analytics/purchase-analysis?preset=${filter}&`;
 
   if (filter === 'month' && selectedYear && selectedMonth) {
     const y = parseInt(selectedYear);
@@ -16,13 +16,12 @@ export async function load({ fetch, url }) {
     const start = `${selectedYear}-${selectedMonth.padStart(2, '0')}-01`;
     const lastDay = new Date(y, m, 0).getDate();
     const end = `${selectedYear}-${selectedMonth.padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-    queryUrl += `start_date=${start}&end_date=${end}`;
+    queryUrl += `year=${selectedYear}&month=${selectedMonth}&start_date=${start}&end_date=${end}`;
   } else if (filter === 'year' && selectedYear) {
-    queryUrl += `start_date=${selectedYear}-01-01&end_date=${selectedYear}-12-31`;
+    queryUrl += `year=${selectedYear}&start_date=${selectedYear}-01-01&end_date=${selectedYear}-12-31`;
   } else if (filter === 'custom' && startDate && endDate) {
     queryUrl += `start_date=${startDate}&end_date=${endDate}`;
   } else {
-    // Default YTD: backend handles YTD automatically if no dates passed or we can compute
     const now = new Date();
     const start = `${now.getFullYear()}-01-01`;
     const end = now.toISOString().split('T')[0];

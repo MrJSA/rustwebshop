@@ -271,15 +271,24 @@ impl DocumentGenerator {
         }}
         .totals-table tr.total-row td {{
             padding: 10px 0;
-            font-size: 14px;
             font-weight: 800;
         }}
+        @page {{
+            size: A4 portrait;
+            margin: 15mm 15mm 20mm 15mm;
+        }}
         @media print {{
-            body {{
-                padding: 10px 20px;
+            html, body {{
+                width: 100% !important;
+                max-width: 210mm !important;
+                margin: 0 auto !important;
+                padding: 0 !important;
+                background: #fff !important;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
             }}
             .no-print {{
-                display: none;
+                display: none !important;
             }}
         }}
     </style>
@@ -300,7 +309,8 @@ impl DocumentGenerator {
             {}
             {}
             {}
-            <div class="tax-notice">Value added tax is not collected, as small businesses according to §19 (1) UStG.</div>
+            {}
+            <div class="tax-notice">{}</div>
         </div>
     </div>
 
@@ -374,11 +384,17 @@ impl DocumentGenerator {
 </html>"#,
             order.order_number,
             logo_html,
-            settings.store_name,
+            if !settings.legal_name.is_empty() && settings.legal_name != settings.store_name {
+                format!("{} (Trade: {})", settings.legal_name, settings.store_name)
+            } else {
+                settings.store_name.clone()
+            },
+            if !settings.store_owner.is_empty() { format!("<div>Represented by: {}</div>", settings.store_owner) } else { String::new() },
             addr_lines,
             if !settings.support_email.is_empty() { format!("<div>E-Mail: {}</div>", settings.support_email) } else { String::new() },
             if !settings.phone.is_empty() { format!("<div>Phone: {}</div>", settings.phone) } else { String::new() },
             if !settings.vat_id.is_empty() { format!("<div>VAT Number: {}</div>", settings.vat_id) } else { String::new() },
+            if !settings.tax_notice.is_empty() { &settings.tax_notice } else { "Value added tax is not collected, as small businesses according to §19 (1) UStG." },
             customer_name,
             if !street.is_empty() { format!("<div>{}</div>", street) } else { String::new() },
             if !postal_code.is_empty() || !city.is_empty() { format!("<div>{} {}</div>", postal_code, city) } else { String::new() },
@@ -604,12 +620,22 @@ impl DocumentGenerator {
             text-align: center;
             width: 20%;
         }}
+        @page {{
+            size: A4 portrait;
+            margin: 15mm 15mm 20mm 15mm;
+        }}
         @media print {{
-            body {{
-                padding: 10px 20px;
+            html, body {{
+                width: 100% !important;
+                max-width: 210mm !important;
+                margin: 0 auto !important;
+                padding: 0 !important;
+                background: #fff !important;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
             }}
             .no-print {{
-                display: none;
+                display: none !important;
             }}
         }}
     </style>
@@ -630,7 +656,8 @@ impl DocumentGenerator {
             {}
             {}
             {}
-            <div class="tax-notice">Value added tax is not collected, as small businesses according to §19 (1) UStG.</div>
+            {}
+            <div class="tax-notice">{}</div>
         </div>
     </div>
 
@@ -683,11 +710,17 @@ impl DocumentGenerator {
 </html>"#,
             order.order_number,
             logo_html,
-            settings.store_name,
+            if !settings.legal_name.is_empty() && settings.legal_name != settings.store_name {
+                format!("{} (Trade: {})", settings.legal_name, settings.store_name)
+            } else {
+                settings.store_name.clone()
+            },
+            if !settings.store_owner.is_empty() { format!("<div>Represented by: {}</div>", settings.store_owner) } else { String::new() },
             addr_lines,
             if !settings.support_email.is_empty() { format!("<div>E-Mail: {}</div>", settings.support_email) } else { String::new() },
             if !settings.phone.is_empty() { format!("<div>Phone: {}</div>", settings.phone) } else { String::new() },
             if !settings.vat_id.is_empty() { format!("<div>VAT Number: {}</div>", settings.vat_id) } else { String::new() },
+            if !settings.tax_notice.is_empty() { &settings.tax_notice } else { "Value added tax is not collected, as small businesses according to §19 (1) UStG." },
             customer_name,
             if !street.is_empty() { format!("<div>{}</div>", street) } else { String::new() },
             if !postal_code.is_empty() || !city.is_empty() { format!("<div>{} {}</div>", postal_code, city) } else { String::new() },
