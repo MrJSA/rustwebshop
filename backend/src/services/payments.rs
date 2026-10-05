@@ -93,18 +93,84 @@ pub mod stripe {
         "wechat_pay",
     ];
 
-    /// PaymentIntent type for the method chosen at checkout (wallets are card payments).
-    /// Rejects methods that are not enabled in the admin.
-    pub fn intent_type_for(cfg: &ProviderConfig, method: &str) -> Result<&'static str> {
+    /// PaymentIntent types for the method chosen at checkout (Apple Pay / Google Pay are card
+    /// payments; Link must be offered together with card). Rejects methods not enabled in the admin.
+    pub fn intent_types_for(cfg: &ProviderConfig, method: &str) -> Result<Vec<&'static str>> {
         let methods = &cfg.config_data["methods"];
         match method {
-            "card" => Ok("card"),
-            "apple_pay" | "google_pay" if methods[method].as_bool().unwrap_or(false) => Ok("card"),
+            "card" => Ok(vec!["card"]),
+            "apple_pay" | "google_pay" if methods[method].as_bool().unwrap_or(false) => Ok(vec!["card"]),
+            "link" if methods["link"].as_bool().unwrap_or(false) => Ok(vec!["link", "card"]),
             other => OPTIONAL_METHODS
                 .iter()
                 .copied()
-                .find(|m| *m == other && methods[*m].as_bool().unwrap_or(false))
+                .find(|m| *m == other && *m != "link" && methods[*m].as_bool().unwrap_or(false))
+                .map(|m| vec![m])
                 .ok_or_else(|| anyhow!("This payment method is not available")),
+        }
+    }
+
+    /// Stripe account capability that must be active for a checkout method.
+    pub fn capability_for(method: &str) -> &'static str {
+        match method {
+            "card" | "apple_pay" | "google_pay" => "card_payments",
+            "link" => "link_payments",
+            "amazon_pay" => "amazon_pay_payments",
+            "paypal" => "paypal_payments",
+            "klarna" => "klarna_payments",
+            "sepa_debit" => "sepa_debit_payments",
+            "ideal" => "ideal_payments",
+            "bancontact" => "bancontact_payments",
+            "eps" => "eps_payments",
+            "p24" => "p24_payments",
+            "revolut_pay" => "revolut_pay_payments",
+            "mobilepay" => "mobilepay_payments",
+            "alipay" => "alipay_payments",
+            "wechat_pay" => "wechat_pay_payments",
+            _ => "",
+        }
+    }
+
+    /// Methods enabled in the admin (incl. card and wallets), in admin order.
+    pub fn enabled_checkout_methods(cfg: &ProviderConfig) -> Vec<&'static str> {
+        let methods = &cfg.config_data["methods"];
+        let mut out = vec!["card"];
+        for wallet in ["apple_pay", "google_pay"] {
+            if methods[wallet].as_bool().unwrap_or(false) {
+                out.push(wallet);
+            }
+        }
+        out.extend(OPTIONAL_METHODS.iter().copied().filter(|m| methods[*m].as_bool().unwrap_or(false)));
+        out
+    }
+
+    /// Activation status of the account's payment capabilities (cached for 5 minutes).
+    /// `None` if Stripe could not be asked (e.g. a restricted key without "Accounts: read").
+    pub async fn account_capabilities(cfg: &ProviderConfig) -> Option<JsonValue> {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        static CACHE: Mutex<Option<(String, Instant, JsonValue)>> = Mutex::new(None);
+        let key = cfg.secret_key.clone();
+        if let Some((k, at, caps)) = CACHE.lock().unwrap().as_ref() {
+            if *k == key && at.elapsed() < Duration::from_secs(300) {
+                return Some(caps.clone());
+            }
+        }
+        let account = get(secret_key(cfg).ok()?, "/account").await.ok()?;
+        let caps = account["capabilities"].clone();
+        if !caps.is_object() {
+            return None;
+        }
+        *CACHE.lock().unwrap() = Some((key, Instant::now(), caps.clone()));
+        Some(caps)
+    }
+
+    /// Enabled methods whose Stripe capability is active; all enabled methods if Stripe cannot be asked.
+    pub async fn active_checkout_methods(cfg: &ProviderConfig) -> (Vec<&'static str>, Vec<&'static str>) {
+        let enabled = enabled_checkout_methods(cfg);
+        match account_capabilities(cfg).await {
+            Some(caps) => enabled.into_iter().partition(|m| caps[capability_for(m)].as_str() == Some("active")),
+            None => (enabled, Vec::new()),
         }
     }
 
@@ -182,7 +248,7 @@ pub mod stripe {
             ("metadata[pending_checkout_id]".to_string(), pending_id.to_string()),
         ];
         let types = match selected_method {
-            Some(m) => vec![intent_type_for(cfg, m)?],
+            Some(m) => intent_types_for(cfg, m)?,
             None => payment_method_types(cfg),
         };
         if types.contains(&"wechat_pay") {
@@ -470,11 +536,16 @@ mod method_tests {
     #[test]
     fn selected_methods_must_be_enabled() {
         let c = cfg(json!({ "apple_pay": true, "klarna": true, "link": false }));
-        assert_eq!(stripe::intent_type_for(&c, "card").unwrap(), "card");
-        assert_eq!(stripe::intent_type_for(&c, "apple_pay").unwrap(), "card");
-        assert_eq!(stripe::intent_type_for(&c, "klarna").unwrap(), "klarna");
-        assert!(stripe::intent_type_for(&c, "google_pay").is_err());
-        assert!(stripe::intent_type_for(&c, "link").is_err());
-        assert!(stripe::intent_type_for(&c, "bitcoin").is_err());
+        assert_eq!(stripe::intent_types_for(&c, "card").unwrap(), vec!["card"]);
+        assert_eq!(stripe::intent_types_for(&c, "apple_pay").unwrap(), vec!["card"]);
+        assert_eq!(stripe::intent_types_for(&c, "klarna").unwrap(), vec!["klarna"]);
+        assert!(stripe::intent_types_for(&c, "google_pay").is_err());
+        assert!(stripe::intent_types_for(&c, "link").is_err());
+        assert!(stripe::intent_types_for(&c, "bitcoin").is_err());
+        let with_link = cfg(json!({ "link": true, "amazon_pay": true }));
+        assert_eq!(stripe::intent_types_for(&with_link, "link").unwrap(), vec!["link", "card"]);
+        assert_eq!(stripe::intent_types_for(&with_link, "amazon_pay").unwrap(), vec!["amazon_pay"]);
+        assert_eq!(stripe::enabled_checkout_methods(&with_link), vec!["card", "link", "amazon_pay"]);
+        assert_eq!(stripe::capability_for("google_pay"), "card_payments");
     }
 }

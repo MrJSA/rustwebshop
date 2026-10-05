@@ -306,3 +306,10 @@ This log tracks architectural decisions, state checkpoints, implementation miles
 - **Implementation**: `checkoutMethods()` builds one entry per method; per-method Payment Element (`paymentMethodTypes: [type]`) and per-method PaymentIntent (`payment_method` → `stripe::intent_type_for`, unit-tested); hidden Express Checkout probe for Apple/Google Pay availability; selected wallet renders its own button with the obligation-to-pay label; Klarna/SEPA get billing country/address on confirm; admin method notes updated.
 - **Verification**: backend 10 unit tests, storefront/admin builds. Not verifiable here: rendering with real Stripe keys and wallet availability (needs a browser, HTTPS for wallets).
 
+### [2026-10-06] Fix: checkout payment forms mixed up between methods; inactive methods listed
+- **Reported**: card showed "Pay without Link" then Klarna's "Pay in full"; Klarna showed the Link error; ordering failed with "elements should have a mounted Payment Element"; SEPA and Amazon Pay failed with Stripe "needs to be activated"; Link showed an IBAN field; wanted Amazon Pay as a redirect button like PayPal.
+- **Root causes**: (1) the vendored `$lib/stripe` runes components with `bind:elements` across `{#key}`/`{#each}` blocks left the parent holding a destroyed Elements group and mounted forms into the wrong group; (2) methods enabled in the admin but not activated in the Stripe account were offered; (3) Link cannot be used alone in the Payment Element (needs card).
+- **Rollback**: the previous entry's per-method `<Elements>`/`<PaymentElement>`/`<ExpressCheckout>` usage was replaced.
+- **Implementation**: own imperative components `StripePaymentForm` / `StripeExpressButton` (create + destroy their own Elements); `GET /checkout/stripe/methods` + admin `GET /settings/payments/stripe/capabilities` (account capabilities); Amazon Pay and Link as branded buttons; `intent_types_for` returns type lists (Link → link + card), unit-tested; admin shows "active / not activated at Stripe" per method.
+- **Verification**: backend 10 unit tests, storefront/admin builds. Needs a manual check in the browser with the shop's Stripe keys.
+

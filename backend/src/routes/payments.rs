@@ -16,7 +16,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -34,6 +34,7 @@ pub fn payments_router() -> Router<PgPool> {
     Router::new()
         .route("/checkout/quote", post(quote))
         .route("/checkout/free", post(free_order))
+        .route("/checkout/stripe/methods", get(stripe_checkout_methods))
         .route("/checkout/stripe/intent", post(stripe_create_intent))
         .route("/checkout/stripe/session", post(stripe_create_session))
         .route("/checkout/stripe/complete", post(stripe_complete))
@@ -151,7 +152,7 @@ async fn stripe_create_intent(State(pool): State<PgPool>, Json(body): Json<Strip
     let cfg = ProviderConfig::load_enabled(&pool, "stripe").await.map_err(bad_request)?;
     stripe::secret_key(&cfg).map_err(bad_request)?;
     if let Some(m) = body.payment_method.as_deref() {
-        stripe::intent_type_for(&cfg, m).map_err(bad_request)?;
+        stripe::intent_types_for(&cfg, m).map_err(bad_request)?;
     }
     let amount = prepare_paid_checkout(&pool, &req, stripe::MIN_AMOUNT_CENTS).await?;
 
@@ -448,4 +449,12 @@ mod tests {
         assert_eq!(parse_decimal_cents("20"), 2000);
         assert_eq!(parse_decimal_cents("0.05"), 5);
     }
+}
+
+/// Payment methods the checkout may list: enabled in the admin *and* activated in the Stripe account,
+/// so customers never see a method that would fail at payment.
+async fn stripe_checkout_methods(State(pool): State<PgPool>) -> Result<impl IntoResponse, ApiError> {
+    let cfg = ProviderConfig::load_enabled(&pool, "stripe").await.map_err(bad_request)?;
+    let (active, _) = stripe::active_checkout_methods(&cfg).await;
+    Ok(Json(json!({ "methods": active })))
 }

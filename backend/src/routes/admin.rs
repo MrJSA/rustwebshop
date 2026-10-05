@@ -72,6 +72,7 @@ pub fn admin_router(pool: PgPool) -> Router<PgPool> {
         .route("/settings/payments", get(admin_get_payments))
         .route("/settings/payments/:provider", put(admin_update_payment))
         .route("/settings/payments/stripe/domains", get(admin_stripe_list_domains).post(admin_stripe_register_domain))
+        .route("/settings/payments/stripe/capabilities", get(admin_stripe_capabilities))
         .route("/settings/shipping", get(admin_get_shipping))
         .route("/settings/shipping/providers", get(admin_get_shipping_providers).post(admin_create_shipping_provider))
         .route("/settings/shipping/providers/:id", put(admin_update_shipping_provider).delete(admin_delete_shipping_provider))
@@ -3439,4 +3440,19 @@ async fn admin_put_domains(
     require_superadmin(&admin)?;
     tracing::warn!("Domain settings changed by admin '{}'", admin.username);
     updater_request(reqwest::Method::PUT, "/config", Some(payload)).await
+}
+
+/// Which enabled Stripe methods are actually activated in the Stripe account.
+async fn admin_stripe_capabilities(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use crate::services::payments::{stripe, ProviderConfig};
+    let cfg = ProviderConfig::load(&pool, "stripe").await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let caps = stripe::account_capabilities(&cfg).await;
+    let all = ["card", "apple_pay", "google_pay"].into_iter().chain(stripe::OPTIONAL_METHODS.iter().copied());
+    let status: serde_json::Map<String, serde_json::Value> = all
+        .map(|m| {
+            let s = caps.as_ref().and_then(|c| c[stripe::capability_for(m)].as_str()).unwrap_or("unknown");
+            (m.to_string(), json!(s))
+        })
+        .collect();
+    Ok(Json(json!({ "checked": caps.is_some(), "status": status })))
 }

@@ -6,8 +6,9 @@
   import { onMount, onDestroy } from 'svelte';
   import { ShieldCheck, Lock, CreditCard, AlertCircle, ArrowRight, MapPin, UserCheck, Tag, Loader2, ExternalLink, Gift } from 'lucide-svelte';
   import { loadStripe } from '@stripe/stripe-js';
-  import { Elements, PaymentElement, ExpressCheckout } from '$lib/stripe';
-  import { checkoutMethods } from '$lib/stripeMethods.js';
+  import StripePaymentForm from '$lib/components/StripePaymentForm.svelte';
+  import StripeExpressButton from '$lib/components/StripeExpressButton.svelte';
+  import { checkoutMethods, EXPRESS_METHODS, expressButtons, expressProbeTypes } from '$lib/stripeMethods.js';
 
   export let data;
   $: store = data.store || {};
@@ -27,21 +28,39 @@
   $: stripeKey = stripeProvider && (stripeProvider.public_client_id || '').trim().startsWith('pk_') ? stripeProvider.public_client_id.trim() : null;
   $: stripeTestMode = !!stripeKey && stripeKey.startsWith('pk_test_');
   $: stripeHosted = stripeProvider?.config_data?.checkout_mode === 'hosted';
-  $: stripeMethods = stripeProvider?.config_data?.methods || {};
-  // Wallets are their own list entries; the card form never shows them (or Link)
-  const paymentElementWallets = { applePay: 'never', googlePay: 'never' };
+  // Methods enabled in the admin AND activated in the Stripe account (asked from the backend),
+  // so customers never see a method that would fail. Card is shown right away.
+  let activeMethods = ['card'];
+  let activeMethodsRequested = false;
+  $: if (browser && stripeKey && !stripeHosted && !activeMethodsRequested) loadActiveMethods();
 
-  // Apple Pay / Google Pay only exist on supported devices: detected once Stripe has loaded
-  let walletAvailability = {};
-  $: walletsToDetect = !!stripeKey && !stripeHosted && (stripeMethods.apple_pay || stripeMethods.google_pay);
+  async function loadActiveMethods() {
+    activeMethodsRequested = true;
+    try {
+      const res = await fetch('/api/v1/checkout/stripe/methods');
+      if (res.ok) activeMethods = (await res.json()).methods || ['card'];
+    } catch (_) {
+      // keep card only
+    }
+  }
+
+  // Button methods (Apple Pay, Google Pay, Amazon Pay, Link) are listed once a hidden probe confirms
+  // this device/browser can use them
+  let expressAvailability = {};
+  $: expressCandidates = activeMethods.filter((id) => EXPRESS_METHODS[id]);
+
+  function onExpressProbe(event) {
+    const av = event.availablePaymentMethods || {};
+    expressAvailability = { apple_pay: !!av.applePay, google_pay: !!av.googlePay, amazon_pay: !!av.amazonPay, link: !!av.link };
+  }
 
   // Every payment method as its own entry, listed underneath each other
   $: paymentMethods = checkoutMethods({
     stripeEnabled: !!stripeKey,
     stripeHosted,
-    stripeMethods,
+    activeMethods,
     paypalEnabled: !!paypalProvider,
-    walletAvailability
+    expressAvailability
   });
   // Credit / debit card is the default
   let selectedMethodId = 'card';
@@ -316,7 +335,7 @@
   // ---------------------------------------------------------------- Stripe (on-site Payment Element)
 
   let stripe = null;
-  let stripeElements = null;
+  let paymentForm = null; // the mounted StripePaymentForm of the selected method
   let stripeLoadError = '';
   let stripeLoadingKey = null;
   let paymentElementError = '';
@@ -383,40 +402,22 @@
     return problem[0];
   }
 
-  // ---------------------------------------------------------------- Apple Pay / Google Pay
-  // A hidden wallet element reports which wallets this device/browser supports; only those are listed.
-  let walletElements = null;
-
-  function onWalletDetect(event) {
-    const available = event.availablePaymentMethods || {};
-    walletAvailability = { apple_pay: !!available.applePay, google_pay: !!available.googlePay };
-  }
-
-  // Button shown for the selected wallet only
-  $: walletButtonMethods = {
-    applePay: selectedMethodId === 'apple_pay' ? 'always' : 'never',
-    googlePay: selectedMethodId === 'google_pay' ? 'always' : 'never',
-    link: 'never',
-    amazonPay: 'never',
-    paypal: 'never',
-    klarna: 'never'
-  };
-
+  // ---------------------------------------------------------------- Button methods (Apple Pay, Google Pay, Amazon Pay, Link)
   function onWalletClick(event) {
     const problem = validateForm();
     if (problem) {
       showError(problem);
-      return; // not resolving keeps the wallet sheet closed
+      return; // not resolving keeps the payment sheet closed
     }
     errorMessage = '';
     event.resolve({ emailRequired: false });
   }
 
-  async function onWalletConfirm(event) {
+  async function onWalletConfirm(event, elements) {
     isSubmitting = true;
     errorMessage = '';
     try {
-      await payWithStripe(walletElements, buildCheckoutRequest(), selectedMethodId);
+      await payWithStripe(elements, buildCheckoutRequest(), selectedMethodId);
     } catch (e) {
       event.paymentFailed?.({ reason: 'fail' });
       showError(e.message || 'The payment was not completed.');
@@ -528,8 +529,9 @@
       }
 
       if (selectedMethod?.kind === 'element') {
-        if (!stripe || !stripeElements) throw new Error('The payment form is still loading. Please try again in a moment.');
-        await payWithStripe(stripeElements, request, selectedMethod.type);
+        const elements = paymentForm?.getElements();
+        if (!stripe || !elements) throw new Error('The payment form is still loading. Please try again in a moment.');
+        await payWithStripe(elements, request, selectedMethod.id);
         return;
       }
 
@@ -928,21 +930,14 @@
                           </div>
                         {:else}
                           {#key m.id}
-                            <Elements
+                            <StripePaymentForm
+                              bind:this={paymentForm}
+                              bind:error={paymentElementError}
                               {stripe}
-                              mode="payment"
-                              currency="eur"
+                              types={m.types}
                               amount={stripeAmount}
-                              paymentMethodTypes={[m.type]}
                               appearance={stripeAppearance}
-                              bind:elements={stripeElements}
-                            >
-                              <PaymentElement
-                                layout={{ type: 'tabs' }}
-                                wallets={paymentElementWallets}
-                                onloaderror={(e) => (paymentElementError = e.error?.message || 'The payment form could not be loaded.')}
-                              />
-                            </Elements>
+                            />
                           {/key}
                           {#if paymentElementError}
                             <p class="mt-3 text-[11px] text-rose-300">
@@ -956,7 +951,7 @@
                             </p>
                           {/if}
                         {/if}
-                      {:else if m.kind === 'wallet'}
+                      {:else if m.kind === 'express'}
                         <p class="text-xs text-slate-400">Use the {m.label} button next to the order summary to pay.</p>
                       {:else if m.kind === 'paypal'}
                         <p class="text-xs text-slate-400">Use the PayPal button next to the order summary to pay with your PayPal account.</p>
@@ -980,22 +975,19 @@
             {/if}
           {/if}
 
-          <!-- Invisible probe: tells us whether Apple Pay / Google Pay are available on this device -->
-          {#if walletsToDetect && stripe && !isFreeOrder}
+          <!-- Invisible probe: tells us which button methods (Apple Pay, Google Pay, Amazon Pay, Link) this device can use -->
+          {#if stripe && !stripeHosted && expressCandidates.length > 0 && !isFreeOrder}
             <div class="absolute -left-[10000px] top-0 w-[300px] h-px overflow-hidden" aria-hidden="true">
-              <Elements {stripe} mode="payment" currency="eur" amount={stripeAmount} paymentMethodTypes={['card']} appearance={stripeAppearance}>
-                <ExpressCheckout
-                  paymentMethods={{
-                    applePay: stripeMethods.apple_pay ? 'always' : 'never',
-                    googlePay: stripeMethods.google_pay ? 'always' : 'never',
-                    link: 'never',
-                    amazonPay: 'never',
-                    paypal: 'never',
-                    klarna: 'never'
-                  }}
-                  onready={onWalletDetect}
+              {#key expressCandidates.join(',')}
+                <StripeExpressButton
+                  {stripe}
+                  types={expressProbeTypes(expressCandidates)}
+                  amount={stripeAmount}
+                  appearance={stripeAppearance}
+                  paymentMethods={expressButtons(expressCandidates)}
+                  onready={onExpressProbe}
                 />
-              </Elements>
+              {/key}
             </div>
           {/if}
         </div>
@@ -1147,7 +1139,7 @@
           {/if}
 
           <!-- Button-Lösung gem. § 312j Abs. 3 BGB -->
-          {#if selectedMethod?.kind === 'wallet' && !isFreeOrder && stripe}
+          {#if selectedMethod?.kind === 'express' && !isFreeOrder && stripe}
             <div class="space-y-2">
               <p class="text-xs font-bold text-white text-center">Order with Obligation to Pay ({formatEuro(totalCents)}) via {selectedMethod.label}:</p>
               {#if isSubmitting}
@@ -1157,24 +1149,17 @@
               {/if}
               <div class:hidden={isSubmitting}>
                 {#key selectedMethodId}
-                  <Elements
+                  <StripeExpressButton
                     {stripe}
-                    mode="payment"
-                    currency="eur"
+                    types={selectedMethod.types}
                     amount={stripeAmount}
-                    paymentMethodTypes={['card']}
                     appearance={stripeAppearance}
-                    bind:elements={walletElements}
-                  >
-                    <ExpressCheckout
-                      paymentMethods={walletButtonMethods}
-                      buttonType={{ applePay: 'order', googlePay: 'order' }}
-                      buttonHeight={48}
-                      onclick={onWalletClick}
-                      onconfirm={onWalletConfirm}
-                      oncancel={() => (isSubmitting = false)}
-                    />
-                  </Elements>
+                    paymentMethods={expressButtons([selectedMethodId])}
+                    buttonType={{ applePay: 'order', googlePay: 'order' }}
+                    onclick={onWalletClick}
+                    onconfirm={onWalletConfirm}
+                    oncancel={() => (isSubmitting = false)}
+                  />
                 {/key}
               </div>
             </div>

@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { CreditCard, Check, AlertCircle, Save, ExternalLink, Key, Lock, Eye, EyeOff, Webhook, Info } from 'lucide-svelte';
 
   export let configs = [];
@@ -36,6 +37,18 @@
   const ALL_METHOD_KEYS = STRIPE_METHOD_GROUPS.flatMap((g) => g.methods.map((m) => m.key));
 
   // --- Apple Pay / Google Pay domain registration ---
+  // Activation status of each method in the Stripe account (methods that are not active are hidden at checkout)
+  let stripeStatus = {};
+  async function loadStripeStatus() {
+    try {
+      const res = await fetch('/api/v1/admin/settings/payments/stripe/capabilities');
+      if (res.ok) stripeStatus = (await res.json()).status || {};
+    } catch (_) {}
+  }
+  onMount(() => {
+    if (stripe?.has_secret_key) loadStripeStatus();
+  });
+
   let domainInput = '';
   let domains = [];
   let domainBusy = false;
@@ -325,7 +338,14 @@
                 <label class="p-3 rounded-xl bg-slate-950 border cursor-pointer flex items-start gap-3 transition-all {stripe.config_data.methods[m.key] ? 'border-orange-500/60' : 'border-slate-800 hover:border-slate-700'}">
                   <input type="checkbox" bind:checked={stripe.config_data.methods[m.key]} class="mt-0.5 w-4 h-4 accent-orange-600 cursor-pointer" />
                   <div class="text-xs">
-                    <div class="font-bold text-white">{m.label}</div>
+                    <div class="font-bold text-white flex items-center gap-1.5 flex-wrap">
+                      {m.label}
+                      {#if stripeStatus[m.key] === 'active'}
+                        <span class="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">active at Stripe</span>
+                      {:else if stripeStatus[m.key] && stripeStatus[m.key] !== 'unknown'}
+                        <span class="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300" title="Activate it in the Stripe Dashboard → Settings → Payment methods; until then it is not offered at checkout">not activated at Stripe</span>
+                      {/if}
+                    </div>
                     <p class="text-[10px] text-slate-500 leading-relaxed">{m.hint}</p>
                   </div>
                 </label>
