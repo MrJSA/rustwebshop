@@ -386,6 +386,8 @@ async fn main() {
 
     // The checkout belongs to the host user; allow git to operate on it
     let _ = run(&repo, "git", &["config", "--global", "--add", "safe.directory", &repo.to_string_lossy()]).await;
+    // Windows checkouts may contain CRLF line endings: treat them as unchanged instead of blocking updates
+    let _ = run(&repo, "git", &["config", "--global", "core.autocrlf", "input"]).await;
 
     let state = Arc::new(AppState { repo, token, remote, job: Mutex::new(Job::default()) });
     let app = Router::new()
