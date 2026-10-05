@@ -118,7 +118,7 @@ pub async fn send_verification_email(
   </div>
 </body>
 </html>"#,
-        settings.store_name, customer_name, verify_url, verify_url, verify_url
+        html_escape(&settings.store_name), html_escape(customer_name), verify_url, verify_url, verify_url
     );
 
     let _ = send_email_raw(settings, to_email, &subject, &html).await;
@@ -293,4 +293,49 @@ pub async fn send_payment_received_notification(pool: &sqlx::PgPool, order_numbe
         let total: i32 = order_row.get("total_cents");
         send_payment_received_email(&settings, &email, order_number, total, &settings.currency).await;
     }
+}
+
+/// Escapes text inserted into HTML emails (customer-supplied names must never become markup).
+pub fn html_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Public base URL of the storefront used in links inside emails (e.g. https://shop.example).
+pub fn shop_public_url() -> String {
+    std::env::var("SHOP_PUBLIC_URL")
+        .unwrap_or_else(|_| "http://localhost:8080".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub async fn send_password_reset_email(settings: &StoreSettings, to_email: &str, token: &str) {
+    let reset_url = format!("{}/account/reset-password?token={}", shop_public_url(), token);
+    let subject = format!("Reset your password - {}", settings.store_name);
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #0f172a; color: #f8fafc; padding: 40px 20px;">
+  <div style="max-width: 560px; margin: 0 auto; background: #1e293b; border-radius: 16px; border: 1px solid #334155; padding: 32px;">
+    <h2 style="color: #f97316; margin-top: 0;">Password reset for {}</h2>
+    <p style="color: #94a3b8; font-size: 14px; line-height: 1.6;">
+      Someone requested a password reset for your account. The link is valid for 1 hour.
+      If this was not you, simply ignore this email — your password stays unchanged.
+    </p>
+    <div style="margin: 30px 0; text-align: center;">
+      <a href="{}" style="background-color: #ea580c; color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 10px; font-weight: bold; font-size: 14px; display: inline-block;">
+        Choose a new password
+      </a>
+    </div>
+    <p style="color: #64748b; font-size: 12px;">Or copy and paste this link: <br/><a href="{}" style="color: #38bdf8;">{}</a></p>
+  </div>
+</body>
+</html>"#,
+        html_escape(&settings.store_name), reset_url, reset_url, reset_url
+    );
+    let _ = send_email_raw(settings, to_email, &subject, &html).await;
 }

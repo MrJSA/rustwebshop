@@ -5,7 +5,7 @@ export async function load({ fetch }) {
 
   try {
     const res = await fetch(`${backendUrl}/api/v1/admin/categories`, {
-      headers: { 'X-Dev-Mode': 'true' }
+      headers: {}
     });
     if (res.ok) {
       categories = await res.json();
@@ -16,7 +16,7 @@ export async function load({ fetch }) {
 
   try {
     const pRes = await fetch(`${backendUrl}/api/v1/admin/products`, {
-      headers: { 'X-Dev-Mode': 'true' }
+      headers: {}
     });
     if (pRes.ok) {
       products = await pRes.json();

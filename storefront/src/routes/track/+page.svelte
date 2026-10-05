@@ -2,20 +2,23 @@
   import { Search, Box, CheckCircle2, Clock, Truck, AlertCircle } from 'lucide-svelte';
 
   let orderNumber = '';
+  let email = '';
   let isLoading = false;
   let orderData = null;
   let errorMessage = '';
 
   async function handleLookup() {
-    if (!orderNumber.trim()) return;
+    if (!orderNumber.trim() || !email.trim()) return;
     isLoading = true;
     errorMessage = '';
     orderData = null;
 
     try {
-      const res = await fetch(`/api/v1/orders/lookup/${encodeURIComponent(orderNumber.trim())}`);
+      const res = await fetch(
+        `/api/v1/orders/lookup/${encodeURIComponent(orderNumber.trim())}?email=${encodeURIComponent(email.trim())}`
+      );
       if (!res.ok) {
-        throw new Error('Order not found. Please verify your order reference number.');
+        throw new Error('Order not found. Please check the order number and the email address used for the order.');
       }
       orderData = await res.json();
     } catch (e) {
@@ -27,7 +30,7 @@
 </script>
 
 <svelte:head>
-  <title>Track Order | RustCraft Gear</title>
+  <title>Track Order</title>
 </svelte:head>
 
 <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
@@ -36,15 +39,25 @@
       <Box size={24} />
     </div>
     <h1 class="text-3xl font-extrabold text-white tracking-tight">Track Your Shipment</h1>
-    <p class="text-xs text-slate-400 mt-2">Enter your order reference code (e.g. ORD-20260923-XXXX) to check live status.</p>
+    <p class="text-xs text-slate-400 mt-2">Enter your order number and the email address you used at checkout.</p>
   </div>
 
   <!-- Search form -->
-  <form on:submit|preventDefault={handleLookup} class="flex gap-2 max-w-lg mx-auto mb-10">
+  <form on:submit|preventDefault={handleLookup} class="flex flex-col sm:flex-row gap-2 max-w-2xl mx-auto mb-10">
     <input
       type="text"
+      aria-label="Order number"
       bind:value={orderNumber}
       placeholder="e.g. ORD-20260923-..."
+      required
+      class="flex-1 px-4 py-3 rounded-xl bg-slate-900 border border-slate-800 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-orange-500"
+    />
+    <input
+      type="email"
+      aria-label="Email address used for the order"
+      autocomplete="email"
+      bind:value={email}
+      placeholder="Email used for the order"
       required
       class="flex-1 px-4 py-3 rounded-xl bg-slate-900 border border-slate-800 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-orange-500"
     />

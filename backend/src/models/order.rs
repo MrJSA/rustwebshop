@@ -22,6 +22,15 @@ pub struct Order {
     pub order_status: String,
     pub tracking_number: Option<String>,
     pub notes: Option<String>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub coupon_code: Option<String>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub discount_cents: i32,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub payment_reference: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -49,22 +58,37 @@ pub struct OrderDetails {
     pub items: Vec<OrderItem>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CartItemInput {
     pub variant_id: Uuid,
     pub quantity: i32,
 }
 
-#[derive(Debug, Deserialize)]
+/// Everything needed to price and create an order. Card data never reaches this server:
+/// payments are authorized client-side (Stripe Elements / PayPal) and verified server-side by reference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckoutRequest {
     pub customer_name: String,
     pub customer_email: String,
     pub shipping_address: AddressInput,
     pub billing_address: Option<AddressInput>,
     pub shipping_rate_id: Option<Uuid>,
-    pub payment_provider: String, // 'stripe', 'paypal', 'apple_pay', 'google_pay', 'amazon_pay'
-    pub payment_token: Option<String>,
+    pub coupon_code: Option<String>,
     pub items: Vec<CartItemInput>,
+}
+
+/// Server-computed price breakdown shown on the checkout page and charged by the payment provider.
+#[derive(Debug, Serialize)]
+pub struct CheckoutQuote {
+    pub items_subtotal_cents: i32,
+    pub discount_cents: i32,
+    pub subtotal_cents: i32,
+    pub shipping_cost_cents: i32,
+    pub tax_cents: i32,
+    pub total_cents: i32,
+    pub is_digital_only: bool,
+    pub coupon_code: Option<String>,
+    pub currency: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +105,8 @@ pub struct AddressInput {
 #[derive(Debug, Serialize)]
 pub struct CheckoutResponse {
     pub order_number: String,
+    /// Secret that lets the buyer view this order without an account (never guessable)
+    pub access_token: String,
     pub total_cents: i32,
     pub payment_status: String,
     pub order_status: String,

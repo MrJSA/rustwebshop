@@ -1,6 +1,6 @@
 export async function load({ fetch }) {
   const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://backend:8000';
-  const headers = { 'X-Dev-Mode': 'true' };
+  const headers = {};
   let settings = {};
   let products = [];
   let categories = [];

@@ -48,6 +48,9 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, sqlx::Error> {
         ("0010_tax_modes_and_product_vat", include_str!("../migrations/0010_tax_modes_and_product_vat.sql")),
         ("0011_custom_order_numbers", include_str!("../migrations/0011_custom_order_numbers.sql")),
         ("0012_stock_template_and_english_tax", include_str!("../migrations/0012_stock_template_and_english_tax.sql")),
+        ("0013_coupons_and_admin_users", include_str!("../migrations/0013_coupons_and_admin_users.sql")),
+        ("0014_payment_gateway_overhaul", include_str!("../migrations/0014_payment_gateway_overhaul.sql")),
+        ("0015_security_hardening", include_str!("../migrations/0015_security_hardening.sql")),
     ];
 
     // If schema already existed prior to migration tracking, mark initial migrations 0001..0006 as applied if not tracked
@@ -91,15 +94,52 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .await
         .unwrap_or(0);
     if admin_count == 0 {
-        if let Ok(hash) = bcrypt::hash("RustCraftAdmin2026!", 10) {
+        // Never ship a publicly known password: use ADMIN_INITIAL_PASSWORD or generate a random one.
+        let (password, generated) = match std::env::var("ADMIN_INITIAL_PASSWORD") {
+            Ok(p) if p.len() >= 12 => (p, false),
+            _ => (crate::services::auth::random_token(10), true),
+        };
+        if let Ok(hash) = bcrypt::hash(&password, 12) {
             let _ = sqlx::query(
-                "INSERT INTO admin_users (username, password_hash, is_default) VALUES ($1, $2, TRUE) ON CONFLICT (username) DO NOTHING"
+                "INSERT INTO admin_users (username, password_hash, is_default, role) VALUES ($1, $2, TRUE, 'superadmin') ON CONFLICT (username) DO NOTHING"
             )
             .bind("admin")
             .bind(hash)
             .execute(&pool)
             .await;
-            info!("Default admin user created: username='admin'");
+            if generated {
+                tracing::warn!(
+                    "Initial admin account created: username='admin' password='{}' — you must change it on first login. (Set ADMIN_INITIAL_PASSWORD to choose it yourself.)",
+                    password
+                );
+            } else {
+                info!("Initial admin account created from ADMIN_INITIAL_PASSWORD: username='admin'");
+            }
+        }
+    }
+
+    // Older versions seeded a password that is published in this repository's history.
+    // Any account still using it gets a fresh random password (shown once in the log).
+    const PUBLISHED_DEFAULT_PASSWORD: &str = "RustCraftAdmin2026!";
+    let default_accounts: Vec<(uuid::Uuid, String, String)> =
+        sqlx::query_as("SELECT id, username, password_hash FROM admin_users WHERE is_default = TRUE")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+    for (id, username, hash) in default_accounts {
+        if bcrypt::verify(PUBLISHED_DEFAULT_PASSWORD, &hash).unwrap_or(false) {
+            let password = crate::services::auth::random_token(10);
+            if let Ok(new_hash) = bcrypt::hash(&password, 12) {
+                let _ = sqlx::query("UPDATE admin_users SET password_hash = $1, updated_at = NOW() WHERE id = $2")
+                    .bind(new_hash)
+                    .bind(id)
+                    .execute(&pool)
+                    .await;
+                tracing::warn!(
+                    "Admin '{}' still used the published default password. It was replaced by '{}' — log in and choose your own password.",
+                    username, password
+                );
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 export async function load({ fetch }) {
   const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://backend:8000';
-  const headers = { 'X-Dev-Mode': 'true' };
+  const headers = {};
   let products = [];
   let categories = [];
   let featuredProductIds = [];
@@ -51,6 +51,18 @@ export async function load({ fetch }) {
     console.error('Failed to load inventory in admin products:', e);
   }
 
-  return { products, categories, featuredProductIds, inventory, storeSettings };
+  let coupons = [];
+
+  try {
+    const coupRes = await fetch(`${backendUrl}/api/v1/admin/coupons`, { headers });
+    if (coupRes.ok) {
+      coupons = await coupRes.json();
+    }
+  } catch (e) {
+    console.error('Failed to load coupons in admin products:', e);
+  }
+
+  return { products, categories, featuredProductIds, inventory, storeSettings, coupons };
 }
+
 

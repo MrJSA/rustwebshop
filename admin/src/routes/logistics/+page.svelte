@@ -29,7 +29,6 @@
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true'
         },
         body: JSON.stringify({ adjustment: amount })
       });

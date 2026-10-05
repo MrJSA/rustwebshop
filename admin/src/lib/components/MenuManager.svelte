@@ -147,7 +147,6 @@
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({
@@ -176,7 +175,6 @@
     try {
       const res = await fetch('/api/v1/admin/menu', {
         headers: {
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         }
       });
@@ -196,7 +194,6 @@
       const res = await fetch(`/api/v1/admin/menu/${id}`, {
         method: 'DELETE',
         headers: {
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         }
       });
@@ -215,7 +212,6 @@
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({
@@ -252,7 +248,6 @@
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({
@@ -295,7 +290,6 @@
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({ items: reorderedPayload })
@@ -384,7 +378,6 @@
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({

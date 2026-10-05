@@ -1,38 +1,43 @@
 use crate::models::{
     AdminLoginRequest, AdminLoginResponse, AdminUser, Category, CategoryLeaderboardItem, ChangeAdminCredentialsRequest,
-    Claims, CreateCategoryRequest, CreateNavigationItemRequest, CreatePartRequest, CreateProductRequest,
-    CreateProviderRequest, CreateShippingRateRequest, CreateShippingZoneRequest, CreateVariantRequest,
-    DashboardStats, MediaItem, NavigationItem, Order, OrderDetails, OrderItem, PageContent,
-    PaymentConfig, Product, ProductLeaderboardItem, ProductPart, ProductVariant, ProductWithVariants,
-    PurchaseAnalysisDayPoint, PurchaseAnalysisResponse, PurchaseAnalysisSummary, ReorderMenuRequest, SalesDataPoint,
-    ShippingProvider, ShippingProviderWithZones, ShippingRate, ShippingZone, ShippingZoneWithRates,
-    StoreSettings, TestEmailRequest, UpdateCategoryRequest, UpdateNavigationItemRequest, UpdateOrderStatusRequest,
-    UpdatePageRequest, UpdatePaymentConfigRequest, UpdateProductRequest, UpdateProviderRequest,
-    UpdateShippingRateRequest, UpdateShippingZoneRequest, UpdateStoreSettingsRequest, UpdateVariantRequest,
+    Claims, Coupon, CreateAdminUserRequest, CreateCategoryRequest, CreateCouponRequest, CreateNavigationItemRequest,
+    CreatePartRequest, CreateProductRequest, CreateProviderRequest, CreateShippingRateRequest,
+    CreateShippingZoneRequest, CreateVariantRequest, DashboardStats, MediaItem, NavigationItem, Order, OrderDetails,
+    OrderItem, PageContent, Product, ProductLeaderboardItem, ProductPart, ProductVariant,
+    ProductWithVariants, PurchaseAnalysisDayPoint, PurchaseAnalysisResponse, PurchaseAnalysisSummary,
+    ReorderMenuRequest, SalesDataPoint, ShippingProvider, ShippingProviderWithZones, ShippingRate, ShippingZone,
+    ShippingZoneWithRates, StoreSettings, TestEmailRequest, UpdateAdminUserRequest, UpdateCategoryRequest,
+    UpdateCouponRequest, UpdateNavigationItemRequest, UpdateOrderStatusRequest, UpdatePageRequest,
+    UpdatePaymentConfigRequest, UpdateProductRequest, UpdateProviderRequest, UpdateShippingRateRequest,
+    UpdateShippingZoneRequest, UpdateStoreSettingsRequest, UpdateVariantRequest,
 };
+use crate::middleware::CurrentAdmin;
 use crate::services::document_generator::DocumentGenerator;
 use axum::{
     extract::{Multipart, Path, Query, State},
     http::{header::CONTENT_TYPE, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post, put},
-    Json, Router,
+    Extension, Json, Router,
 };
-use chrono::{Duration, Utc};
-use jsonwebtoken::{encode, EncodingKey, Header};
-use serde::Deserialize;
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-pub fn admin_router() -> Router<PgPool> {
+pub fn admin_router(pool: PgPool) -> Router<PgPool> {
     let protected = Router::new()
         .route("/dashboard/stats", get(get_dashboard_stats))
         .route("/dashboard/sales-analytics", get(get_sales_analytics))
         .route("/analytics/purchase-analysis", get(admin_get_purchase_analysis))
         // Admin Auth & Security
         .route("/auth/status", get(admin_auth_status))
-        .route("/auth/change-credentials", post(admin_change_credentials))
+        .route("/auth/me", get(admin_auth_status))
+        .route("/auth/change-credentials", post(admin_change_credentials).put(admin_change_credentials))
+        // Admin Users Management
+        .route("/users", get(admin_list_users).post(admin_create_user))
+        .route("/users/:id", put(admin_update_user).delete(admin_delete_user))
         // Media Library
         .route("/media", get(admin_list_media))
         .route("/media/upload", post(admin_upload_media))
@@ -49,6 +54,9 @@ pub fn admin_router() -> Router<PgPool> {
         // Categories Hierarchy Management
         .route("/categories", get(admin_list_categories).post(admin_create_category))
         .route("/categories/:id", put(admin_update_category).delete(admin_delete_category))
+        // Coupons / Promo Codes
+        .route("/coupons", get(admin_list_coupons).post(admin_create_coupon))
+        .route("/coupons/:id", put(admin_update_coupon).delete(admin_delete_coupon))
         // Logistics & Inventory Management
         .route("/logistics/inventory", get(get_logistics_inventory))
         .route("/logistics/inventory/:variant_id/stock", put(update_variant_stock))
@@ -63,6 +71,7 @@ pub fn admin_router() -> Router<PgPool> {
         // Settings Management
         .route("/settings/payments", get(admin_get_payments))
         .route("/settings/payments/:provider", put(admin_update_payment))
+        .route("/settings/payments/stripe/domains", get(admin_stripe_list_domains).post(admin_stripe_register_domain))
         .route("/settings/shipping", get(admin_get_shipping))
         .route("/settings/shipping/providers", get(admin_get_shipping_providers).post(admin_create_shipping_provider))
         .route("/settings/shipping/providers/:id", put(admin_update_shipping_provider).delete(admin_delete_shipping_provider))
@@ -84,7 +93,7 @@ pub fn admin_router() -> Router<PgPool> {
         .route("/export/store-data", get(admin_export_store_data))
         .route("/export/media", get(admin_export_media_library))
         .route("/import/store-data", post(admin_import_store_data))
-        .layer(axum::middleware::from_fn(crate::middleware::admin_auth_middleware));
+        .layer(axum::middleware::from_fn_with_state(pool, crate::middleware::admin_auth_middleware));
 
     Router::new()
         .route("/auth/login", post(admin_login))
@@ -93,141 +102,96 @@ pub fn admin_router() -> Router<PgPool> {
 
 
 // 1. Authentication
+const ADMIN_SESSION_HOURS: i64 = 12;
+
+fn admin_session_token(admin_id: Uuid) -> Result<String, (StatusCode, String)> {
+    crate::services::auth::issue_token(&admin_id.to_string(), crate::services::auth::ROLE_ADMIN_TOKEN, Duration::hours(ADMIN_SESSION_HOURS))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 async fn admin_login(
     State(pool): State<PgPool>,
     Json(payload): Json<AdminLoginRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // Check admin_users table first
-    let admin = sqlx::query_as::<_, AdminUser>(
-        "SELECT id, username, password_hash, is_default, created_at, updated_at FROM admin_users WHERE username = $1"
-    )
-    .bind(&payload.username)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    use crate::services::auth;
+    let username = payload.username.trim();
+    let limiter_key = format!("admin:{}", username.to_lowercase());
+    auth::check_login_allowed(&limiter_key).map_err(|m| (StatusCode::TOO_MANY_REQUESTS, m))?;
 
-    let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "super_secret_rustwebshop_jwt_token_2026".to_string());
-    let expiration = Utc::now()
-        .checked_add_signed(Duration::days(7))
-        .expect("valid timestamp")
-        .timestamp() as usize;
-
-    if let Some(a) = admin {
-        let matches = bcrypt::verify(&payload.password, &a.password_hash).unwrap_or(false)
-            || (a.is_default && payload.password == "RustCraftAdmin2026!");
-
-        if !matches {
-            return Err((StatusCode::UNAUTHORIZED, "Invalid username or password".to_string()));
-        }
-
-        let claims = Claims {
-            sub: a.username.clone(),
-            role: "admin".to_string(),
-            exp: expiration,
-        };
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        return Ok(Json(AdminLoginResponse {
-            token,
-            username: a.username,
-            is_default: a.is_default,
-        }));
-    }
-
-    // Fallback if table was uninitialized
-    if payload.username == "admin" && (payload.password == "RustCraftAdmin2026!" || payload.password == "admin123") {
-        let claims = Claims {
-            sub: "admin".to_string(),
-            role: "admin".to_string(),
-            exp: expiration,
-        };
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        return Ok(Json(AdminLoginResponse {
-            token,
-            username: "admin".to_string(),
-            is_default: true,
-        }));
-    }
-
-    Err((StatusCode::UNAUTHORIZED, "Invalid username or password".to_string()))
-}
-
-async fn admin_auth_status(
-    State(pool): State<PgPool>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let admin = sqlx::query_as::<_, AdminUser>(
-        "SELECT id, username, password_hash, is_default, created_at, updated_at FROM admin_users ORDER BY created_at ASC LIMIT 1"
-    )
-    .fetch_optional(&pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if let Some(a) = admin {
-        Ok(Json(json!({
-            "authenticated": true,
-            "username": a.username,
-            "is_default": a.is_default
-        })))
-    } else {
-        Ok(Json(json!({
-            "authenticated": true,
-            "username": "admin",
-            "is_default": true
-        })))
-    }
-}
-
-async fn admin_change_credentials(
-    State(pool): State<PgPool>,
-    Json(payload): Json<ChangeAdminCredentialsRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    if payload.new_username.trim().is_empty() || payload.new_password.len() < 8 {
-        return Err((StatusCode::BAD_REQUEST, "Username must not be empty and password must be at least 8 characters".to_string()));
-    }
-
-    let admin = sqlx::query_as::<_, AdminUser>(
-        "SELECT id, username, password_hash, is_default, created_at, updated_at FROM admin_users ORDER BY created_at ASC LIMIT 1"
-    )
-    .fetch_optional(&pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if let Some(a) = admin {
-        let matches = bcrypt::verify(&payload.current_password, &a.password_hash).unwrap_or(false)
-            || (a.is_default && payload.current_password == "RustCraftAdmin2026!");
-
-        if !matches {
-            return Err((StatusCode::UNAUTHORIZED, "Current password is incorrect".to_string()));
-        }
-
-        let new_hash = bcrypt::hash(&payload.new_password, 10)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        sqlx::query(
-            "UPDATE admin_users SET username = $1, password_hash = $2, is_default = FALSE, updated_at = NOW() WHERE id = $3"
-        )
-        .bind(payload.new_username.trim())
-        .bind(new_hash)
-        .bind(a.id)
-        .execute(&pool)
+    let admin = sqlx::query("SELECT id, username, password_hash, is_default, role FROM admin_users WHERE username = $1")
+        .bind(username)
+        .fetch_optional(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        return Ok(Json(json!({ "success": true, "message": "Admin credentials successfully updated!" })));
+    // Always run bcrypt so response time does not reveal whether the username exists
+    static DUMMY_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let dummy = DUMMY_HASH.get_or_init(|| bcrypt::hash(auth::random_token(16), 12).unwrap_or_default());
+    let hash = admin.as_ref().map(|a| a.get::<String, _>("password_hash")).unwrap_or_else(|| dummy.clone());
+    let password_ok = bcrypt::verify(&payload.password, &hash).unwrap_or(false);
+
+    let Some(a) = admin.filter(|_| password_ok) else {
+        auth::record_login_failure(&limiter_key);
+        return Err((StatusCode::UNAUTHORIZED, "Invalid username or password".to_string()));
+    };
+    auth::clear_login_failures(&limiter_key);
+
+    let id: Uuid = a.get("id");
+    Ok(Json(json!({
+        "token": admin_session_token(id)?,
+        "username": a.get::<String, _>("username"),
+        "role": a.get::<String, _>("role"),
+        "is_default": a.get::<bool, _>("is_default"),
+    })))
+}
+
+async fn admin_auth_status(Extension(admin): Extension<CurrentAdmin>) -> impl IntoResponse {
+    Json(json!({
+        "authenticated": true,
+        "username": admin.username,
+        "role": admin.role,
+        "is_default": admin.is_default
+    }))
+}
+
+/// Changes the username/password of the logged-in admin and returns a fresh session token.
+async fn admin_change_credentials(
+    State(pool): State<PgPool>,
+    Extension(admin): Extension<CurrentAdmin>,
+    Json(payload): Json<ChangeAdminCredentialsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let new_username = payload.new_username.trim();
+    if new_username.is_empty() || payload.new_password.len() < 12 {
+        return Err((StatusCode::BAD_REQUEST, "Username must not be empty and the password must be at least 12 characters".to_string()));
+    }
+    if payload.new_password == payload.current_password {
+        return Err((StatusCode::BAD_REQUEST, "The new password must differ from the current one".to_string()));
     }
 
-    Err((StatusCode::NOT_FOUND, "Admin user not found".to_string()))
+    let hash: String = sqlx::query_scalar("SELECT password_hash FROM admin_users WHERE id = $1")
+        .bind(admin.id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !bcrypt::verify(&payload.current_password, &hash).unwrap_or(false) {
+        return Err((StatusCode::UNAUTHORIZED, "Current password is incorrect".to_string()));
+    }
+
+    let new_hash = bcrypt::hash(&payload.new_password, 12).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    sqlx::query("UPDATE admin_users SET username = $1, password_hash = $2, is_default = FALSE, updated_at = NOW() WHERE id = $3")
+        .bind(new_username)
+        .bind(new_hash)
+        .bind(admin.id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, if e.to_string().contains("unique") { "This username is already taken".to_string() } else { e.to_string() }))?;
+
+    Ok(Json(json!({
+        "success": true,
+        "message": "Admin credentials successfully updated!",
+        "token": admin_session_token(admin.id)?,
+        "username": new_username
+    })))
 }
 
 // 2. Executive Dashboard Stats & Analytics
@@ -1078,13 +1042,39 @@ async fn admin_refund_order(
     State(pool): State<PgPool>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let order = sqlx::query("SELECT payment_provider, payment_status, payment_reference FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
+
+    let provider: String = order.get("payment_provider");
+    let payment_status: String = order.get("payment_status");
+    let reference: Option<String> = order.get("payment_reference");
+
+    if payment_status == "refunded" {
+        return Ok(Json(json!({ "success": true, "payment_status": "refunded", "provider_refunded": false })));
+    }
+
+    // Refund the money at the provider first; only mark the order refunded if that succeeded.
+    let provider_refunded = match reference.as_deref() {
+        Some(r) if provider == "stripe" || provider == "paypal" => {
+            crate::services::payments::refund(&pool, &provider, r)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Refund failed at {}: {}", provider, e)))?;
+            true
+        }
+        _ => false,
+    };
+
     sqlx::query("UPDATE orders SET payment_status = 'refunded', updated_at = NOW() WHERE id = $1")
         .bind(id)
         .execute(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(json!({ "success": true, "payment_status": "refunded" })))
+    Ok(Json(json!({ "success": true, "payment_status": "refunded", "provider_refunded": provider_refunded })))
 }
 
 async fn admin_cancel_order(
@@ -1176,12 +1166,43 @@ async fn admin_get_order_packing_slip(
 
 // 6. Payment Configurations Management
 async fn admin_get_payments(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let configs = sqlx::query_as::<_, PaymentConfig>(
-        "SELECT provider, display_name, is_enabled, is_sandbox, public_client_id, secret_key, config_data, updated_at FROM payment_configs ORDER BY provider ASC"
+    let rows = sqlx::query(
+        "SELECT provider, display_name, is_enabled, is_sandbox, public_client_id, secret_key, webhook_secret, config_data, updated_at FROM payment_configs ORDER BY CASE provider WHEN 'stripe' THEN 0 WHEN 'paypal' THEN 1 ELSE 2 END, provider ASC"
     )
     .fetch_all(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    fn mask(secret: &str) -> String {
+        let secret = secret.trim();
+        if secret.is_empty() {
+            String::new()
+        } else if secret.len() > 12 && secret.is_ascii() {
+            format!("{}••••{}", &secret[..8], &secret[secret.len() - 4..])
+        } else {
+            "••••••••".to_string()
+        }
+    }
+
+    // Secrets are never sent back to the browser — only whether they are set and a masked hint.
+    let configs: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+        let sec: String = r.get("secret_key");
+        let whsec: String = r.get("webhook_secret");
+        json!({
+            "provider": r.get::<String, _>("provider"),
+            "display_name": r.get::<String, _>("display_name"),
+            "is_enabled": r.get::<bool, _>("is_enabled"),
+            "is_sandbox": r.get::<bool, _>("is_sandbox"),
+            "public_client_id": r.get::<String, _>("public_client_id"),
+            "has_secret_key": !sec.trim().is_empty(),
+            "masked_secret_key": mask(&sec),
+            "secret_mode": if sec.contains("_live_") { "live" } else if sec.contains("_test_") { "test" } else { "" },
+            "has_webhook_secret": !whsec.trim().is_empty(),
+            "masked_webhook_secret": mask(&whsec),
+            "config_data": r.get::<serde_json::Value, _>("config_data"),
+            "updated_at": r.get::<DateTime<Utc>, _>("updated_at"),
+        })
+    }).collect();
 
     Ok(Json(configs))
 }
@@ -1191,27 +1212,55 @@ async fn admin_update_payment(
     Path(provider): Path<String>,
     Json(payload): Json<UpdatePaymentConfigRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if provider != "stripe" && provider != "paypal" {
+        return Err((StatusCode::BAD_REQUEST, format!("Unknown payment provider '{}'", provider)));
+    }
+
+    let public_id = payload.public_client_id.map(|s| s.trim().to_string());
+    let secret = payload.secret_key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let webhook_secret = payload.webhook_secret.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+    if provider == "stripe" {
+        if let Some(ref p) = public_id {
+            if !p.is_empty() && !p.starts_with("pk_") {
+                return Err((StatusCode::BAD_REQUEST, "The Publishable Key must start with pk_test_ or pk_live_. Secret keys (sk_/rk_) belong in the Secret Key field.".to_string()));
+            }
+        }
+        if let Some(ref s) = secret {
+            if !(s.starts_with("sk_") || s.starts_with("rk_")) {
+                return Err((StatusCode::BAD_REQUEST, "The Secret Key must start with sk_ or rk_.".to_string()));
+            }
+        }
+        if let Some(ref w) = webhook_secret {
+            if !w.starts_with("whsec_") {
+                return Err((StatusCode::BAD_REQUEST, "The webhook signing secret must start with whsec_.".to_string()));
+            }
+        }
+    }
+
     sqlx::query(
         r#"
         UPDATE payment_configs
-        SET 
+        SET
             display_name = COALESCE($1, display_name),
             is_enabled = COALESCE($2, is_enabled),
             is_sandbox = COALESCE($3, is_sandbox),
             public_client_id = COALESCE($4, public_client_id),
             secret_key = COALESCE($5, secret_key),
-            config_data = COALESCE($6, config_data),
+            webhook_secret = COALESCE($6, webhook_secret),
+            config_data = COALESCE($7, config_data),
             updated_at = NOW()
-        WHERE provider = $7
+        WHERE provider = $8
         "#
     )
     .bind(payload.display_name)
     .bind(payload.is_enabled)
     .bind(payload.is_sandbox)
-    .bind(payload.public_client_id)
-    .bind(payload.secret_key)
+    .bind(public_id)
+    .bind(secret)
+    .bind(webhook_secret)
     .bind(payload.config_data)
-    .bind(provider)
+    .bind(&provider)
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1397,7 +1446,7 @@ async fn admin_update_system_settings(
     .bind(payload.smtp_host)
     .bind(payload.smtp_port)
     .bind(payload.smtp_username)
-    .bind(payload.smtp_password)
+    .bind(payload.smtp_password.filter(|p| !p.is_empty()))
     .bind(payload.smtp_encryption)
     .bind(payload.smtp_from_email)
     .bind(payload.smtp_from_name)
@@ -1475,13 +1524,25 @@ async fn admin_upload_media(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     {
         let original_name = field.file_name().unwrap_or("image.jpg").to_string();
-        let ext = original_name.rsplit('.').next().unwrap_or("jpg").to_lowercase();
+        let ext = original_name
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_lowercase())
+            .filter(|e| !e.is_empty() && e.len() <= 10 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+            .unwrap_or_else(|| "bin".to_string());
+        // Files are served from the shop's own origin: never accept types a browser would execute
+        if matches!(ext.as_str(), "html" | "htm" | "xhtml" | "js" | "mjs" | "xml" | "php" | "exe" | "sh" | "bat") {
+            return Err((StatusCode::BAD_REQUEST, format!("File type .{} is not allowed", ext)));
+        }
         let mime_type = match ext.as_str() {
             "webp" => "image/webp",
             "png" => "image/png",
             "gif" => "image/gif",
             "svg" => "image/svg+xml",
-            _ => "image/jpeg",
+            "jpg" | "jpeg" => "image/jpeg",
+            "avif" => "image/avif",
+            "pdf" => "application/pdf",
+            "zip" => "application/zip",
+            _ => "application/octet-stream",
         };
         let unique_name = format!("{}.{}", Uuid::new_v4(), ext);
         let path = format!("uploads/{}", unique_name);
@@ -2390,64 +2451,100 @@ async fn admin_get_purchase_analysis(
     }))
 }
 
-// 16. Store Data & Media Library Export
+// 16. Store Data & Media Library Export / Import
+//
+// The export is a complete, self-describing JSON backup of catalogue, CMS, navigation, shipping and
+// coupons (no orders, customers or secrets). Import deserialises into the very same model structs,
+// runs in one transaction and aborts with a precise message on the first problem — nothing is
+// half-imported.
+
+const BACKUP_VERSION: &str = "1.1";
+
+#[derive(Debug, Deserialize, Default)]
+struct BackupShipping {
+    #[serde(default)]
+    providers: Vec<ShippingProvider>,
+    #[serde(default)]
+    zones: Vec<ShippingZone>,
+    #[serde(default)]
+    rates: Vec<ShippingRate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StoreBackup {
+    #[serde(default)]
+    store_settings: Option<serde_json::Value>,
+    #[serde(default)]
+    categories: Vec<Category>,
+    #[serde(default)]
+    products: Vec<Product>,
+    #[serde(default)]
+    product_variants: Vec<ProductVariant>,
+    #[serde(default)]
+    product_parts: Vec<ProductPart>,
+    #[serde(default)]
+    pages: Vec<PageContent>,
+    #[serde(default)]
+    navigation_menu: Vec<NavigationItem>,
+    #[serde(default)]
+    coupons: Vec<Coupon>,
+    #[serde(default)]
+    shipping: BackupShipping,
+}
+
+fn import_error(what: String, e: sqlx::Error) -> (StatusCode, String) {
+    let detail = match &e {
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            format!("conflicts with an existing record ({})", db.constraint().unwrap_or("unique constraint"))
+        }
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
+            format!("references a record that does not exist ({})", db.constraint().unwrap_or("foreign key"))
+        }
+        _ => e.to_string(),
+    };
+    (StatusCode::BAD_REQUEST, format!("Import aborted, nothing was changed: {} {}", what, detail))
+}
+
 async fn admin_export_store_data(
     State(pool): State<PgPool>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+
+    // StoreSettings never serialises the SMTP password
     let settings = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1")
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
+        .fetch_optional(&pool).await.map_err(db_err)?;
     let products = sqlx::query_as::<_, Product>("SELECT * FROM products ORDER BY created_at ASC")
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
+        .fetch_all(&pool).await.map_err(db_err)?;
     let variants = sqlx::query_as::<_, ProductVariant>("SELECT * FROM product_variants ORDER BY created_at ASC")
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
+        .fetch_all(&pool).await.map_err(db_err)?;
+    let parts = sqlx::query_as::<_, ProductPart>("SELECT id, product_id, variant_id, part_name, part_sku, quantity, notes, created_at FROM product_parts ORDER BY created_at ASC")
+        .fetch_all(&pool).await.map_err(db_err)?;
     let categories = sqlx::query_as::<_, Category>("SELECT * FROM categories ORDER BY display_order ASC, name ASC")
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
+        .fetch_all(&pool).await.map_err(db_err)?;
     let pages = sqlx::query_as::<_, PageContent>("SELECT * FROM pages ORDER BY title ASC")
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
+        .fetch_all(&pool).await.map_err(db_err)?;
     let menu_items = sqlx::query_as::<_, NavigationItem>("SELECT * FROM navigation_items ORDER BY sort_order ASC")
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
+        .fetch_all(&pool).await.map_err(db_err)?;
+    let coupons = sqlx::query_as::<_, Coupon>("SELECT * FROM coupons ORDER BY created_at ASC")
+        .fetch_all(&pool).await.map_err(db_err)?;
     let shipping_providers = sqlx::query_as::<_, ShippingProvider>("SELECT * FROM shipping_providers ORDER BY sort_order ASC")
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
-    let shipping_zones = sqlx::query_as::<_, ShippingZone>("SELECT * FROM shipping_zones ORDER BY is_default DESC, zone_name ASC")
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
-    let shipping_rates = sqlx::query_as::<_, ShippingRate>("SELECT * FROM shipping_rates ORDER BY price_cents ASC")
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
+        .fetch_all(&pool).await.map_err(db_err)?;
+    let shipping_zones = sqlx::query_as::<_, ShippingZone>("SELECT id, provider_id, zone_name, country_codes, is_default, created_at FROM shipping_zones ORDER BY is_default DESC, zone_name ASC")
+        .fetch_all(&pool).await.map_err(db_err)?;
+    let shipping_rates = sqlx::query_as::<_, ShippingRate>("SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days FROM shipping_rates ORDER BY price_cents ASC")
+        .fetch_all(&pool).await.map_err(db_err)?;
 
     let export_payload = json!({
-        "version": "1.0",
+        "version": BACKUP_VERSION,
         "exported_at": Utc::now().to_rfc3339(),
         "store_settings": settings,
+        "categories": categories,
         "products": products,
         "product_variants": variants,
-        "categories": categories,
+        "product_parts": parts,
         "pages": pages,
         "navigation_menu": menu_items,
+        "coupons": coupons,
         "shipping": {
             "providers": shipping_providers,
             "zones": shipping_zones,
@@ -2461,12 +2558,8 @@ async fn admin_export_store_data(
 
     let headers = [
         (axum::http::header::CONTENT_TYPE, "application/json".to_string()),
-        (
-            axum::http::header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", filename),
-        ),
+        (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename)),
     ];
-
     Ok((headers, json_bytes))
 }
 
@@ -2479,43 +2572,44 @@ async fn admin_export_media_library(
     let media_items = sqlx::query_as::<_, MediaItem>("SELECT * FROM media ORDER BY created_at ASC")
         .fetch_all(&pool)
         .await
-        .unwrap_or_default();
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut buf = Vec::new();
+    let mut missing = Vec::new();
     {
         let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
-            .unix_permissions(0o755);
+            .unix_permissions(0o644);
+        let zip_err = |e: zip::result::ZipError| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        let io_err = |e: std::io::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
 
-        // Include manifest.json
-        let manifest_bytes = serde_json::to_vec_pretty(&media_items).unwrap_or_default();
-        let _ = zip.start_file("manifest.json", options);
-        let _ = zip.write_all(&manifest_bytes);
-
-        // Add each file in uploads/
         for item in &media_items {
-            let path = format!("uploads/{}", item.filename);
-            if let Ok(file_data) = tokio::fs::read(&path).await {
-                let arc_name = format!("files/{}", item.original_name);
-                if zip.start_file(&arc_name, options).is_ok() {
-                    let _ = zip.write_all(&file_data);
+            // Stored names are server-generated; refuse anything that could escape the uploads folder
+            if item.filename.contains(['/', '\\']) || item.filename.contains("..") {
+                continue;
+            }
+            match tokio::fs::read(format!("uploads/{}", item.filename)).await {
+                Ok(file_data) => {
+                    // Unique stored filename avoids collisions between equal original names
+                    zip.start_file(format!("files/{}", item.filename), options).map_err(zip_err)?;
+                    zip.write_all(&file_data).map_err(io_err)?;
                 }
+                Err(_) => missing.push(item.filename.clone()),
             }
         }
 
-        zip.finish().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let manifest = json!({ "version": BACKUP_VERSION, "media": media_items, "missing_files": missing });
+        zip.start_file("manifest.json", options).map_err(zip_err)?;
+        zip.write_all(&serde_json::to_vec_pretty(&manifest).unwrap_or_default()).map_err(io_err)?;
+        zip.finish().map_err(zip_err)?;
     }
 
     let filename = format!("media-library-{}.zip", Utc::now().format("%Y%m%d-%H%M%S"));
     let headers = [
         (axum::http::header::CONTENT_TYPE, "application/zip".to_string()),
-        (
-            axum::http::header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", filename),
-        ),
+        (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename)),
     ];
-
     Ok((headers, buf))
 }
 
@@ -2523,401 +2617,613 @@ async fn admin_import_store_data(
     State(pool): State<PgPool>,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // 1. Strict version compatibility check
-    let version = payload.get("version").and_then(|v| v.as_str()).unwrap_or("");
+    let version = payload.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
     if !version.starts_with("1.") {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
-                "Incompatible backup schema version: '{}'. This store supports version 1.x exports only. Import was safely aborted to prevent data corruption.",
-                if version.is_empty() { "unknown / missing" } else { version }
+                "Incompatible backup version '{}'. This store supports version 1.x exports only. Nothing was imported.",
+                if version.is_empty() { "unknown / missing" } else { &version }
             ),
         ));
     }
+    let backup: StoreBackup = serde_json::from_value(payload)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("The backup file is malformed ({}). Nothing was imported.", e)))?;
 
     let mut tx = pool.begin().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let mut restored_products = 0;
-    let mut restored_variants = 0;
-    let mut restored_categories = 0;
-    let mut restored_pages = 0;
-    let mut restored_menu = 0;
-    let mut restored_shipping = 0;
-
-    // 2. Restore store settings if provided
-    if let Some(s) = payload.get("store_settings") {
-        if s.is_object() {
-            let store_name = s.get("store_name").and_then(|v| v.as_str());
-            let store_subtitle = s.get("store_subtitle").and_then(|v| v.as_str());
-            let tax_rate = s.get("tax_rate_percent").and_then(|v| v.as_f64());
-            let tax_mode = s.get("tax_mode").and_then(|v| v.as_str());
-            let tax_notice = s.get("tax_notice").and_then(|v| v.as_str());
-            let legal_name = s.get("legal_name").and_then(|v| v.as_str());
-            let store_owner = s.get("store_owner").and_then(|v| v.as_str());
-            let company_address = s.get("company_address").and_then(|v| v.as_str());
-            let support_email = s.get("support_email").and_then(|v| v.as_str());
-            let phone = s.get("phone").and_then(|v| v.as_str());
-            let vat_id = s.get("vat_id").and_then(|v| v.as_str());
-            let commercial_register = s.get("commercial_register").and_then(|v| v.as_str());
-            let odr_url = s.get("odr_url").and_then(|v| v.as_str());
-            let dispute = s.get("dispute_resolution_notice").and_then(|v| v.as_str());
-            let footer_config = s.get("footer_config");
-            let hero_config = s.get("hero_config");
-            let carousels_config = s.get("carousels_config");
-
-            let _ = sqlx::query(
-                r#"
-                UPDATE store_settings
-                SET
-                    store_name = COALESCE($1, store_name),
-                    store_subtitle = COALESCE($2, store_subtitle),
-                    tax_rate_percent = COALESCE($3, tax_rate_percent),
-                    tax_mode = COALESCE($4, tax_mode),
-                    tax_notice = COALESCE($5, tax_notice),
-                    legal_name = COALESCE($6, legal_name),
-                    store_owner = COALESCE($7, store_owner),
-                    company_address = COALESCE($8, company_address),
-                    support_email = COALESCE($9, support_email),
-                    phone = COALESCE($10, phone),
-                    vat_id = COALESCE($11, vat_id),
-                    commercial_register = COALESCE($12, commercial_register),
-                    odr_url = COALESCE($13, odr_url),
-                    dispute_resolution_notice = COALESCE($14, dispute_resolution_notice),
-                    footer_config = COALESCE($15, footer_config),
-                    hero_config = COALESCE($16, hero_config),
-                    carousels_config = COALESCE($17, carousels_config),
-                    updated_at = NOW()
-                WHERE id = 1
-                "#
-            )
-            .bind(store_name)
-            .bind(store_subtitle)
-            .bind(tax_rate)
-            .bind(tax_mode)
-            .bind(tax_notice)
-            .bind(legal_name)
-            .bind(store_owner)
-            .bind(company_address)
-            .bind(support_email)
-            .bind(phone)
-            .bind(vat_id)
-            .bind(commercial_register)
-            .bind(odr_url)
-            .bind(dispute)
-            .bind(footer_config)
-            .bind(hero_config)
-            .bind(carousels_config)
-            .execute(&mut *tx)
-            .await;
-        }
+    // 1. Store settings (identity, legal texts, layout). SMTP credentials and payment keys are never part of a backup.
+    if let Some(s) = backup.store_settings.as_ref().filter(|s| s.is_object()) {
+        let str_field = |k: &str| s.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        sqlx::query(
+            r#"
+            UPDATE store_settings
+            SET
+                store_name = COALESCE($1, store_name),
+                store_subtitle = COALESCE($2, store_subtitle),
+                tax_rate_percent = COALESCE($3, tax_rate_percent),
+                tax_mode = COALESCE($4, tax_mode),
+                tax_notice = COALESCE($5, tax_notice),
+                legal_name = COALESCE($6, legal_name),
+                store_owner = COALESCE($7, store_owner),
+                company_address = COALESCE($8, company_address),
+                support_email = COALESCE($9, support_email),
+                phone = COALESCE($10, phone),
+                vat_id = COALESCE($11, vat_id),
+                commercial_register = COALESCE($12, commercial_register),
+                odr_url = COALESCE($13, odr_url),
+                dispute_resolution_notice = COALESCE($14, dispute_resolution_notice),
+                footer_config = COALESCE($15, footer_config),
+                hero_config = COALESCE($16, hero_config),
+                carousels_config = COALESCE($17, carousels_config),
+                logo_url = COALESCE($18, logo_url),
+                stock_display_template = COALESCE($19, stock_display_template),
+                updated_at = NOW()
+            WHERE id = 1
+            "#
+        )
+        .bind(str_field("store_name"))
+        .bind(str_field("store_subtitle"))
+        .bind(s.get("tax_rate_percent").and_then(|v| v.as_f64()))
+        .bind(str_field("tax_mode"))
+        .bind(str_field("tax_notice"))
+        .bind(str_field("legal_name"))
+        .bind(str_field("store_owner"))
+        .bind(str_field("company_address"))
+        .bind(str_field("support_email"))
+        .bind(str_field("phone"))
+        .bind(str_field("vat_id"))
+        .bind(str_field("commercial_register"))
+        .bind(str_field("odr_url"))
+        .bind(str_field("dispute_resolution_notice"))
+        .bind(s.get("footer_config").filter(|v| !v.is_null()))
+        .bind(s.get("hero_config").filter(|v| !v.is_null()))
+        .bind(s.get("carousels_config").filter(|v| !v.is_null()))
+        .bind(str_field("logo_url"))
+        .bind(str_field("stock_display_template"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| import_error("store settings".to_string(), e))?;
     }
 
-    // 3. Restore Categories
-    if let Some(cats) = payload.get("categories").and_then(|v| v.as_array()) {
-        for c in cats {
-            if let (Some(id_str), Some(name), Some(slug)) = (
-                c.get("id").and_then(|v| v.as_str()),
-                c.get("name").and_then(|v| v.as_str()),
-                c.get("slug").and_then(|v| v.as_str())
-            ) {
-                if let Ok(id) = Uuid::parse_str(id_str) {
-                    let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                    let img = c.get("image_url").and_then(|v| v.as_str()).unwrap_or("");
-                    let parent_id = c.get("parent_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
-                    let order = c.get("display_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-
-                    let _ = sqlx::query(
-                        r#"
-                        INSERT INTO categories (id, name, slug, description, image_url, parent_id, display_order)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
-                        ON CONFLICT (id) DO UPDATE SET
-                            name = EXCLUDED.name,
-                            slug = EXCLUDED.slug,
-                            description = EXCLUDED.description,
-                            image_url = EXCLUDED.image_url,
-                            parent_id = EXCLUDED.parent_id,
-                            display_order = EXCLUDED.display_order
-                        "#
-                    )
-                    .bind(id)
-                    .bind(name)
-                    .bind(slug)
-                    .bind(desc)
-                    .bind(img)
-                    .bind(parent_id)
-                    .bind(order)
-                    .execute(&mut *tx)
-                    .await;
-
-                    restored_categories += 1;
-                }
-            }
-        }
+    // 2. Categories — inserted flat first, parents linked afterwards (order in the file does not matter)
+    for c in &backup.categories {
+        sqlx::query(
+            r#"
+            INSERT INTO categories (id, name, slug, description, image_url, parent_id, display_order)
+            VALUES ($1, $2, $3, $4, $5, NULL, $6)
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name, slug = EXCLUDED.slug, description = EXCLUDED.description,
+                image_url = EXCLUDED.image_url, display_order = EXCLUDED.display_order
+            "#
+        )
+        .bind(c.id).bind(&c.name).bind(&c.slug).bind(&c.description).bind(&c.image_url).bind(c.display_order)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error(format!("category '{}'", c.name), e))?;
+    }
+    for c in &backup.categories {
+        sqlx::query("UPDATE categories SET parent_id = $1 WHERE id = $2")
+            .bind(c.parent_id).bind(c.id)
+            .execute(&mut *tx).await
+            .map_err(|e| import_error(format!("parent of category '{}'", c.name), e))?;
     }
 
-    // 4. Restore Products
-    if let Some(prods) = payload.get("products").and_then(|v| v.as_array()) {
-        for p in prods {
-            if let (Some(id_str), Some(title), Some(slug)) = (
-                p.get("id").and_then(|v| v.as_str()),
-                p.get("title").and_then(|v| v.as_str()),
-                p.get("slug").and_then(|v| v.as_str())
-            ) {
-                if let Ok(id) = Uuid::parse_str(id_str) {
-                    let desc = p.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                    let ptype = p.get("product_type").and_then(|v| v.as_str()).unwrap_or("physical");
-                    let cat = p.get("category").and_then(|v| v.as_str()).unwrap_or("Hardware");
-                    let subcat = p.get("subcategory").and_then(|v| v.as_str()).unwrap_or("");
-                    let price = p.get("base_price_cents").and_then(|v| v.as_i64()).unwrap_or(4999) as i32;
-                    let dig_url = p.get("digital_download_url").and_then(|v| v.as_str());
-                    let img = p.get("image_url").and_then(|v| v.as_str()).unwrap_or("");
-                    let active = p.get("is_active").and_then(|v| v.as_bool()).unwrap_or(true);
-                    let subtitle = p.get("subtitle").and_then(|v| v.as_str()).unwrap_or("");
-                    let var_lbl = p.get("variant_selector_label").and_then(|v| v.as_str()).unwrap_or("Choose Variant:");
-                    let short_desc = p.get("short_description").and_then(|v| v.as_str()).unwrap_or("");
-                    let long_desc = p.get("long_description").and_then(|v| v.as_str()).unwrap_or("");
-                    let images = p.get("images").cloned().unwrap_or(json!([]));
-                    let has_multi = p.get("has_multiple_variants").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let tax_rate = p.get("tax_rate_percent").and_then(|v| v.as_f64()).unwrap_or(19.0);
-
-                    let _ = sqlx::query(
-                        r#"
-                        INSERT INTO products (id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-                        ON CONFLICT (id) DO UPDATE SET
-                            title = EXCLUDED.title,
-                            slug = EXCLUDED.slug,
-                            description = EXCLUDED.description,
-                            product_type = EXCLUDED.product_type,
-                            category = EXCLUDED.category,
-                            subcategory = EXCLUDED.subcategory,
-                            base_price_cents = EXCLUDED.base_price_cents,
-                            digital_download_url = EXCLUDED.digital_download_url,
-                            image_url = EXCLUDED.image_url,
-                            is_active = EXCLUDED.is_active,
-                            subtitle = EXCLUDED.subtitle,
-                            variant_selector_label = EXCLUDED.variant_selector_label,
-                            short_description = EXCLUDED.short_description,
-                            long_description = EXCLUDED.long_description,
-                            images = EXCLUDED.images,
-                            has_multiple_variants = EXCLUDED.has_multiple_variants,
-                            tax_rate_percent = EXCLUDED.tax_rate_percent
-                        "#
-                    )
-                    .bind(id)
-                    .bind(title)
-                    .bind(slug)
-                    .bind(desc)
-                    .bind(ptype)
-                    .bind(cat)
-                    .bind(subcat)
-                    .bind(price)
-                    .bind(dig_url)
-                    .bind(img)
-                    .bind(active)
-                    .bind(subtitle)
-                    .bind(var_lbl)
-                    .bind(short_desc)
-                    .bind(long_desc)
-                    .bind(&images)
-                    .bind(has_multi)
-                    .bind(tax_rate)
-                    .execute(&mut *tx)
-                    .await;
-
-                    restored_products += 1;
-                }
-            }
-        }
+    // 3. Products, variants and BOM parts
+    for p in &backup.products {
+        sqlx::query(
+            r#"
+            INSERT INTO products (id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            ON CONFLICT (id) DO UPDATE SET
+                title = EXCLUDED.title, slug = EXCLUDED.slug, description = EXCLUDED.description,
+                product_type = EXCLUDED.product_type, category = EXCLUDED.category, subcategory = EXCLUDED.subcategory,
+                base_price_cents = EXCLUDED.base_price_cents, digital_download_url = EXCLUDED.digital_download_url,
+                image_url = EXCLUDED.image_url, is_active = EXCLUDED.is_active, subtitle = EXCLUDED.subtitle,
+                variant_selector_label = EXCLUDED.variant_selector_label, short_description = EXCLUDED.short_description,
+                long_description = EXCLUDED.long_description, images = EXCLUDED.images,
+                has_multiple_variants = EXCLUDED.has_multiple_variants, tax_rate_percent = EXCLUDED.tax_rate_percent,
+                updated_at = NOW()
+            "#
+        )
+        .bind(p.id).bind(&p.title).bind(&p.slug).bind(&p.description).bind(&p.product_type)
+        .bind(&p.category).bind(&p.subcategory).bind(p.base_price_cents).bind(&p.digital_download_url)
+        .bind(&p.image_url).bind(p.is_active).bind(&p.subtitle).bind(&p.variant_selector_label)
+        .bind(&p.short_description).bind(&p.long_description).bind(&p.images).bind(p.has_multiple_variants)
+        .bind(p.tax_rate_percent)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error(format!("product '{}' (slug '{}')", p.title, p.slug), e))?;
     }
 
-    // 5. Restore Product Variants
-    if let Some(vars) = payload.get("product_variants").and_then(|v| v.as_array()) {
-        for v in vars {
-            if let (Some(id_str), Some(pid_str), Some(sku), Some(title)) = (
-                v.get("id").and_then(|x| x.as_str()),
-                v.get("product_id").and_then(|x| x.as_str()),
-                v.get("sku").and_then(|x| x.as_str()),
-                v.get("title").and_then(|x| x.as_str())
-            ) {
-                if let (Ok(id), Ok(pid)) = (Uuid::parse_str(id_str), Uuid::parse_str(pid_str)) {
-                    let price_ov = v.get("price_override_cents").and_then(|x| x.as_i64()).map(|x| x as i32);
-                    let attrs = v.get("attributes").cloned().unwrap_or(json!({}));
-                    let stock = v.get("stock_quantity").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
-                    let low_stock = v.get("low_stock_threshold").and_then(|x| x.as_i64()).unwrap_or(5) as i32;
-                    let img = v.get("image_url").and_then(|x| x.as_str());
-                    let images = v.get("images").cloned().unwrap_or(json!([]));
-
-                    let _ = sqlx::query(
-                        r#"
-                        INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, images)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                        ON CONFLICT (id) DO UPDATE SET
-                            product_id = EXCLUDED.product_id,
-                            sku = EXCLUDED.sku,
-                            title = EXCLUDED.title,
-                            price_override_cents = EXCLUDED.price_override_cents,
-                            attributes = EXCLUDED.attributes,
-                            stock_quantity = EXCLUDED.stock_quantity,
-                            low_stock_threshold = EXCLUDED.low_stock_threshold,
-                            image_url = EXCLUDED.image_url,
-                            images = EXCLUDED.images
-                        "#
-                    )
-                    .bind(id)
-                    .bind(pid)
-                    .bind(sku)
-                    .bind(title)
-                    .bind(price_ov)
-                    .bind(&attrs)
-                    .bind(stock)
-                    .bind(low_stock)
-                    .bind(img)
-                    .bind(&images)
-                    .execute(&mut *tx)
-                    .await;
-
-                    restored_variants += 1;
-                }
-            }
-        }
+    for v in &backup.product_variants {
+        sqlx::query(
+            r#"
+            INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, images)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (id) DO UPDATE SET
+                product_id = EXCLUDED.product_id, sku = EXCLUDED.sku, title = EXCLUDED.title,
+                price_override_cents = EXCLUDED.price_override_cents, attributes = EXCLUDED.attributes,
+                stock_quantity = EXCLUDED.stock_quantity, low_stock_threshold = EXCLUDED.low_stock_threshold,
+                image_url = EXCLUDED.image_url, images = EXCLUDED.images, updated_at = NOW()
+            "#
+        )
+        .bind(v.id).bind(v.product_id).bind(&v.sku).bind(&v.title).bind(v.price_override_cents)
+        .bind(&v.attributes).bind(v.stock_quantity).bind(v.low_stock_threshold).bind(&v.image_url).bind(&v.images)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error(format!("variant '{}' (SKU '{}')", v.title, v.sku), e))?;
     }
 
-    // 6. Restore Policy Pages
-    if let Some(pages) = payload.get("pages").and_then(|v| v.as_array()) {
-        for p in pages {
-            if let (Some(slug), Some(title)) = (
-                p.get("slug").and_then(|v| v.as_str()),
-                p.get("title").and_then(|v| v.as_str())
-            ) {
-                let id = p.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_else(Uuid::new_v4);
-                let content = p.get("content_markdown").and_then(|v| v.as_str()).unwrap_or("");
-                let publ = p.get("is_published").and_then(|v| v.as_bool()).unwrap_or(true);
-
-                let _ = sqlx::query(
-                    r#"
-                    INSERT INTO pages (id, slug, title, content_markdown, is_published)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (slug) DO UPDATE SET
-                        title = EXCLUDED.title,
-                        content_markdown = EXCLUDED.content_markdown,
-                        is_published = EXCLUDED.is_published
-                    "#
-                )
-                .bind(id)
-                .bind(slug)
-                .bind(title)
-                .bind(content)
-                .bind(publ)
-                .execute(&mut *tx)
-                .await;
-
-                restored_pages += 1;
-            }
-        }
+    for part in &backup.product_parts {
+        sqlx::query(
+            r#"
+            INSERT INTO product_parts (id, product_id, variant_id, part_name, part_sku, quantity, notes)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (id) DO UPDATE SET
+                product_id = EXCLUDED.product_id, variant_id = EXCLUDED.variant_id, part_name = EXCLUDED.part_name,
+                part_sku = EXCLUDED.part_sku, quantity = EXCLUDED.quantity, notes = EXCLUDED.notes
+            "#
+        )
+        .bind(part.id).bind(part.product_id).bind(part.variant_id).bind(&part.part_name)
+        .bind(&part.part_sku).bind(part.quantity).bind(&part.notes)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error(format!("BOM part '{}'", part.part_name), e))?;
     }
 
-    // 7. Restore Navigation Menu
-    if let Some(menu) = payload.get("navigation_menu").and_then(|v| v.as_array()) {
-        for m in menu {
-            if let (Some(id_str), Some(label), Some(url)) = (
-                m.get("id").and_then(|v| v.as_str()),
-                m.get("label").and_then(|v| v.as_str()),
-                m.get("url").and_then(|v| v.as_str())
-            ) {
-                if let Ok(id) = Uuid::parse_str(id_str) {
-                    let parent_id = m.get("parent_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
-                    let sort_order = m.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
-                    let is_active = m.get("is_active").and_then(|v| v.as_bool()).unwrap_or(true);
-                    let location = m.get("location").and_then(|v| v.as_str()).unwrap_or("header");
-
-                    let _ = sqlx::query(
-                        r#"
-                        INSERT INTO navigation_items (id, label, url, parent_id, sort_order, is_active, location)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
-                        ON CONFLICT (id) DO UPDATE SET
-                            label = EXCLUDED.label,
-                            url = EXCLUDED.url,
-                            parent_id = EXCLUDED.parent_id,
-                            sort_order = EXCLUDED.sort_order,
-                            is_active = EXCLUDED.is_active,
-                            location = EXCLUDED.location
-                        "#
-                    )
-                    .bind(id)
-                    .bind(label)
-                    .bind(url)
-                    .bind(parent_id)
-                    .bind(sort_order)
-                    .bind(is_active)
-                    .bind(location)
-                    .execute(&mut *tx)
-                    .await;
-
-                    restored_menu += 1;
-                }
-            }
-        }
+    // 4. CMS pages (keyed by slug)
+    for p in &backup.pages {
+        sqlx::query(
+            r#"
+            INSERT INTO pages (slug, title, content_markdown, is_published, updated_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (slug) DO UPDATE SET
+                title = EXCLUDED.title, content_markdown = EXCLUDED.content_markdown,
+                is_published = EXCLUDED.is_published, updated_at = NOW()
+            "#
+        )
+        .bind(&p.slug).bind(&p.title).bind(&p.content_markdown).bind(p.is_published)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error(format!("page '{}'", p.slug), e))?;
     }
 
-    // 8. Restore Shipping Providers
-    if let Some(shipping) = payload.get("shipping") {
-        if let Some(providers) = shipping.get("providers").and_then(|v| v.as_array()) {
-            for p in providers {
-                if let (Some(id_str), Some(name), Some(code)) = (
-                    p.get("id").and_then(|v| v.as_str()),
-                    p.get("name").and_then(|v| v.as_str()),
-                    p.get("code").and_then(|v| v.as_str())
-                ) {
-                    if let Ok(id) = Uuid::parse_str(id_str) {
-                        let tracking = p.get("tracking_url_template").and_then(|v| v.as_str()).unwrap_or("");
-                        let active = p.get("is_active").and_then(|v| v.as_bool()).unwrap_or(true);
-                        let order = p.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    // 5. Navigation — flat first, then parents
+    for m in &backup.navigation_menu {
+        sqlx::query(
+            r#"
+            INSERT INTO navigation_items (id, label, url, parent_id, sort_order, is_active, location)
+            VALUES ($1, $2, $3, NULL, $4, $5, $6)
+            ON CONFLICT (id) DO UPDATE SET
+                label = EXCLUDED.label, url = EXCLUDED.url, sort_order = EXCLUDED.sort_order,
+                is_active = EXCLUDED.is_active, location = EXCLUDED.location
+            "#
+        )
+        .bind(m.id).bind(&m.label).bind(&m.url).bind(m.sort_order).bind(m.is_active).bind(&m.location)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error(format!("menu item '{}'", m.label), e))?;
+    }
+    for m in &backup.navigation_menu {
+        sqlx::query("UPDATE navigation_items SET parent_id = $1 WHERE id = $2")
+            .bind(m.parent_id).bind(m.id)
+            .execute(&mut *tx).await
+            .map_err(|e| import_error(format!("parent of menu item '{}'", m.label), e))?;
+    }
 
-                        let _ = sqlx::query(
-                            r#"
-                            INSERT INTO shipping_providers (id, name, code, tracking_url_template, is_active, sort_order)
-                            VALUES ($1, $2, $3, $4, $5, $6)
-                            ON CONFLICT (id) DO UPDATE SET
-                                name = EXCLUDED.name,
-                                code = EXCLUDED.code,
-                                tracking_url_template = EXCLUDED.tracking_url_template,
-                                is_active = EXCLUDED.is_active,
-                                sort_order = EXCLUDED.sort_order
-                            "#
-                        )
-                        .bind(id)
-                        .bind(name)
-                        .bind(code)
-                        .bind(tracking)
-                        .bind(active)
-                        .bind(order)
-                        .execute(&mut *tx)
-                        .await;
+    // 6. Shipping providers → zones → rates
+    for p in &backup.shipping.providers {
+        sqlx::query(
+            r#"
+            INSERT INTO shipping_providers (id, name, code, tracking_url_template, is_active, sort_order)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name, code = EXCLUDED.code, tracking_url_template = EXCLUDED.tracking_url_template,
+                is_active = EXCLUDED.is_active, sort_order = EXCLUDED.sort_order
+            "#
+        )
+        .bind(p.id).bind(&p.name).bind(&p.code).bind(&p.tracking_url_template).bind(p.is_active).bind(p.sort_order)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error(format!("shipping provider '{}'", p.name), e))?;
+    }
+    for z in &backup.shipping.zones {
+        sqlx::query(
+            r#"
+            INSERT INTO shipping_zones (id, provider_id, zone_name, country_codes, is_default)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (id) DO UPDATE SET
+                provider_id = EXCLUDED.provider_id, zone_name = EXCLUDED.zone_name,
+                country_codes = EXCLUDED.country_codes, is_default = EXCLUDED.is_default
+            "#
+        )
+        .bind(z.id).bind(z.provider_id).bind(&z.zone_name).bind(&z.country_codes).bind(z.is_default)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error(format!("shipping zone '{}'", z.zone_name), e))?;
+    }
+    for r in &backup.shipping.rates {
+        sqlx::query(
+            r#"
+            INSERT INTO shipping_rates (id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (id) DO UPDATE SET
+                zone_id = EXCLUDED.zone_id, name = EXCLUDED.name, package_type = EXCLUDED.package_type,
+                min_weight_g = EXCLUDED.min_weight_g, max_weight_g = EXCLUDED.max_weight_g,
+                price_cents = EXCLUDED.price_cents, estimated_delivery_days = EXCLUDED.estimated_delivery_days
+            "#
+        )
+        .bind(r.id).bind(r.zone_id).bind(&r.name).bind(&r.package_type).bind(r.min_weight_g)
+        .bind(r.max_weight_g).bind(r.price_cents).bind(&r.estimated_delivery_days)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error(format!("shipping rate '{}'", r.name), e))?;
+    }
 
-                        restored_shipping += 1;
-                    }
-                }
-            }
-        }
+    // 7. Coupons
+    for c in &backup.coupons {
+        sqlx::query(
+            r#"
+            INSERT INTO coupons (id, code, discount_type, value_cents, min_order_cents, max_uses, used_count, is_active, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (id) DO UPDATE SET
+                code = EXCLUDED.code, discount_type = EXCLUDED.discount_type, value_cents = EXCLUDED.value_cents,
+                min_order_cents = EXCLUDED.min_order_cents, max_uses = EXCLUDED.max_uses, used_count = EXCLUDED.used_count,
+                is_active = EXCLUDED.is_active, expires_at = EXCLUDED.expires_at, updated_at = NOW()
+            "#
+        )
+        .bind(c.id).bind(&c.code).bind(&c.discount_type).bind(c.value_cents).bind(c.min_order_cents)
+        .bind(c.max_uses).bind(c.used_count).bind(c.is_active).bind(c.expires_at)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error(format!("coupon '{}'", c.code), e))?;
     }
 
     tx.commit().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({
         "success": true,
-        "message": "Store configuration, catalog, and CMS data successfully restored.",
+        "message": "Store data successfully restored.",
         "version": version,
         "restored": {
-            "settings": true,
-            "products": restored_products,
-            "variants": restored_variants,
-            "categories": restored_categories,
-            "pages": restored_pages,
-            "menu_items": restored_menu,
-            "shipping_providers": restored_shipping
+            "settings": backup.store_settings.is_some(),
+            "categories": backup.categories.len(),
+            "products": backup.products.len(),
+            "variants": backup.product_variants.len(),
+            "product_parts": backup.product_parts.len(),
+            "pages": backup.pages.len(),
+            "menu_items": backup.navigation_menu.len(),
+            "shipping_providers": backup.shipping.providers.len(),
+            "shipping_zones": backup.shipping.zones.len(),
+            "shipping_rates": backup.shipping.rates.len(),
+            "coupons": backup.coupons.len()
         }
     })))
 }
 
+// ==========================================
+// Coupons / Promo Codes Management
+// ==========================================
 
+async fn admin_list_coupons(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let coupons = sqlx::query_as::<_, Coupon>("SELECT * FROM coupons ORDER BY created_at DESC")
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(coupons))
+}
+
+async fn admin_create_coupon(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CreateCouponRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let code = payload.code.trim().to_uppercase();
+    if code.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Coupon code cannot be empty".to_string()));
+    }
+    let valid_types = ["free_shipping", "fixed_amount", "percentage"];
+    if !valid_types.contains(&payload.discount_type.as_str()) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid discount type. Must be free_shipping, fixed_amount, or percentage".to_string()));
+    }
+    let value_cents = payload.value_cents.unwrap_or(0);
+    let min_order = payload.min_order_cents.unwrap_or(0);
+    let is_active = payload.is_active.unwrap_or(true);
+
+    let coupon = sqlx::query_as::<_, Coupon>(
+        r#"
+        INSERT INTO coupons (code, discount_type, value_cents, min_order_cents, max_uses, is_active, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *
+        "#
+    )
+    .bind(code)
+    .bind(payload.discount_type)
+    .bind(value_cents)
+    .bind(min_order)
+    .bind(payload.max_uses)
+    .bind(is_active)
+    .bind(payload.expires_at)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to create coupon: {}", e)))?;
+
+    Ok((StatusCode::CREATED, Json(coupon)))
+}
+
+async fn admin_update_coupon(
+    Path(id): Path<Uuid>,
+    State(pool): State<PgPool>,
+    Json(payload): Json<UpdateCouponRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current = sqlx::query_as::<_, Coupon>("SELECT * FROM coupons WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Coupon not found".to_string()))?;
+
+    let code = payload.code.map(|c| c.trim().to_uppercase()).unwrap_or(current.code);
+    let discount_type = payload.discount_type.unwrap_or(current.discount_type);
+    let value_cents = payload.value_cents.unwrap_or(current.value_cents);
+    let min_order_cents = payload.min_order_cents.unwrap_or(current.min_order_cents);
+    let max_uses = if payload.max_uses.is_some() { payload.max_uses } else { current.max_uses };
+    let is_active = payload.is_active.unwrap_or(current.is_active);
+    let expires_at = if payload.expires_at.is_some() { payload.expires_at } else { current.expires_at };
+
+    let updated = sqlx::query_as::<_, Coupon>(
+        r#"
+        UPDATE coupons
+        SET code = $1, discount_type = $2, value_cents = $3, min_order_cents = $4, max_uses = $5, is_active = $6, expires_at = $7, updated_at = NOW()
+        WHERE id = $8
+        RETURNING *
+        "#
+    )
+    .bind(code)
+    .bind(discount_type)
+    .bind(value_cents)
+    .bind(min_order_cents)
+    .bind(max_uses)
+    .bind(is_active)
+    .bind(expires_at)
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(updated))
+}
+
+async fn admin_delete_coupon(
+    Path(id): Path<Uuid>,
+    State(pool): State<PgPool>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    sqlx::query("DELETE FROM coupons WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({ "success": true, "message": "Coupon deleted successfully" })))
+}
+
+// ==========================================
+// Admin Users Management
+// ==========================================
+
+#[derive(Serialize)]
+struct AdminUserDto {
+    id: Uuid,
+    username: String,
+    email: Option<String>,
+    role: String,
+    is_default: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn admin_list_users(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let rows = sqlx::query(
+        "SELECT id, username, email, role, is_default, created_at, updated_at FROM admin_users ORDER BY created_at ASC"
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let list: Vec<AdminUserDto> = rows.into_iter().map(|r| AdminUserDto {
+        id: r.get("id"),
+        username: r.get("username"),
+        email: r.try_get("email").ok(),
+        role: r.try_get("role").unwrap_or_else(|_| "admin".to_string()),
+        is_default: r.get("is_default"),
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+    }).collect();
+
+    Ok(Json(list))
+}
+
+const ADMIN_ROLES: &[&str] = &["superadmin", "admin", "editor"];
+
+fn validate_role_assignment(actor: &CurrentAdmin, role: &str) -> Result<(), (StatusCode, String)> {
+    if !ADMIN_ROLES.contains(&role) {
+        return Err((StatusCode::BAD_REQUEST, "Role must be superadmin, admin or editor".to_string()));
+    }
+    if role == "superadmin" && !actor.is_superadmin() {
+        return Err((StatusCode::FORBIDDEN, "Only a superadmin can grant the superadmin role".to_string()));
+    }
+    Ok(())
+}
+
+async fn superadmin_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM admin_users WHERE role = 'superadmin'")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
+}
+
+async fn admin_create_user(
+    State(pool): State<PgPool>,
+    Extension(actor): Extension<CurrentAdmin>,
+    Json(payload): Json<CreateAdminUserRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let username = payload.username.trim();
+    if username.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Username cannot be empty".to_string()));
+    }
+    if payload.password.len() < 12 {
+        return Err((StatusCode::BAD_REQUEST, "Password must be at least 12 characters long".to_string()));
+    }
+    let role = payload.role.unwrap_or_else(|| "editor".to_string());
+    validate_role_assignment(&actor, &role)?;
+
+    let password_hash = bcrypt::hash(&payload.password, 12)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO admin_users (username, password_hash, email, role, is_default)
+        VALUES ($1, $2, $3, $4, FALSE)
+        RETURNING id, username, email, role, is_default, created_at, updated_at
+        "#
+    )
+    .bind(username)
+    .bind(password_hash)
+    .bind(payload.email)
+    .bind(&role)
+    .fetch_one(&pool)
+    .await
+    .map_err(|_| (StatusCode::BAD_REQUEST, "Could not create the admin user (is the username already taken?)".to_string()))?;
+
+    let dto = AdminUserDto {
+        id: row.get("id"),
+        username: row.get("username"),
+        email: row.try_get("email").ok(),
+        role: row.get("role"),
+        is_default: row.get("is_default"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    };
+
+    Ok((StatusCode::CREATED, Json(dto)))
+}
+
+async fn admin_update_user(
+    Path(id): Path<Uuid>,
+    State(pool): State<PgPool>,
+    Extension(actor): Extension<CurrentAdmin>,
+    Json(payload): Json<UpdateAdminUserRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current = sqlx::query("SELECT username, email, role FROM admin_users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Admin user not found".to_string()))?;
+
+    let current_role: String = current.get("role");
+    if current_role == "superadmin" && !actor.is_superadmin() {
+        return Err((StatusCode::FORBIDDEN, "Only a superadmin can modify a superadmin account".to_string()));
+    }
+
+    let username = payload.username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()).unwrap_or_else(|| current.get("username"));
+    let email = payload.email.or_else(|| current.try_get("email").ok());
+    let role = payload.role.unwrap_or_else(|| current_role.clone());
+    validate_role_assignment(&actor, &role)?;
+    if current_role == "superadmin" && role != "superadmin" && superadmin_count(&pool).await <= 1 {
+        return Err((StatusCode::BAD_REQUEST, "The last superadmin cannot be demoted".to_string()));
+    }
+
+    let new_hash = match payload.password.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) if p.len() < 12 => return Err((StatusCode::BAD_REQUEST, "Password must be at least 12 characters long".to_string())),
+        Some(p) => Some(bcrypt::hash(p, 12).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?),
+        None => None,
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE admin_users
+        SET username = $1, email = $2, role = $3,
+            password_hash = COALESCE($4, password_hash),
+            is_default = CASE WHEN $4 IS NULL THEN is_default ELSE FALSE END,
+            updated_at = NOW()
+        WHERE id = $5
+        "#
+    )
+    .bind(username)
+    .bind(email)
+    .bind(role)
+    .bind(new_hash)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .map_err(|_| (StatusCode::BAD_REQUEST, "Could not update the admin user (is the username already taken?)".to_string()))?;
+
+    Ok(Json(json!({ "success": true, "message": "Admin user updated successfully" })))
+}
+
+async fn admin_delete_user(
+    Path(id): Path<Uuid>,
+    State(pool): State<PgPool>,
+    Extension(actor): Extension<CurrentAdmin>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if id == actor.id {
+        return Err((StatusCode::BAD_REQUEST, "You cannot delete your own account".to_string()));
+    }
+    let target_role: String = sqlx::query_scalar("SELECT role FROM admin_users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Admin user not found".to_string()))?;
+
+    if target_role == "superadmin" {
+        if !actor.is_superadmin() {
+            return Err((StatusCode::FORBIDDEN, "Only a superadmin can delete a superadmin account".to_string()));
+        }
+        if superadmin_count(&pool).await <= 1 {
+            return Err((StatusCode::BAD_REQUEST, "The last superadmin cannot be deleted".to_string()));
+        }
+    }
+
+    sqlx::query("DELETE FROM admin_users WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "success": true, "message": "Admin user deleted successfully" })))
+}
+
+// ==========================================
+// Stripe payment method domains (Apple Pay / Google Pay / Link)
+// ==========================================
+
+#[derive(Debug, Deserialize)]
+struct RegisterDomainRequest {
+    domain: String,
+}
+
+fn summarize_domain(d: &serde_json::Value) -> serde_json::Value {
+    let status = |k: &str| d[k]["status"].as_str().unwrap_or("unknown").to_string();
+    json!({
+        "domain": d["domain_name"],
+        "enabled": d["enabled"],
+        "apple_pay": status("apple_pay"),
+        "google_pay": status("google_pay"),
+        "link": status("link"),
+        "paypal": status("paypal"),
+        "amazon_pay": status("amazon_pay"),
+    })
+}
+
+async fn admin_stripe_list_domains(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let cfg = crate::services::payments::ProviderConfig::load(&pool, "stripe").await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let list = crate::services::payments::stripe::list_domains(&cfg).await.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let domains: Vec<serde_json::Value> = list["data"].as_array().map(|a| a.iter().map(summarize_domain).collect()).unwrap_or_default();
+    Ok(Json(domains))
+}
+
+async fn admin_stripe_register_domain(
+    State(pool): State<PgPool>,
+    Json(payload): Json<RegisterDomainRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Accept "https://shop.example/path" or "shop.example" and register only the bare host name
+    let domain = payload.domain.trim().trim_start_matches("https://").trim_start_matches("http://");
+    let domain = domain.split(['/', ':', '?', '#']).next().unwrap_or("").to_lowercase();
+    if domain.is_empty() || !domain.contains('.') || !domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+        return Err((StatusCode::BAD_REQUEST, "Enter your public shop domain, e.g. shop.example.com (localhost cannot be registered)".to_string()));
+    }
+    let cfg = crate::services::payments::ProviderConfig::load(&pool, "stripe").await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let created = crate::services::payments::stripe::register_domain(&cfg, &domain).await.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(summarize_domain(&created)))
+}

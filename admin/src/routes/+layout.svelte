@@ -34,7 +34,8 @@
       subItems: [
         { href: '/products?tab=catalog', label: 'Products & BOM', tab: 'catalog', match: (p, t) => (p === '/products' && (!t || t === 'catalog')) },
         { href: '/products?tab=categories', label: 'Categories Tree', tab: 'categories', match: (p, t) => p === '/categories' || (p === '/products' && t === 'categories') },
-        { href: '/products?tab=stock', label: 'Logistics & Stock', tab: 'stock', match: (p, t) => p === '/logistics' || (p === '/products' && t === 'stock') }
+        { href: '/products?tab=stock', label: 'Logistics & Stock', tab: 'stock', match: (p, t) => p === '/logistics' || (p === '/products' && t === 'stock') },
+        { href: '/products?tab=coupons', label: 'Promo & Discount Codes', tab: 'coupons', match: (p, t) => (p === '/products' && t === 'coupons') }
       ]
     },
     {
@@ -70,6 +71,7 @@
         { href: '/settings?tab=email', label: 'Email & Auth Policies', tab: 'email', match: (p, t) => p === '/settings/email' || (p === '/settings' && t === 'email') },
         { href: '/settings?tab=shipping', label: 'Shipping & Delivery', tab: 'shipping', match: (p, t) => p === '/settings/shipping' || (p === '/settings' && t === 'shipping') },
         { href: '/settings?tab=media', label: 'Media Library', tab: 'media', match: (p, t) => p === '/settings/media' || (p === '/settings' && t === 'media') },
+        { href: '/settings?tab=users', label: 'Admin Users & Access', tab: 'users', match: (p, t) => (p === '/settings' && t === 'users') },
         { href: '/settings?tab=export', label: 'Export & Backups', tab: 'export', match: (p, t) => (p === '/settings' && t === 'export') }
       ]
     }
@@ -105,50 +107,36 @@
 
   $: isLoginPage = $page.url.pathname === '/login';
 
-  onMount(async () => {
-    if (isLoginPage) return;
+  // The session is validated server-side (hooks.server.js); the token itself lives in an httpOnly cookie.
+  $: if (data.admin) {
+    isDefaultCredentials = Boolean(data.admin.is_default);
+    if (data.admin.username) adminUsername = data.admin.username;
+  }
+  $: if (isDefaultCredentials && !isLoginPage) isChangePasswordModalOpen = true;
 
-    const token = localStorage.getItem('admin_token');
-    if (!token) {
-      goto('/login');
-      return;
-    }
-
-    adminUsername = localStorage.getItem('admin_username') || 'admin';
+  onMount(() => {
+    // Remove tokens stored by older versions of the admin app
+    ['admin_token', 'admin_username', 'admin_is_default'].forEach((k) => localStorage.removeItem(k));
+    document.cookie = 'admin_token=; path=/; max-age=0;';
     newUsername = adminUsername;
-
-    // Verify token with backend & get current default credential status
-    try {
-      const res = await fetch('/api/v1/admin/auth/status', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const statusData = await res.json();
-        isDefaultCredentials = Boolean(statusData.is_default);
-        adminUsername = statusData.username || adminUsername;
-      } else {
-        localStorage.removeItem('admin_token');
-        goto('/login');
-      }
-    } catch (e) {
-      console.error('Failed to verify admin status:', e);
-    }
   });
 
-  function handleLogout() {
-    localStorage.removeItem('admin_token');
-    localStorage.removeItem('admin_username');
-    localStorage.removeItem('admin_is_default');
-    document.cookie = 'admin_token=; path=/; max-age=0;';
-    goto('/login');
+  async function handleLogout() {
+    await fetch('/api/v1/admin/auth/logout', { method: 'POST' }).catch(() => {});
+    window.location.href = '/login';
   }
 
   async function handleChangeCredentials() {
     changePasswordError = '';
     changePasswordSuccess = '';
 
-    if (!newPassword || newPassword.length < 8) {
-      changePasswordError = 'New password must be at least 8 characters long.';
+    if (!currentPassword) {
+      changePasswordError = 'Please enter your current password.';
+      return;
+    }
+
+    if (!newPassword || newPassword.length < 12) {
+      changePasswordError = 'New password must be at least 12 characters long.';
       return;
     }
 
@@ -157,37 +145,28 @@
       return;
     }
 
-    const token = localStorage.getItem('admin_token');
     isSubmittingChange = true;
 
     try {
+      // The proxy stores the renewed session token in the httpOnly cookie
       const res = await fetch('/api/v1/admin/auth/change-credentials', {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          current_password: currentPassword || 'RustCraftAdmin2026!',
+          current_password: currentPassword,
           new_username: newUsername,
           new_password: newPassword
         })
       });
 
-      const resData = await res.json();
+      const resData = await res.json().catch(() => ({}));
       if (!res.ok) {
         changePasswordError = resData.error || resData.message || 'Failed to change credentials.';
         isSubmittingChange = false;
         return;
       }
 
-      if (resData.token) {
-        localStorage.setItem('admin_token', resData.token);
-        document.cookie = `admin_token=${resData.token}; path=/; max-age=604800; SameSite=Lax`;
-      }
-      localStorage.setItem('admin_username', newUsername);
-      localStorage.setItem('admin_is_default', 'false');
-
+      const wasDefault = isDefaultCredentials;
       adminUsername = newUsername;
       isDefaultCredentials = false;
       changePasswordSuccess = 'Credentials updated successfully!';
@@ -197,6 +176,8 @@
         currentPassword = '';
         newPassword = '';
         confirmPassword = '';
+        // Pages were locked until the initial password was replaced: reload them with full access
+        if (wasDefault) window.location.reload();
       }, 1500);
     } catch (e) {
       changePasswordError = 'Error updating credentials.';
@@ -313,7 +294,7 @@
         <div class="bg-gradient-to-r from-amber-600 via-orange-600 to-red-600 px-6 py-2 text-white flex items-center justify-between text-xs font-bold shadow-md z-40">
           <div class="flex items-center gap-2">
             <AlertTriangle size={16} class="text-amber-200 animate-pulse" />
-            <span>Default admin credentials (<code class="bg-black/30 px-1 py-0.5 rounded font-mono">admin / RustCraftAdmin2026!</code>) are currently active! Please update your credentials for safety.</span>
+            <span>This account still uses its initial password. Choose a new password to unlock the admin area.</span>
           </div>
           <button
             on:click={() => isChangePasswordModalOpen = true}
@@ -416,7 +397,7 @@
             <input
               type="password"
               bind:value={currentPassword}
-              placeholder="Defaults to RustCraftAdmin2026!"
+              placeholder="Your current password"
               class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-orange-500 font-mono"
             />
           </div>

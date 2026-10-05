@@ -2,12 +2,43 @@
   import { cart, cartSubtotal, cartCount } from '$lib/stores/cart.js';
   import { customer } from '$lib/stores/customer.js';
   import { goto } from '$app/navigation';
-  import { onMount } from 'svelte';
-  import { ShieldCheck, Lock, CreditCard, Truck, AlertCircle, CheckCircle2, ArrowRight, MapPin, UserCheck } from 'lucide-svelte';
+  import { browser } from '$app/environment';
+  import { onMount, onDestroy } from 'svelte';
+  import { ShieldCheck, Lock, CreditCard, AlertCircle, ArrowRight, MapPin, UserCheck, Tag, Loader2, ExternalLink, Gift } from 'lucide-svelte';
+  import { loadStripe } from '@stripe/stripe-js';
+  import { Elements, PaymentElement, ExpressCheckout } from '$lib/stripe';
+  import { paymentMethodTypes, methodLabels, expressPaymentMethods, hasExpressMethods } from '$lib/stripeMethods.js';
 
   export let data;
   $: store = data.store || {};
-  $: paymentProviders = data.paymentProviders || [];
+  let paymentProviders = data.paymentProviders || [];
+
+  // Only real, server-verified gateways are offered: Stripe (cards + wallets) and PayPal
+  // Gateways without their public key cannot render, so they are hidden from customers.
+  $: enabledProviders = paymentProviders.filter(
+    (p) =>
+      p.is_enabled &&
+      ((p.provider === 'stripe' && (p.public_client_id || '').trim().startsWith('pk_')) ||
+        (p.provider === 'paypal' && (p.public_client_id || '').trim() !== ''))
+  );
+  $: stripeProvider = enabledProviders.find((p) => p.provider === 'stripe');
+  $: paypalProvider = enabledProviders.find((p) => p.provider === 'paypal');
+
+  $: stripeKey = stripeProvider && (stripeProvider.public_client_id || '').trim().startsWith('pk_') ? stripeProvider.public_client_id.trim() : null;
+  $: stripeTestMode = !!stripeKey && stripeKey.startsWith('pk_test_');
+  $: stripeHosted = stripeProvider?.config_data?.checkout_mode === 'hosted';
+  $: stripeMethods = stripeProvider?.config_data?.methods || {};
+  $: stripePaymentMethodTypes = paymentMethodTypes(stripeMethods);
+  $: stripeMethodLabels = methodLabels(stripeMethods);
+  $: stripeExpressMethods = expressPaymentMethods(stripeMethods);
+  $: showExpressCheckout = hasExpressMethods(stripeMethods);
+  // Wallets get their own buttons (Express Checkout); the form below defaults to card entry
+  const paymentElementWallets = { applePay: 'never', googlePay: 'never' };
+
+  let selectedProvider = '';
+  $: if (enabledProviders.length > 0 && !enabledProviders.some((p) => p.provider === selectedProvider)) {
+    selectedProvider = enabledProviders[0].provider;
+  }
 
   // Form State
   let customerName = '';
@@ -26,36 +57,67 @@
   let availableRates = [];
   let isFetchingRates = false;
 
-  let selectedProvider = 'stripe';
   let isSubmitting = false;
   let errorMessage = '';
+  let acceptedTerms = false;
+  let acceptedDigitalWaiver = false;
 
-  // Interactive Payment Card Fields (inspired by svelte_shop-main)
-  let cardNumber = '4242 4242 4242 4242';
-  let cardExpiry = '12/28';
-  let cardCvc = '123';
-  let cardholderName = '';
+  // Promo / Coupon Code State
+  let couponInput = '';
+  let appliedCoupon = null;
+  let couponError = '';
+  let isApplyingCoupon = false;
 
-  function handleCardInput(e) {
-    const val = e.target.value.replace(/\D/g, '').replace(/(\d{4})(?=\d)/g, '$1 ').trim();
-    cardNumber = val;
+  $: hasPhysicalItems = $cart.some((i) => !i.is_digital);
+  $: hasDigitalItems = $cart.some((i) => i.is_digital);
+
+  async function readError(res, fallback) {
+    const text = await res.text();
+    try {
+      const j = JSON.parse(text);
+      return j.error || j.message || text || fallback;
+    } catch (_) {
+      return text || fallback;
+    }
   }
 
-  function autofillTestCard() {
-    cardNumber = '4242 4242 4242 4242';
-    cardExpiry = '12/28';
-    cardCvc = '123';
-    cardholderName = customerName || 'Max Mustermann';
+  async function applyCoupon() {
+    if (!couponInput.trim()) return;
+    couponError = '';
+    isApplyingCoupon = true;
+    try {
+      const res = await fetch('/api/v1/coupons/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: couponInput.trim(),
+          subtotal_cents: $cartSubtotal,
+          shipping_cost_cents: quote ? quote.shipping_cost_cents : 0
+        })
+      });
+      if (res.ok) {
+        const result = await res.json();
+        if (result.valid) {
+          appliedCoupon = result;
+        } else {
+          couponError = result.message || 'Invalid promo code.';
+          appliedCoupon = null;
+        }
+      } else {
+        couponError = 'Failed to validate promo code.';
+      }
+    } catch (e) {
+      couponError = e.message || 'Error validating promo code.';
+    } finally {
+      isApplyingCoupon = false;
+    }
   }
 
-  function getCardType(num) {
-    const clean = num.replace(/\s/g, '');
-    if (/^4/.test(clean)) return 'VISA';
-    if (/^5[1-5]/.test(clean)) return 'MASTERCARD';
-    if (/^3[47]/.test(clean)) return 'AMEX';
-    return 'CARD';
+  function removeCoupon() {
+    appliedCoupon = null;
+    couponInput = '';
+    couponError = '';
   }
-  $: cardBrand = getCardType(cardNumber);
 
   const countries = [
     { code: 'DE', name: 'Germany (Domestic)' },
@@ -74,10 +136,11 @@
     try {
       const res = await fetch(`/api/v1/shipping/rates?country_code=${countryCode}`);
       if (res.ok) {
-        const data = await res.json();
-        availableRates = data.rates || [];
-        if (availableRates.length > 0 && !selectedShippingRateId) {
-          selectedShippingRateId = availableRates[0].id;
+        const result = await res.json();
+        availableRates = result.rates || [];
+        // A rate from the previous country's zone is not valid for the new destination
+        if (!availableRates.some((r) => r.id === selectedShippingRateId)) {
+          selectedShippingRateId = availableRates.length > 0 ? availableRates[0].id : '';
         }
       }
     } catch (e) {
@@ -97,7 +160,6 @@
     stateProvince = addr.state_province || '';
     postalCode = addr.postal_code || '';
     countryCode = addr.country_code || 'DE';
-    cardholderName = customerName || cardholderName;
     fetchShippingRates();
   }
 
@@ -105,7 +167,6 @@
     if ($customer && $customer.isLoggedIn) {
       if ($customer.full_name && !customerName) customerName = $customer.full_name;
       if ($customer.email && !customerEmail) customerEmail = $customer.email;
-      if (!cardholderName) cardholderName = customerName;
 
       try {
         const res = await fetch('/api/v1/customer/addresses', {
@@ -115,8 +176,7 @@
           const list = await res.json();
           if (Array.isArray(list) && list.length > 0) {
             savedAddresses = list;
-            const defaultAddr = list.find((a) => a.is_default) || list[0];
-            selectSavedAddress(defaultAddr);
+            selectSavedAddress(list.find((a) => a.is_default) || list[0]);
             return;
           }
         }
@@ -124,21 +184,17 @@
         console.warn('Failed to fetch addresses from backend:', err);
       }
 
-      // Local storage fallback for saved addresses
       try {
         const local = localStorage.getItem('rustwebshop_saved_addresses');
         if (local) {
           const list = JSON.parse(local);
           if (Array.isArray(list) && list.length > 0) {
             savedAddresses = list;
-            const defaultAddr = list.find((a) => a.is_default) || list[0];
-            selectSavedAddress(defaultAddr);
-            return;
+            selectSavedAddress(list.find((a) => a.is_default) || list[0]);
           }
         }
       } catch (_) {}
     } else {
-      // Guest: if last used guest address stored in session
       try {
         const lastGuest = localStorage.getItem('rustwebshop_last_shipping');
         if (lastGuest) {
@@ -146,6 +202,7 @@
           if (parsed.full_name) customerName = parsed.full_name;
           if (parsed.email) customerEmail = parsed.email;
           if (parsed.street_address) streetAddress = parsed.street_address;
+          if (parsed.apartment_suite) apartmentSuite = parsed.apartment_suite;
           if (parsed.city) city = parsed.city;
           if (parsed.postal_code) postalCode = parsed.postal_code;
           if (parsed.country_code) countryCode = parsed.country_code;
@@ -154,57 +211,29 @@
     }
   }
 
-  onMount(() => {
+  onMount(async () => {
     loadCustomerProfileAndAddresses();
     fetchShippingRates();
+    try {
+      const res = await fetch('/api/v1/store/info');
+      if (res.ok) {
+        const info = await res.json();
+        if (info.payment_providers) paymentProviders = info.payment_providers;
+      }
+    } catch (e) {
+      console.warn('Could not refresh payment providers on mount:', e);
+    }
   });
 
-  let acceptedTerms = false;
-  let acceptedDigitalWaiver = false;
+  // ---------------------------------------------------------------- Server-side quote
+  // The server is the single source of truth for what gets charged.
 
-  $: hasPhysicalItems = $cart.some((i) => !i.is_digital);
-  $: hasDigitalItems = $cart.some((i) => i.is_digital);
-  $: isDigitalOnly = $cart.length > 0 && !hasPhysicalItems;
-
-  $: selectedRate = availableRates.find((r) => r.id === selectedShippingRateId);
-  $: shippingCostCents = hasPhysicalItems ? (selectedRate ? selectedRate.price_cents : 499) : 0;
-
-  $: taxRatePercent = store.tax_rate_percent || 19.0;
-  $: taxMode = store.tax_mode || 'kleingewerbe';
-  $: taxCents = taxMode === 'kleingewerbe'
-    ? 0
-    : taxMode === 'included'
-      ? Math.round($cartSubtotal - ($cartSubtotal / (1 + (taxRatePercent / 100))))
-      : Math.round($cartSubtotal * (taxRatePercent / 100));
-
-  $: grandTotalCents = taxMode === 'excluded'
-    ? $cartSubtotal + shippingCostCents + taxCents
-    : $cartSubtotal + shippingCostCents;
-
-  async function handleSubmitOrder() {
-    if ($cart.length === 0) {
-      errorMessage = 'Your cart is empty.';
-      return;
-    }
-
-    if (!acceptedTerms) {
-      errorMessage = 'Please accept the Terms and Conditions and acknowledge the Revocation Policy to place your order.';
-      return;
-    }
-
-    if (hasDigitalItems && !acceptedDigitalWaiver) {
-      errorMessage = 'Please confirm the immediate execution and revocation waiver for digital products to continue.';
-      return;
-    }
-
-    isSubmitting = true;
-    errorMessage = '';
-
-    const payload = {
-      customer_name: customerName,
-      customer_email: customerEmail,
+  function buildCheckoutRequest() {
+    return {
+      customer_name: customerName.trim(),
+      customer_email: customerEmail.trim(),
       shipping_address: {
-        full_name: customerName,
+        full_name: customerName.trim(),
         street_address: streetAddress,
         apartment_suite: apartmentSuite,
         city,
@@ -212,30 +241,211 @@
         postal_code: postalCode,
         country_code: countryCode
       },
-      shipping_rate_id: hasPhysicalItems ? (selectedShippingRateId || null) : null,
-      payment_provider: selectedProvider,
-      payment_token: `tok_mock_${Date.now()}`,
-      items: $cart.map((i) => ({
-        variant_id: i.variant_id,
-        quantity: i.quantity
-      }))
+      shipping_rate_id: hasPhysicalItems ? selectedShippingRateId || null : null,
+      coupon_code: appliedCoupon ? appliedCoupon.code : null,
+      items: $cart.map((i) => ({ variant_id: i.variant_id, quantity: i.quantity }))
     };
+  }
 
+  let quote = null;
+  let quoteError = '';
+  let isQuoting = false;
+  let quoteTimer;
+  let quoteSeq = 0;
+
+  $: quoteKey = JSON.stringify({
+    items: $cart.map((i) => [i.variant_id, i.quantity]),
+    country: countryCode,
+    rate: hasPhysicalItems ? selectedShippingRateId : null,
+    coupon: appliedCoupon ? appliedCoupon.code : null
+  });
+  $: if (browser && $cart.length > 0) scheduleQuote(quoteKey);
+
+  function scheduleQuote() {
+    clearTimeout(quoteTimer);
+    isQuoting = true;
+    quoteTimer = setTimeout(refreshQuote, 200);
+  }
+
+  async function refreshQuote() {
+    const seq = ++quoteSeq;
     try {
-      const res = await fetch('/api/v1/checkout', {
+      const res = await fetch('/api/v1/checkout/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(buildCheckoutRequest())
       });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(errText || 'Checkout transaction failed');
+      if (seq !== quoteSeq) return;
+      if (res.ok) {
+        quote = await res.json();
+        quoteError = '';
+      } else {
+        quote = null;
+        quoteError = await readError(res, 'Could not calculate your order total.');
       }
+    } catch (e) {
+      if (seq === quoteSeq) quoteError = 'Could not reach the shop server to calculate your total.';
+    } finally {
+      if (seq === quoteSeq) isQuoting = false;
+    }
+  }
 
-      const orderResult = await res.json();
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('rustwebshop_last_shipping', JSON.stringify({
+  onDestroy(() => clearTimeout(quoteTimer));
+
+  $: itemsSubtotalCents = quote ? quote.items_subtotal_cents : $cartSubtotal;
+  $: discountCents = quote ? quote.discount_cents : 0;
+  $: shippingCents = quote ? quote.shipping_cost_cents : 0;
+  $: taxCents = quote ? quote.tax_cents : 0;
+  $: totalCents = quote ? quote.total_cents : $cartSubtotal;
+  $: isFreeOrder = !!quote && quote.total_cents === 0;
+  $: taxRatePercent = store.tax_rate_percent || 19.0;
+  $: taxMode = store.tax_mode || 'kleingewerbe';
+  const formatEuro = (cents) => `${((cents || 0) / 100).toFixed(2)} €`;
+
+  // ---------------------------------------------------------------- Stripe (on-site Payment Element)
+
+  let stripe = null;
+  let stripeElements = null;
+  let stripeLoadError = '';
+  let stripeLoadingKey = null;
+  let paymentElementError = '';
+
+  $: if (browser && stripeKey && !stripeHosted && stripeLoadingKey !== stripeKey) initStripe(stripeKey);
+
+  async function initStripe(key) {
+    stripeLoadingKey = key;
+    stripe = null;
+    stripeLoadError = '';
+    try {
+      stripe = await loadStripe(key);
+      if (!stripe) stripeLoadError = 'Stripe.js could not be loaded.';
+    } catch (e) {
+      stripeLoadError = e.message || 'Stripe.js could not be loaded.';
+    }
+  }
+
+  // Deferred-intent mode: Elements renders before a PaymentIntent exists; Stripe needs a positive amount.
+  $: stripeAmount = Math.max(totalCents || 0, 50);
+
+  const stripeAppearance = {
+    theme: 'night',
+    variables: {
+      colorPrimary: '#ea580c',
+      colorBackground: '#020617',
+      colorText: '#f8fafc',
+      colorDanger: '#f43f5e',
+      fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+      borderRadius: '12px'
+    }
+  };
+
+  // ---------------------------------------------------------------- Validation & submit
+
+  function focusField(id) {
+    const el = document.getElementById(id);
+    if (el) {
+      el.focus();
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
+  /** First problem preventing the order, with the id of the field to focus (no side effects). */
+  function formProblem() {
+    if ($cart.length === 0) return ['Your cart is empty.'];
+    if (!customerName.trim()) return ['Please enter your full name in Customer Information.', 'checkout-name'];
+    if (!/^\S+@\S+\.\S+$/.test(customerEmail.trim())) return ['Please enter a valid email address in Customer Information.', 'checkout-email'];
+    if (hasPhysicalItems && !streetAddress.trim()) return ['Please enter your street address for shipping.', 'checkout-street'];
+    if (hasPhysicalItems && (!postalCode.trim() || !city.trim())) return ['Please enter your postal code and city for delivery.', 'checkout-postal'];
+    if (hasPhysicalItems && availableRates.length > 0 && !selectedShippingRateId) return ['Please select a shipping option.'];
+    if (!acceptedTerms) return ['Please accept the Terms and Conditions and acknowledge the Revocation Policy to place your order.'];
+    if (hasDigitalItems && !acceptedDigitalWaiver) return ['Please confirm the immediate execution and revocation waiver for digital products to continue.'];
+    if (quoteError) return [quoteError];
+    if (!quote || isQuoting) return ['Your order total is still being calculated. Please try again in a moment.'];
+    return null;
+  }
+
+  /** Synchronous so wallet sheets (Apple Pay / Google Pay / PayPal) still open within the click gesture. */
+  function validateForm() {
+    const problem = formProblem();
+    if (!problem) return '';
+    if (problem[1]) focusField(problem[1]);
+    return problem[0];
+  }
+
+  // Express buttons only appear once everything (incl. the legal checkboxes) is filled in — the
+  // wallet sheet then completes a legally binding order (Button-Lösung). Arguments list the dependencies.
+  $: expressBlocker = (customerName, customerEmail, streetAddress, postalCode, city, selectedShippingRateId,
+    availableRates, acceptedTerms, acceptedDigitalWaiver, quote, quoteError, isQuoting, $cart, formProblem());
+  let expressElements = null;
+  let expressAvailable = null; // null = unknown, false = no wallet on this device
+
+  function onExpressReady(event) {
+    const available = event.availablePaymentMethods;
+    expressAvailable = !!available && Object.values(available).some(Boolean);
+  }
+
+  function onExpressClick(event) {
+    const problem = validateForm();
+    if (problem) {
+      showError(problem);
+      return; // not resolving keeps the wallet sheet closed
+    }
+    errorMessage = '';
+    event.resolve({ emailRequired: false });
+  }
+
+  async function onExpressConfirm(event) {
+    isSubmitting = true;
+    errorMessage = '';
+    try {
+      await payWithStripe(expressElements, buildCheckoutRequest());
+    } catch (e) {
+      event.paymentFailed?.({ reason: 'fail' });
+      showError(e.message || 'The payment was not completed.');
+    }
+  }
+
+  /** Server creates the PaymentIntent for the server-computed total; Stripe.js confirms it. */
+  async function payWithStripe(elements, request) {
+    // Must be the first await after the click: it validates the form and opens wallet sheets.
+    const { error: submitError } = await elements.submit();
+    if (submitError) throw new Error(submitError.message);
+
+    const intent = await postJson('/api/v1/checkout/stripe/intent', request, 'Could not start the payment.');
+    const { error, paymentIntent } = await stripe.confirmPayment({
+      elements,
+      clientSecret: intent.client_secret,
+      confirmParams: {
+        return_url: `${window.location.origin}/checkout/complete`,
+        payment_method_data: {
+          billing_details: { name: request.customer_name, email: request.customer_email }
+        }
+      },
+      redirect: 'if_required'
+    });
+    if (error) throw new Error(error.message || 'The payment was not authorized.');
+
+    finishOrder(
+      await postJson(
+        '/api/v1/checkout/stripe/complete',
+        { payment_intent_id: paymentIntent?.id || intent.payment_intent_id },
+        'Your payment was received but the order could not be confirmed. Please contact us.'
+      )
+    );
+  }
+
+  function showError(message) {
+    errorMessage = message;
+    isSubmitting = false;
+    const el = document.getElementById('payment-section');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  function finishOrder(order) {
+    try {
+      localStorage.setItem(
+        'rustwebshop_last_shipping',
+        JSON.stringify({
           full_name: customerName,
           email: customerEmail,
           street_address: streetAddress,
@@ -244,20 +454,164 @@
           state_province: stateProvince,
           postal_code: postalCode,
           country_code: countryCode
-        }));
-      }
-      cart.clear();
-      goto(`/order-success/${orderResult.order_number}`);
-    } catch (e) {
-      errorMessage = e.message || 'An error occurred during order processing.';
-    } finally {
-      isSubmitting = false;
+        })
+      );
+    } catch (_) {}
+    cart.clear();
+    goto(`/order-success/${encodeURIComponent(order.order_number)}?token=${encodeURIComponent(order.access_token || "")}`);
+  }
+
+  async function postJson(url, body, fallbackError) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) throw new Error(await readError(res, fallbackError));
+    return res.json();
+  }
+
+  async function handleSubmitOrder() {
+    const validationError = validateForm();
+    if (validationError) {
+      showError(validationError);
+      return;
     }
+    errorMessage = '';
+    isSubmitting = true;
+    const request = buildCheckoutRequest();
+
+    try {
+      if (isFreeOrder) {
+        finishOrder(await postJson('/api/v1/checkout/free', request, 'Order could not be placed.'));
+        return;
+      }
+
+      if (selectedProvider === 'stripe' && stripeHosted) {
+        const session = await postJson(
+          '/api/v1/checkout/stripe/session',
+          { ...request, return_origin: window.location.origin },
+          'Could not start the Stripe payment page.'
+        );
+        if (!session.url) throw new Error('No payment page URL received from Stripe.');
+        window.location.href = session.url;
+        return;
+      }
+
+      if (selectedProvider === 'stripe') {
+        if (!stripe || !stripeElements) throw new Error('The payment form is still loading. Please try again in a moment.');
+        await payWithStripe(stripeElements, request);
+        return;
+      }
+
+      throw new Error('Please choose a payment method.');
+    } catch (e) {
+      showError(e.message || 'An error occurred during order processing.');
+    }
+  }
+
+  // ---------------------------------------------------------------- PayPal Smart Buttons
+
+  let paypalSdkPromise = null;
+  let paypalSdkError = '';
+
+  function loadPaypalSdk(provider) {
+    if (window.paypal) return Promise.resolve(window.paypal);
+    if (paypalSdkPromise) return paypalSdkPromise;
+    const params = new URLSearchParams({
+      'client-id': provider.public_client_id,
+      currency: 'EUR',
+      intent: 'capture',
+      components: 'buttons'
+    });
+    const disabled = [];
+    if (stripeProvider) disabled.push('card'); // cards are handled by Stripe
+    if (provider.config_data?.allow_pay_later === false) disabled.push('paylater');
+    if (disabled.length) params.set('disable-funding', disabled.join(','));
+
+    paypalSdkPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = `https://www.paypal.com/sdk/js?${params}`;
+      script.async = true;
+      script.onload = () => (window.paypal ? resolve(window.paypal) : reject(new Error('PayPal SDK unavailable')));
+      script.onerror = () => {
+        paypalSdkPromise = null;
+        reject(new Error('PayPal could not be loaded. Please check your connection or ad blocker.'));
+      };
+      document.head.appendChild(script);
+    });
+    return paypalSdkPromise;
+  }
+
+  /** Svelte action rendering the PayPal buttons into the container while PayPal is selected. */
+  function paypalButtons(node, provider) {
+    let buttons = null;
+    let destroyed = false;
+    paypalSdkError = '';
+
+    loadPaypalSdk(provider)
+      .then((paypal) => {
+        if (destroyed) return;
+        buttons = paypal.Buttons({
+          style: { layout: 'vertical', color: 'gold', shape: 'rect', label: 'paypal', height: 45 },
+          onClick: (_data, actions) => {
+            const validationError = validateForm();
+            if (validationError) {
+              showError(validationError);
+              return actions.reject();
+            }
+            errorMessage = '';
+            return actions.resolve();
+          },
+          createOrder: async () => {
+            try {
+              const order = await postJson('/api/v1/checkout/paypal/order', buildCheckoutRequest(), 'Could not start the PayPal payment.');
+              return order.id;
+            } catch (e) {
+              showError(e.message);
+              throw e;
+            }
+          },
+          onApprove: async (data) => {
+            isSubmitting = true;
+            try {
+              finishOrder(
+                await postJson(
+                  '/api/v1/checkout/paypal/capture',
+                  { order_id: data.orderID },
+                  'Your PayPal payment could not be confirmed. Please contact us.'
+                )
+              );
+            } catch (e) {
+              showError(e.message);
+            }
+          },
+          onCancel: () => {
+            errorMessage = 'The PayPal payment was cancelled. You can try again or choose another payment method.';
+          },
+          onError: (err) => {
+            console.error('PayPal error:', err);
+            if (!errorMessage) showError('PayPal reported an error. Please try again or choose another payment method.');
+          }
+        });
+        if (buttons.isEligible()) buttons.render(node);
+        else paypalSdkError = 'PayPal is not available for this browser or region.';
+      })
+      .catch((e) => {
+        paypalSdkError = e.message;
+      });
+
+    return {
+      destroy() {
+        destroyed = true;
+        if (buttons) buttons.close().catch(() => {});
+      }
+    };
   }
 </script>
 
 <svelte:head>
-  <title>Checkout | RustCraft Gear</title>
+  <title>Checkout | {store.store_name || 'Shop'}</title>
 </svelte:head>
 
 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
@@ -268,12 +622,6 @@
     <h1 class="text-3xl font-extrabold text-white tracking-tight">Complete Your Order</h1>
   </div>
 
-  {#if errorMessage}
-    <div class="max-w-4xl mx-auto mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm flex items-center gap-3">
-      <AlertCircle size={20} class="text-rose-400 flex-shrink-0" />
-      <span>{errorMessage}</span>
-    </div>
-  {/if}
 
   {#if $cart.length === 0}
     <div class="text-center py-20 bg-slate-900/40 rounded-3xl border border-slate-800">
@@ -457,7 +805,7 @@
           <!-- Shipping Provider / Tier selection -->
           {#if hasPhysicalItems}
             <div class="mt-6 pt-5 border-t border-slate-800">
-              <label class="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">Available Shipping Options:</label>
+              <p class="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">Available Shipping Options:</p>
               {#if isFetchingRates}
                 <div class="text-xs text-slate-400 py-2">Recalculating zone rates...</div>
               {:else if availableRates.length === 0}
@@ -501,180 +849,117 @@
           {/if}
         </div>
 
-        <!-- 3. Payment Method Choice -->
-        <div class="p-6 rounded-2xl bg-slate-900/60 border border-slate-800">
+        <!-- 3. Payment -->
+        <div id="payment-section" class="p-6 rounded-2xl bg-slate-900/60 border border-slate-800">
           <h2 class="text-base font-bold text-white mb-4 flex items-center gap-2">
             <span class="w-6 h-6 rounded-full bg-orange-600 text-white text-xs font-bold flex items-center justify-center">3</span>
-            Select Payment Provider
+            Payment
           </h2>
 
-          <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            <button
-              type="button"
-              on:click={() => selectedProvider = 'stripe'}
-              class="p-4 rounded-xl border text-center transition-all {selectedProvider === 'stripe' ? 'bg-orange-600/15 border-orange-500 text-white ring-1 ring-orange-500' : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'}"
-            >
-              <CreditCard size={20} class="mx-auto mb-2 text-indigo-400" />
-              <div class="text-xs font-bold">Stripe Card</div>
-              <div class="text-[10px] text-slate-400 mt-0.5">Visa / MC / Amex</div>
-            </button>
-
-            <button
-              type="button"
-              on:click={() => selectedProvider = 'paypal'}
-              class="p-4 rounded-xl border text-center transition-all {selectedProvider === 'paypal' ? 'bg-orange-600/15 border-orange-500 text-white ring-1 ring-orange-500' : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'}"
-            >
-              <div class="text-xl mb-1 text-sky-400 font-black">P</div>
-              <div class="text-xs font-bold">PayPal</div>
-              <div class="text-[10px] text-slate-400 mt-0.5">Express & PayLater</div>
-            </button>
-
-            <button
-              type="button"
-              on:click={() => selectedProvider = 'apple_pay'}
-              class="p-4 rounded-xl border text-center transition-all {selectedProvider === 'apple_pay' ? 'bg-orange-600/15 border-orange-500 text-white ring-1 ring-orange-500' : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'}"
-            >
-              <div class="text-lg mb-1">🍎</div>
-              <div class="text-xs font-bold">Apple Pay</div>
-              <div class="text-[10px] text-slate-400 mt-0.5">Touch / Face ID</div>
-            </button>
-
-            <button
-              type="button"
-              on:click={() => selectedProvider = 'google_pay'}
-              class="p-4 rounded-xl border text-center transition-all {selectedProvider === 'google_pay' ? 'bg-orange-600/15 border-orange-500 text-white ring-1 ring-orange-500' : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'}"
-            >
-              <div class="text-lg mb-1 font-bold text-amber-400">G</div>
-              <div class="text-xs font-bold">Google Pay</div>
-              <div class="text-[10px] text-slate-400 mt-0.5">Instant Checkout</div>
-            </button>
-
-            <button
-              type="button"
-              on:click={() => selectedProvider = 'amazon_pay'}
-              class="p-4 rounded-xl border text-center transition-all {selectedProvider === 'amazon_pay' ? 'bg-orange-600/15 border-orange-500 text-white ring-1 ring-orange-500' : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'}"
-            >
-              <div class="text-lg mb-1 font-bold text-amber-500">a</div>
-              <div class="text-xs font-bold">Amazon Pay</div>
-              <div class="text-[10px] text-slate-400 mt-0.5">Amazon Account</div>
-            </button>
-          </div>
-
-          <!-- Interactive Provider Panels (Inspired by svelte_shop-main) -->
-          {#if selectedProvider === 'stripe'}
-            <div class="mt-5 p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3.5 animate-in fade-in duration-200">
-              <div class="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                <span class="text-xs font-bold text-white flex items-center gap-1.5">
-                  <CreditCard size={14} class="text-orange-400" />
-                  <span>Encrypted Credit / Debit Card</span>
-                </span>
-                <button
-                  type="button"
-                  on:click={autofillTestCard}
-                  class="text-[10px] font-bold text-orange-400 hover:text-orange-300 bg-orange-600/15 hover:bg-orange-600/25 px-2 py-0.5 rounded border border-orange-500/30 transition-colors"
-                >
-                  ⚡ Fill Test Card
-                </button>
-              </div>
-
-              <div>
-                <label for="stripe-card-num" class="block text-[11px] font-semibold text-slate-400 mb-1">Card Number</label>
-                <div class="relative">
-                  <input
-                    id="stripe-card-num"
-                    name="cc-number"
-                    type="text"
-                    autocomplete="cc-number"
-                    bind:value={cardNumber}
-                    on:input={handleCardInput}
-                    maxlength="19"
-                    placeholder="4242 4242 4242 4242"
-                    class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-orange-500 pr-16"
-                  />
-                  <span class="absolute right-2.5 top-1/2 -translate-y-1/2 px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-mono font-bold text-indigo-400">
-                    {cardBrand}
-                  </span>
-                </div>
-              </div>
-
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label for="stripe-card-exp" class="block text-[11px] font-semibold text-slate-400 mb-1">Expiry (MM / YY)</label>
-                  <input
-                    id="stripe-card-exp"
-                    name="cc-exp"
-                    type="text"
-                    autocomplete="cc-exp"
-                    bind:value={cardExpiry}
-                    maxlength="5"
-                    placeholder="MM/YY"
-                    class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-orange-500"
-                  />
-                </div>
-                <div>
-                  <label for="stripe-card-cvc" class="block text-[11px] font-semibold text-slate-400 mb-1">CVC / CVV</label>
-                  <input
-                    id="stripe-card-cvc"
-                    name="cc-csc"
-                    type="text"
-                    autocomplete="cc-csc"
-                    bind:value={cardCvc}
-                    maxlength="4"
-                    placeholder="CVC"
-                    class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-orange-500"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label for="stripe-card-name" class="block text-[11px] font-semibold text-slate-400 mb-1">Cardholder Name</label>
-                <input
-                  id="stripe-card-name"
-                  name="cc-name"
-                  type="text"
-                  autocomplete="cc-name"
-                  bind:value={cardholderName}
-                  placeholder="Full name on card"
-                  class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"
-                />
-              </div>
+          {#if isFreeOrder}
+            <div class="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-200 text-xs flex items-center gap-3">
+              <Gift size={18} class="text-emerald-400 flex-shrink-0" />
+              <span>Your order total is <strong>0.00 €</strong> — no payment is required.</span>
             </div>
-          {:else if selectedProvider === 'paypal'}
-            <div class="mt-5 p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-center justify-between animate-in fade-in duration-200">
-              <div class="flex items-center gap-2">
-                <span class="font-black text-sky-400 text-sm">PayPal</span>
-                <span class="text-[11px] text-slate-400">You will be securely redirected to PayPal to authorize payment.</span>
-              </div>
-              <span class="px-2 py-0.5 rounded bg-sky-500/15 text-sky-400 text-[10px] font-bold">Express Active</span>
+          {:else if enabledProviders.length === 0}
+            <div class="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs">
+              No payment methods are currently available. Please contact store support.
             </div>
           {:else}
-            <div class="mt-5 p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-center justify-between animate-in fade-in duration-200">
-              <div class="flex items-center gap-2">
-                <span class="font-bold text-white capitalize">{selectedProvider.replace('_', ' ')}</span>
-                <span class="text-[11px] text-slate-400">One-touch biometric authorization ready on your device.</span>
+            {#if enabledProviders.length > 1}
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5" role="radiogroup" aria-label="Payment method">
+                {#each enabledProviders as p}
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={selectedProvider === p.provider}
+                    on:click={() => { selectedProvider = p.provider; errorMessage = ''; }}
+                    class="p-4 rounded-xl border text-left transition-all flex items-center gap-3 {selectedProvider === p.provider ? 'bg-orange-600/15 border-orange-500 text-white ring-1 ring-orange-500' : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'}"
+                  >
+                    {#if p.provider === 'stripe'}
+                      <CreditCard size={22} class="text-orange-400 flex-shrink-0" />
+                      <div class="min-w-0">
+                        <div class="text-xs font-bold">{p.display_name || 'Credit / Debit Card'}</div>
+                        <div class="text-[10px] text-slate-400 mt-0.5 truncate">{stripeMethodLabels.join(' · ')}</div>
+                      </div>
+                    {:else}
+                      <span class="w-[22px] text-center text-lg font-black text-sky-400 flex-shrink-0">P</span>
+                      <div class="min-w-0">
+                        <div class="text-xs font-bold">{p.display_name || 'PayPal'}</div>
+                        <div class="text-[10px] text-slate-400 mt-0.5">{p.config_data?.allow_pay_later === false ? 'PayPal account' : 'PayPal · Pay Later'}</div>
+                      </div>
+                    {/if}
+                  </button>
+                {/each}
               </div>
-              <span class="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-bold">Ready</span>
-            </div>
-          {/if}
+            {/if}
 
-          <div class="mt-4 p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-400 flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <ShieldCheck size={16} class="text-emerald-400" />
-              <span>Sandbox Test Mode Active &bull; No real charge will occur.</span>
-            </div>
-            <span class="text-slate-500 uppercase font-mono text-[10px]">Test Gateway</span>
-          </div>
+            {#if selectedProvider === 'stripe'}
+              {#if !stripeKey}
+                <div class="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs">
+                  Card payment is not fully configured yet (missing Stripe publishable key). Please choose another payment method or contact store support.
+                </div>
+              {:else if stripeHosted}
+                <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-start gap-3">
+                  <ExternalLink size={16} class="text-orange-400 flex-shrink-0 mt-0.5" />
+                  <span>After clicking <strong class="text-white">"Order with Obligation to Pay"</strong> you will be redirected to Stripe's secure payment page to complete your payment ({stripeMethodLabels.join(', ')}).</span>
+                </div>
+              {:else if stripeLoadError}
+                <div class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">{stripeLoadError}</div>
+              {:else if !stripe}
+                <div class="p-8 rounded-xl bg-slate-950 border border-slate-800 flex flex-col items-center justify-center gap-3 text-center">
+                  <Loader2 size={24} class="animate-spin text-orange-500" />
+                  <span class="text-xs text-slate-400">Loading secure payment form…</span>
+                </div>
+              {:else}
+                <div class="p-4 rounded-xl bg-slate-950 border border-slate-800">
+                  <Elements
+                    {stripe}
+                    mode="payment"
+                    currency="eur"
+                    amount={stripeAmount}
+                    paymentMethodTypes={stripePaymentMethodTypes}
+                    appearance={stripeAppearance}
+                    bind:elements={stripeElements}
+                  >
+                    <PaymentElement
+                      layout={{ type: 'tabs', defaultCollapsed: false }}
+                      paymentMethodOrder={stripePaymentMethodTypes}
+                      wallets={paymentElementWallets}
+                      onloaderror={(e) => (paymentElementError = e.error?.message || 'The payment form could not be loaded.')}
+                    />
+                  </Elements>
+                  {#if paymentElementError}
+                    <p class="mt-3 text-[11px] text-rose-300">{paymentElementError}</p>
+                  {/if}
+                </div>
+              {/if}
+              <p class="mt-3 text-[11px] text-slate-500 flex items-center gap-1.5">
+                <Lock size={12} class="text-emerald-400" /> Card details are entered in Stripe's secure form and never reach our servers.
+              </p>
+            {:else if selectedProvider === 'paypal'}
+              <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300">
+                Pay securely with your PayPal account. Use the PayPal button in the order summary to place your order.
+              </div>
+            {/if}
+
+            {#if (selectedProvider === 'stripe' && stripeTestMode) || (selectedProvider === 'paypal' && paypalProvider?.is_sandbox)}
+              <div class="mt-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-300 flex items-center gap-2">
+                <ShieldCheck size={14} class="text-amber-400" />
+                <span>Test mode — no real money is charged.{selectedProvider === 'stripe' ? ' Use card 4242 4242 4242 4242, any future date and any CVC.' : ''}</span>
+              </div>
+            {/if}
+          {/if}
         </div>
       </div>
 
-      <!-- Order Summary (4 Cols) -->
+      <!-- Order Summary -->
       <div class="lg:col-span-5">
         <div class="sticky top-28 p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-6">
-          <h3 class="text-base font-bold text-white tracking-tight border-b border-slate-800 pb-3">
-            Order Summary ({$cartCount} { $cartCount === 1 ? 'item' : 'items' })
-          </h3>
+          <h2 class="text-base font-bold text-white tracking-tight border-b border-slate-800 pb-3">
+            Order Summary ({$cartCount} {$cartCount === 1 ? 'item' : 'items'})
+          </h2>
 
-          <!-- Items list -->
           <div class="space-y-3 max-h-60 overflow-y-auto pr-1 divide-y divide-slate-800/60">
             {#each $cart as item}
               <div class="pt-3 first:pt-0 flex items-center justify-between text-xs">
@@ -682,23 +967,72 @@
                   <div class="font-bold text-white truncate">{item.product_title}</div>
                   <div class="text-slate-400 truncate">{item.variant_title} &times; {item.quantity}</div>
                 </div>
-                <div class="font-mono font-bold text-white flex-shrink-0">
-                  {((item.price_cents * item.quantity) / 100).toFixed(2)} €
-                </div>
+                <div class="font-mono font-bold text-white flex-shrink-0">{formatEuro(item.price_cents * item.quantity)}</div>
               </div>
             {/each}
           </div>
 
-          <!-- Price Calculations -->
-          <div class="border-t border-slate-800 pt-4 space-y-2 text-xs">
+          <!-- Promo Code -->
+          <div class="border-t border-slate-800 pt-4">
+            <label for="checkout-promo-input" class="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center gap-1.5">
+              <Tag size={13} class="text-orange-400" />
+              <span>Promo / Discount Code</span>
+            </label>
+            {#if appliedCoupon}
+              <div class="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between">
+                <div class="text-xs">
+                  <span class="font-mono font-bold text-emerald-400 uppercase">{appliedCoupon.code}</span>
+                  <span class="text-[11px] text-slate-400 ml-1.5">({appliedCoupon.message})</span>
+                </div>
+                <button
+                  type="button"
+                  on:click={removeCoupon}
+                  class="text-[11px] text-slate-400 hover:text-rose-400 font-semibold px-2 py-0.5 rounded hover:bg-rose-500/10 transition-colors"
+                >
+                  Remove
+                </button>
+              </div>
+            {:else}
+              <div class="flex items-center gap-2">
+                <input
+                  id="checkout-promo-input"
+                  type="text"
+                  bind:value={couponInput}
+                  on:keydown={(e) => e.key === 'Enter' && applyCoupon()}
+                  placeholder="Enter code (e.g. SUMMER10)"
+                  class="flex-1 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono uppercase text-xs focus:outline-none focus:border-orange-500"
+                />
+                <button
+                  type="button"
+                  on:click={applyCoupon}
+                  disabled={isApplyingCoupon || !couponInput.trim()}
+                  class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-orange-600 disabled:opacity-40 text-white font-bold text-xs transition-colors"
+                >
+                  {isApplyingCoupon ? '...' : 'Apply'}
+                </button>
+              </div>
+              {#if couponError}
+                <p class="text-[11px] text-rose-400 mt-1">{couponError}</p>
+              {/if}
+            {/if}
+          </div>
+
+          <!-- Totals (server-calculated) -->
+          <div class="border-t border-slate-800 pt-4 space-y-2 text-xs" aria-live="polite">
             <div class="flex justify-between text-slate-400">
               <span>Subtotal</span>
-              <span class="font-mono text-slate-200">{($cartSubtotal / 100).toFixed(2)} €</span>
+              <span class="font-mono text-slate-200">{formatEuro(itemsSubtotalCents)}</span>
             </div>
+            {#if appliedCoupon && discountCents > 0}
+              <div class="flex justify-between text-emerald-400 font-semibold">
+                <span>Discount ({appliedCoupon.code})</span>
+                <span class="font-mono">{appliedCoupon.discount_type === 'free_shipping' ? 'Free Shipping' : `-${formatEuro(discountCents)}`}</span>
+              </div>
+            {/if}
             <div class="flex justify-between text-slate-400">
               <span>{hasPhysicalItems ? `Shipping (${countryCode})` : 'Digital Delivery'}</span>
-              <span class="font-mono {hasPhysicalItems ? 'text-slate-200' : 'text-emerald-400 font-bold'}">
-                {hasPhysicalItems ? `${(shippingCostCents / 100).toFixed(2)} €` : '0.00 € (Free)'}
+              <span class="font-mono {shippingCents > 0 ? 'text-slate-200' : 'text-emerald-400 font-bold'}">
+                {shippingCents === 0 ? '0.00 € (Free)' : formatEuro(shippingCents)}
               </span>
             </div>
             {#if taxMode === 'kleingewerbe'}
@@ -706,22 +1040,23 @@
                 <span>VAT (§ 19 UStG)</span>
                 <span class="font-mono text-slate-400">0.00 €</span>
               </div>
-              <p class="text-[10px] text-slate-500 italic">According to § 19 UStG, no value-added tax is charged (small business regulation).</p>
-            {:else if taxMode === 'included'}
-              <div class="flex justify-between text-slate-400">
-                <span>Included VAT ({taxRatePercent}%)</span>
-                <span class="font-mono text-slate-200">{(taxCents / 100).toFixed(2)} €</span>
-              </div>
+              <p class="text-[10px] text-slate-500 italic">{store.tax_notice || 'According to § 19 UStG, no value-added tax is charged (small business regulation).'}</p>
             {:else}
               <div class="flex justify-between text-slate-400">
-                <span>VAT ({taxRatePercent}%)</span>
-                <span class="font-mono text-slate-200">{(taxCents / 100).toFixed(2)} €</span>
+                <span>{taxMode === 'included' ? 'Included VAT' : 'VAT'} ({taxRatePercent}%)</span>
+                <span class="font-mono text-slate-200">{formatEuro(taxCents)}</span>
               </div>
             {/if}
-            <div class="border-t border-slate-800 pt-3 flex justify-between text-base font-bold text-white">
+            <div class="border-t border-slate-800 pt-3 flex justify-between items-center text-base font-bold text-white">
               <span>Total</span>
-              <span class="font-mono text-orange-400">{(grandTotalCents / 100).toFixed(2)} €</span>
+              <span class="font-mono text-orange-400 flex items-center gap-2">
+                {#if isQuoting}<Loader2 size={14} class="animate-spin text-slate-500" />{/if}
+                {formatEuro(totalCents)}
+              </span>
             </div>
+            {#if quoteError}
+              <p class="text-[11px] text-rose-400">{quoteError}</p>
+            {/if}
           </div>
 
           <!-- Statutory German & EU Legal Checkboxes -->
@@ -753,24 +1088,93 @@
             {/if}
           </div>
 
+          {#if errorMessage}
+            <div role="alert" class="p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-start gap-2.5">
+              <AlertCircle size={16} class="text-rose-400 flex-shrink-0 mt-0.5" />
+              <div class="space-y-0.5">
+                <div class="font-bold text-rose-200">Unable to Complete Payment</div>
+                <div class="text-[11px] leading-relaxed text-rose-300">{errorMessage}</div>
+              </div>
+            </div>
+          {/if}
+
+          <!-- Express wallets (Apple Pay, Google Pay, Amazon Pay, PayPal, Link, Klarna) via Stripe -->
+          {#if selectedProvider === 'stripe' && !stripeHosted && stripe && showExpressCheckout && !isFreeOrder}
+            <div class="space-y-2">
+              {#if expressBlocker}
+                <p class="text-[11px] text-slate-500 text-center">
+                  Express checkout ({stripeMethodLabels.filter((l) => l !== 'Card').join(', ')}) becomes available once your details are complete and the terms are accepted.
+                </p>
+              {:else}
+                {#if expressAvailable !== false}
+                  <p class="text-xs font-bold text-white text-center">Order with Obligation to Pay ({formatEuro(totalCents)}) via express checkout:</p>
+                {/if}
+                <Elements
+                  {stripe}
+                  mode="payment"
+                  currency="eur"
+                  amount={stripeAmount}
+                  paymentMethodTypes={stripePaymentMethodTypes}
+                  appearance={stripeAppearance}
+                  bind:elements={expressElements}
+                >
+                  <ExpressCheckout
+                    paymentMethods={stripeExpressMethods}
+                    buttonType={{ applePay: 'order', googlePay: 'order' }}
+                    buttonHeight={44}
+                    onready={onExpressReady}
+                    onclick={onExpressClick}
+                    onconfirm={onExpressConfirm}
+                    oncancel={() => (isSubmitting = false)}
+                  />
+                </Elements>
+                {#if expressAvailable === false}
+                  <p class="text-[10px] text-slate-500 text-center">
+                    No express wallet is available in this browser. Apple Pay and Google Pay need HTTPS, a supported device and a saved card.
+                  </p>
+                {:else}
+                  <div class="flex items-center gap-3 text-[10px] text-slate-500 uppercase tracking-wider">
+                    <span class="flex-1 h-px bg-slate-800"></span> or pay with the form <span class="flex-1 h-px bg-slate-800"></span>
+                  </div>
+                {/if}
+              {/if}
+            </div>
+          {/if}
+
           <!-- Button-Lösung gem. § 312j Abs. 3 BGB -->
-          <button
-            id="submit-order-btn"
-            on:click={handleSubmitOrder}
-            disabled={isSubmitting || !acceptedTerms || (hasDigitalItems && !acceptedDigitalWaiver)}
-            class="w-full py-4 px-6 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-sm shadow-xl shadow-orange-600/30 transition-all flex items-center justify-center gap-2 hover:scale-[1.01] disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {#if isSubmitting}
-              <div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-              <span>Locking Inventory & Processing...</span>
-            {:else}
-              <span>Order with Obligation to Pay ({(grandTotalCents / 100).toFixed(2)} €)</span>
-              <ArrowRight size={16} />
-            {/if}
-          </button>
+          {#if selectedProvider === 'paypal' && !isFreeOrder && paypalProvider}
+            <div class="space-y-2">
+              <p class="text-xs font-bold text-white text-center">Order with Obligation to Pay ({formatEuro(totalCents)}) via PayPal:</p>
+              {#if isSubmitting}
+                <div class="py-4 flex items-center justify-center gap-2 text-xs text-slate-300">
+                  <Loader2 size={16} class="animate-spin text-orange-500" /> Confirming your PayPal payment…
+                </div>
+              {/if}
+              <div class:hidden={isSubmitting} class="rounded-xl overflow-hidden bg-white/95 p-2" use:paypalButtons={paypalProvider}></div>
+              {#if paypalSdkError}
+                <p class="text-[11px] text-rose-400 text-center">{paypalSdkError}</p>
+              {/if}
+            </div>
+          {:else}
+            <button
+              id="submit-order-btn"
+              type="button"
+              on:click={handleSubmitOrder}
+              disabled={isSubmitting || !acceptedTerms || (hasDigitalItems && !acceptedDigitalWaiver) || (!isFreeOrder && enabledProviders.length === 0)}
+              class="w-full py-4 px-6 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-sm shadow-xl shadow-orange-600/30 transition-all flex items-center justify-center gap-2 hover:scale-[1.01] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {#if isSubmitting}
+                <div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                <span>Processing payment…</span>
+              {:else}
+                <span>Order with Obligation to Pay ({formatEuro(totalCents)})</span>
+                <ArrowRight size={16} />
+              {/if}
+            </button>
+          {/if}
 
           <p class="text-[11px] text-slate-400 text-center leading-relaxed">
-            By clicking "Order with Obligation to Pay", you conclude a legally binding purchase contract. Payment is processed securely via {selectedProvider}.
+            By placing your order you conclude a legally binding purchase contract.
           </p>
         </div>
       </div>

@@ -59,7 +59,7 @@
 
     try {
       const res = await fetch(`/api/v1/admin/orders/${order.id}`, {
-        headers: { 'X-Dev-Mode': 'true' }
+        headers: {}
       });
       if (res.ok) {
         const result = await res.json();
@@ -86,7 +86,7 @@
     try {
       const res = await fetch(`/api/v1/admin/orders/${selectedOrder.id}/status`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'X-Dev-Mode': 'true' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           order_status: statusChangeTarget,
           tracking_number: statusChangeTarget === 'shipped' ? trackingNumberInput.trim() : selectedOrder.tracking_number
@@ -116,13 +116,18 @@
     try {
       const res = await fetch(`/api/v1/admin/orders/${selectedOrder.id}/refund`, {
         method: 'POST',
-        headers: { 'X-Dev-Mode': 'true' }
+        headers: {}
       });
       if (res.ok) {
+        const result = await res.json();
         selectedOrder.payment_status = 'refunded';
         orders = orders.map((o) => (o.id === selectedOrder.id ? { ...o, payment_status: 'refunded' } : o));
-        modalActionMessage = 'Payment marked as refunded.';
-        setTimeout(() => modalActionMessage = '', 3500);
+        modalActionMessage = result.provider_refunded
+          ? `Refund issued at ${selectedOrder.payment_provider === 'paypal' ? 'PayPal' : 'Stripe'}.`
+          : 'Marked as refunded (no provider payment to refund — refund manually if money was received).';
+        setTimeout(() => modalActionMessage = '', 6000);
+      } else {
+        modalActionError = (await res.text()) || 'Failed to refund order.';
       }
     } catch (e) {
       modalActionError = 'Failed to refund order.';
@@ -134,7 +139,7 @@
     try {
       const res = await fetch(`/api/v1/admin/orders/${selectedOrder.id}/cancel`, {
         method: 'POST',
-        headers: { 'X-Dev-Mode': 'true' }
+        headers: {}
       });
       if (res.ok) {
         selectedOrder.order_status = 'cancelled';

@@ -1,6 +1,9 @@
 <script>
   import { onMount, onDestroy } from "svelte";
   import ProductCard from "$lib/components/ProductCard.svelte";
+  import Seo from "$lib/components/Seo.svelte";
+  import { page } from "$app/stores";
+  import { absoluteUrl } from "$lib/seo.js";
   import {
     ArrowRight,
     ChevronLeft,
@@ -15,6 +18,42 @@
   $: currentCategory = data.currentCategory || "";
   $: currentSubcategory = data.currentSubcategory || "";
   $: currentSearch = data.currentSearch || "";
+
+  // --- SEO ---
+  $: store = data.store || {};
+  $: storeName = store.store_name || "Shop";
+  $: origin = $page.url.origin;
+  $: seoTitle = currentCategory
+    ? `${currentSubcategory || currentCategory} | ${storeName}`
+    : currentSearch
+      ? `Search: ${currentSearch} | ${storeName}`
+      : store.store_subtitle ? `${storeName} | ${store.store_subtitle}` : storeName;
+  $: seoDescription = currentCategory
+    ? (matchedCategoryNode?.description || `Shop ${currentSubcategory || currentCategory} at ${storeName}.`)
+    : (store.store_subtitle || `Welcome to ${storeName} — browse our products and order online.`);
+  $: seoPath = currentCategory
+    ? `/?category=${encodeURIComponent(currentCategory)}${currentSubcategory ? `&subcategory=${encodeURIComponent(currentSubcategory)}` : ""}`
+    : "/";
+  $: organizationJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    name: store.legal_name || storeName,
+    url: `${origin}/`,
+    ...(store.logo_url ? { logo: absoluteUrl(origin, store.logo_url) } : {}),
+    ...(store.support_email ? { email: store.support_email } : {}),
+    ...(store.phone ? { telephone: store.phone } : {})
+  };
+  $: websiteJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: storeName,
+    url: `${origin}/`,
+    potentialAction: {
+      "@type": "SearchAction",
+      target: `${origin}/?search={search_term_string}`,
+      "query-input": "required name=search_term_string"
+    }
+  };
   $: matchedCategoryNode = categories.find(
     (c) => c.name.toLowerCase() === currentCategory.toLowerCase() || c.slug.toLowerCase() === currentCategory.toLowerCase()
   );
@@ -166,9 +205,14 @@
   }
 </script>
 
-<svelte:head>
-  <title>RustCraft | High-Performance Gear & Software</title>
-</svelte:head>
+<Seo
+  title={seoTitle}
+  description={seoDescription}
+  path={seoPath}
+  image={store.logo_url}
+  noindex={!!currentSearch}
+  jsonLd={currentCategory || currentSearch ? [] : [organizationJsonLd, websiteJsonLd]}
+/>
 
 <!-- Dynamic Hero Showcase -->
 {#if !currentCategory && !currentSearch && heroConfig && carouselItems.length > 0}

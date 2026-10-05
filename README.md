@@ -23,14 +23,16 @@ docker compose up -d --build
 
 ---
 
-## 🔐 Default Admin Credentials
+## 🔐 Initial Admin Login
 
-When accessing the Admin Dashboard at [http://localhost:4000](http://localhost:4000), use the default administrative credentials:
+There is no built-in default password. On the very first start the backend creates the user `admin` with
 
-- **Username**: `admin`
-- **Password**: `RustCraftAdmin2026!`
+- the password from the `ADMIN_INITIAL_PASSWORD` environment variable (min. 12 characters), **or**
+- a random password printed once in the backend log: `docker compose logs backend | grep "Initial admin"`
 
-> **Security Notice**: Upon first login, a persistent security banner and credential prompt will appear, allowing you to customize your admin username and password. You can also update credentials at any time via the user badge in the admin header.
+Open the Admin Dashboard at [http://localhost:4000](http://localhost:4000), log in, and you will be required to choose your own password (min. 12 characters) before the admin area unlocks.
+
+Admin roles: `superadmin` (everything), `admin` (everything except granting superadmin), `editor` (catalogue, orders and content — no users, payments, email, system settings or import/export).
 
 ---
 

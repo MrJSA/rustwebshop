@@ -3,43 +3,42 @@
   import { goto } from '$app/navigation';
   import { Lock, User, ArrowRight, ShieldAlert, KeyRound, CheckCircle2 } from 'lucide-svelte';
 
-  let username = 'admin';
-  let password = 'RustCraftAdmin2026!';
+  let username = '';
+  let password = '';
   let error = '';
   let loading = false;
 
   onMount(() => {
-    // If already logged in, redirect to home
-    const token = localStorage.getItem('admin_token');
-    if (token) {
-      goto('/');
-    }
+    ['admin_token', 'admin_username', 'admin_is_default'].forEach((k) => localStorage.removeItem(k));
   });
+
+  // Only allow redirects to local admin pages (no open redirect)
+  function nextPath() {
+    const next = new URLSearchParams(window.location.search).get('next') || '/';
+    return next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/login') ? next : '/';
+  }
 
   async function handleLogin() {
     error = '';
     loading = true;
 
     try {
+      // The server keeps the session token in an httpOnly cookie; it is never exposed to this page
       const res = await fetch('/api/v1/admin/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         error = data.error || data.message || 'Invalid username or password.';
         loading = false;
         return;
       }
 
-      localStorage.setItem('admin_token', data.token);
-      localStorage.setItem('admin_username', data.username);
-      localStorage.setItem('admin_is_default', String(data.is_default));
-      document.cookie = `admin_token=${data.token}; path=/; max-age=604800; SameSite=Lax`;
-
-      goto('/');
+      password = '';
+      window.location.href = nextPath();
     } catch (e) {
       error = 'Failed to connect to authentication server.';
       loading = false;
@@ -68,10 +67,11 @@
       <div class="p-3.5 rounded-2xl bg-orange-950/30 border border-orange-500/30 text-xs text-slate-300 space-y-1">
         <div class="flex items-center gap-1.5 font-bold text-orange-400">
           <KeyRound size={14} />
-          <span>Default Credentials Initialized:</span>
+          <span>First login?</span>
         </div>
-        <p class="font-mono text-[11px] text-slate-300">
-          Username: <span class="text-white font-bold">admin</span> &bull; Password: <span class="text-white font-bold">RustCraftAdmin2026!</span>
+        <p class="text-[11px] text-slate-300">
+          Use username <span class="text-white font-bold">admin</span> and the initial password from the backend log
+          (<code class="font-mono">docker compose logs backend</code>) or your <code class="font-mono">ADMIN_INITIAL_PASSWORD</code>. You will be asked to change it.
         </p>
       </div>
 

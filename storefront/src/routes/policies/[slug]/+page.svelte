@@ -1,9 +1,11 @@
 <script>
   import { Truck, ShieldCheck, ArrowLeft, ExternalLink, Globe, CheckCircle2 } from 'lucide-svelte';
+  import Seo from '$lib/components/Seo.svelte';
 
   export let data;
   $: page = data.page || {};
   $: providers = data.providers || [];
+  $: storeName = data.store?.store_name || 'Shop';
 
   // Simple and safe client markdown renderer
   function parseMarkdown(md) {
@@ -33,9 +35,7 @@
   }
 </script>
 
-<svelte:head>
-  <title>{page.title} | RustCraft Store</title>
-</svelte:head>
+<Seo title={`${page.title} | ${storeName}`} description={page.content_markdown} path={`/policies/${page.slug}`} />
 
 <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
   <!-- Back navigation -->

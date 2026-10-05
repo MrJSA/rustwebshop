@@ -193,7 +193,7 @@
             autocomplete="{addressType === 'shipping' ? 'shipping name' : 'billing name'}"
             bind:value={fullName}
             required
-            placeholder="Joshua Rust"
+            placeholder="Max Mustermann"
             class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
           />
         </div>

@@ -60,7 +60,6 @@
     const token = localStorage.getItem('admin_token');
     return {
       'Content-Type': 'application/json',
-      'X-Dev-Mode': 'true',
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     };
   }

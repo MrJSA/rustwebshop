@@ -1,6 +1,6 @@
 export async function load({ fetch, url }) {
   const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://backend:8000';
-  const headers = { 'X-Dev-Mode': 'true' };
+  const headers = {};
 
   const tab = url.searchParams.get('tab') || 'overview';
   const filter = url.searchParams.get('filter') || 'ytd';

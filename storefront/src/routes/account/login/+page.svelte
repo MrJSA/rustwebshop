@@ -46,6 +46,10 @@
       const data = await res.json();
       if (!res.ok) {
         errorMsg = data.error || 'Registration failed. Email may already be in use.';
+      } else if (data.verification_pending || !data.token) {
+        successMsg = 'Account created! Please confirm your email address via the link we just sent you, then log in.';
+        activeTab = 'login';
+        password = '';
       } else {
         customer.login(data.token, data.email, data.full_name);
         goto('/');
@@ -146,7 +150,7 @@
               type="text"
               bind:value={fullName}
               required
-              placeholder="Joshua Rust"
+              placeholder="Max Mustermann"
               class="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-orange-500"
             />
             <User size={16} class="absolute left-3.5 top-3 text-slate-500" />

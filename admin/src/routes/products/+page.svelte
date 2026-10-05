@@ -1,6 +1,7 @@
 <script>
   import MediaPickerModal from '$lib/components/MediaPickerModal.svelte';
   import CategoryTreeNode from '$lib/components/CategoryTreeNode.svelte';
+  import CouponsManager from '$lib/components/CouponsManager.svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import {
@@ -27,7 +28,8 @@
     FolderPlus,
     Search,
     RefreshCw,
-    AlertTriangle
+    AlertTriangle,
+    Tag
   } from 'lucide-svelte';
 
   export let data;
@@ -36,6 +38,7 @@
   let featuredProductIds = data.featuredProductIds || [];
   let inventory = data.inventory || [];
   let storeSettings = data.storeSettings || {};
+  let coupons = data.coupons || [];
 
   $: isKleingewerbe = (storeSettings?.tax_mode === 'kleingewerbe');
   $: if (isKleingewerbe) {
@@ -50,7 +53,7 @@
   async function reloadInventory() {
     try {
       const res = await fetch('/api/v1/admin/logistics/inventory', {
-        headers: { 'X-Dev-Mode': 'true' }
+        headers: {}
       });
       if (res.ok) {
         inventory = await res.json();
@@ -240,7 +243,7 @@
 
       const res = await fetch('/api/v1/admin/media/upload', {
         method: 'POST',
-        headers: { 'X-Dev-Mode': 'true' },
+        headers: {},
         body: formData
       });
 
@@ -273,7 +276,7 @@
 
       const res = await fetch('/api/v1/admin/media/upload', {
         method: 'POST',
-        headers: { 'X-Dev-Mode': 'true' },
+        headers: {},
         body: formData
       });
 
@@ -307,7 +310,7 @@
       formData.append('file', file);
       const res = await fetch('/api/v1/admin/media/upload', {
         method: 'POST',
-        headers: { 'X-Dev-Mode': 'true' },
+        headers: {},
         body: formData
       });
       if (res.ok) {
@@ -334,7 +337,7 @@
       formData.append('file', file);
       const res = await fetch('/api/v1/admin/media/upload', {
         method: 'POST',
-        headers: { 'X-Dev-Mode': 'true' },
+        headers: {},
         body: formData
       });
       if (res.ok) {
@@ -407,7 +410,7 @@
     // Load parts for this product
     try {
       const partsRes = await fetch(`/api/v1/admin/products/${product.id}/parts`, {
-        headers: { 'X-Dev-Mode': 'true' }
+        headers: {}
       });
       if (partsRes.ok) {
         productParts = await partsRes.json();
@@ -421,7 +424,7 @@
 
   async function reloadProducts() {
     const refresh = await fetch('/api/v1/admin/products', {
-      headers: { 'X-Dev-Mode': 'true' }
+      headers: {}
     });
     if (refresh.ok) {
       products = await refresh.json();
@@ -438,7 +441,6 @@
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({
@@ -486,7 +488,6 @@
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({
@@ -517,7 +518,6 @@
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
-              'X-Dev-Mode': 'true',
               ...(token ? { Authorization: `Bearer ${token}` } : {})
             },
             body: JSON.stringify({
@@ -553,7 +553,6 @@
       const res = await fetch(`/api/v1/admin/products/${productId}`, {
         method: 'DELETE',
         headers: {
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         }
       });
@@ -577,7 +576,6 @@
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         }
       });
@@ -607,7 +605,7 @@
     try {
       const res = await fetch(`/api/v1/admin/products/${editingProductId}/variants`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Dev-Mode': 'true' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sku: addVariantSku,
           title: addVariantTitle,
@@ -650,7 +648,7 @@
     try {
       const res = await fetch(`/api/v1/admin/variants/${editingVariantId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'X-Dev-Mode': 'true' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sku: editVariantSku,
           title: editVariantTitle,
@@ -678,7 +676,7 @@
     try {
       await fetch(`/api/v1/admin/variants/${variantId}`, {
         method: 'DELETE',
-        headers: { 'X-Dev-Mode': 'true' }
+        headers: {}
       });
       currentProductVariants = currentProductVariants.filter((v) => v.id !== variantId);
       await reloadProducts();
@@ -694,7 +692,7 @@
     try {
       const res = await fetch(`/api/v1/admin/products/${editingProductId}/parts`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Dev-Mode': 'true' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           variant_id: newPartVariantId || null,
           part_name: newPartName,
@@ -705,7 +703,7 @@
       });
       if (res.ok) {
         const partsRes = await fetch(`/api/v1/admin/products/${editingProductId}/parts`, {
-          headers: { 'X-Dev-Mode': 'true' }
+          headers: {}
         });
         if (partsRes.ok) productParts = await partsRes.json();
         newPartName = '';
@@ -735,7 +733,7 @@
     try {
       const res = await fetch(`/api/v1/admin/parts/${editingPartId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'X-Dev-Mode': 'true' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           variant_id: editPartVariantId || null,
           part_name: editPartName,
@@ -746,7 +744,7 @@
       });
       if (res.ok) {
         const partsRes = await fetch(`/api/v1/admin/products/${editingProductId}/parts`, {
-          headers: { 'X-Dev-Mode': 'true' }
+          headers: {}
         });
         if (partsRes.ok) productParts = await partsRes.json();
         isEditPartOpen = false;
@@ -761,7 +759,7 @@
     try {
       const res = await fetch(`/api/v1/admin/products/${editingProductId}/parts/${partId}`, {
         method: 'DELETE',
-        headers: { 'X-Dev-Mode': 'true' }
+        headers: {}
       });
       if (res.ok) {
         productParts = productParts.filter((p) => p.id !== partId);
@@ -791,7 +789,7 @@
   async function reloadCategories() {
     try {
       const res = await fetch('/api/v1/admin/categories', {
-        headers: { 'X-Dev-Mode': 'true' }
+        headers: {}
       });
       if (res.ok) {
         categories = await res.json();
@@ -857,7 +855,6 @@
     const token = localStorage.getItem('admin_token');
     const headers = {
       'Content-Type': 'application/json',
-      'X-Dev-Mode': 'true',
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     };
     try {
@@ -914,7 +911,6 @@
       const res = await fetch(`/api/v1/admin/categories/${categoryToDelete.id}`, {
         method: 'DELETE',
         headers: {
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         }
       });
@@ -953,7 +949,6 @@
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true'
         },
         body: JSON.stringify({ adjustment: amount })
       });
@@ -1014,6 +1009,16 @@
       <Warehouse size={15} />
       <span>Logistics & Stock</span>
       <span class="text-[10px] px-2 py-0.5 rounded-full {activeTab === 'stock' ? 'bg-white/20 text-white' : 'bg-slate-800 text-slate-400'}">{inventory.length}</span>
+    </button>
+
+    <button
+      type="button"
+      on:click={() => setTab('coupons')}
+      class="px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 {activeTab === 'coupons' ? 'bg-orange-600 text-white shadow-lg shadow-orange-600/25 ring-1 ring-orange-500' : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'}"
+    >
+      <Tag size={15} />
+      <span>Promo & Discount Codes</span>
+      <span class="text-[10px] px-2 py-0.5 rounded-full {activeTab === 'coupons' ? 'bg-white/20 text-white' : 'bg-slate-800 text-slate-400'}">{coupons.length}</span>
     </button>
   </div>
 
@@ -1340,6 +1345,8 @@
         </div>
       </div>
     </div>
+  {:else if activeTab === 'coupons'}
+    <CouponsManager initialCoupons={coupons} />
   {/if}
 
   <!-- Simplified Create Product Modal -->

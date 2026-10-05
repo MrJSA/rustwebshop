@@ -78,8 +78,17 @@
       </p>
     </div>
 
-    <div class="text-xs text-slate-400 font-mono">
-      Logged in as: <strong class="text-white">{$customer?.email || 'Customer'}</strong>
+    <div class="flex items-center gap-3">
+      <a 
+        href="/account/downloads"
+        class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-950/60 hover:bg-sky-900/60 text-sky-300 border border-sky-800/60 text-xs font-semibold transition-colors shadow-sm"
+      >
+        <Download size={14} />
+        <span>Digital Downloads Library</span>
+      </a>
+      <div class="text-xs text-slate-400 font-mono hidden sm:block">
+        Logged in as: <strong class="text-white">{$customer?.email || 'Customer'}</strong>
+      </div>
     </div>
   </div>
 
@@ -230,17 +239,34 @@
                         </div>
 
                         <div class="flex items-center justify-between sm:justify-end gap-4 w-full sm:w-auto">
-                          {#if item.is_digital && item.download_url}
-                            <a
-                              href={item.download_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              download
-                              class="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-colors"
-                            >
-                              <Download size={13} />
-                              <span>Download Asset</span>
-                            </a>
+                          {#if item.is_digital}
+                            {#if item.files && item.files.length > 0}
+                              <div class="flex flex-wrap items-center gap-1.5">
+                                {#each item.files as f}
+                                  <a
+                                    href={f.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    download
+                                    class="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-[11px] flex items-center gap-1 shadow-sm transition-colors"
+                                  >
+                                    <Download size={12} />
+                                    <span>{f.name}</span>
+                                  </a>
+                                {/each}
+                              </div>
+                            {:else if item.download_url}
+                              <a
+                                href={item.download_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                download
+                                class="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-colors"
+                              >
+                                <Download size={13} />
+                                <span>Download Asset</span>
+                              </a>
+                            {/if}
                           {/if}
 
                           <div class="font-mono font-bold text-white text-xs sm:text-sm flex-shrink-0">

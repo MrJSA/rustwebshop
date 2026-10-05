@@ -20,6 +20,8 @@ pub struct StoreSettings {
     pub smtp_host: String,
     pub smtp_port: i32,
     pub smtp_username: String,
+    // Write-only: never sent to browsers or included in exports
+    #[serde(skip_serializing, default)]
     pub smtp_password: String,
     pub smtp_encryption: String,
     pub smtp_from_email: String,
@@ -68,12 +70,6 @@ pub struct StoreSettingsDTO {
     pub logo_url: String,
     pub phone: String,
     pub hero_config: serde_json::Value,
-    pub smtp_host: String,
-    pub smtp_port: i32,
-    pub smtp_username: String,
-    pub smtp_from_email: String,
-    pub smtp_from_name: String,
-    pub smtp_enabled: bool,
     pub require_registered_checkout: bool,
     pub require_email_verification: bool,
     pub store_subtitle: String,

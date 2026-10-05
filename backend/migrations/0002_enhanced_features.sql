@@ -139,7 +139,7 @@ Rustacean Way 42
 10115 Berlin, Germany  
 
 **Represented by Managing Directors:**  
-Joshua Rust, Dr. Ferris Crab  
+Max Mustermann  
 
 **Contact:**  
 Phone: +49 (0) 30 123456-78  

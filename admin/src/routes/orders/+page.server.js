@@ -1,6 +1,6 @@
 export async function load({ fetch }) {
   const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://backend:8000';
-  const headers = { 'X-Dev-Mode': 'true' };
+  const headers = {};
 
   try {
     const res = await fetch(`${backendUrl}/api/v1/admin/orders`, { headers });

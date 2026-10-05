@@ -106,8 +106,10 @@ pub struct CustomerLoginRequest {
 }
 
 #[derive(Debug, Deserialize)]
+/// Step 1: `{ email }` requests a reset link. Step 2: `{ token, new_password }` sets the new password.
 pub struct ResetPasswordRequest {
-    pub email: String,
+    pub email: Option<String>,
+    pub token: Option<String>,
     pub new_password: Option<String>,
 }
 

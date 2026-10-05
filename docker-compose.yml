@@ -25,9 +25,15 @@ services:
       DATABASE_URL: postgres://shop_user:${DB_PASSWORD:-local_dev_password}@db:5432/shop_db
       PORT: 8000
       RUST_LOG: info
-      JWT_SECRET: ${JWT_SECRET:-super_secret_rustwebshop_jwt_token_2026}
+      # Optional: leave empty and a random signing key is generated and stored in the database
+      JWT_SECRET: ${JWT_SECRET:-}
+      # Optional initial admin password (min. 12 chars); otherwise a random one is printed in the log once
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
+      # Public storefront URL used in links inside emails (verification, password reset)
+      SHOP_PUBLIC_URL: ${SHOP_PUBLIC_URL:-http://localhost:8080}
+    # Debug access from this machine only — never exposed to the network
     ports:
-      - "8081:8000"
+      - "127.0.0.1:8081:8000"
     volumes:
       - uploads_data:/app/uploads
     depends_on:
@@ -44,7 +50,7 @@ services:
     environment:
       PORT: 3000
       BACKEND_INTERNAL_URL: http://backend:8000
-      ORIGIN: http://localhost:8080
+      ORIGIN: ${SHOP_PUBLIC_URL:-http://localhost:8080}
       BODY_SIZE_LIMIT: 50M
     ports:
       - "8080:3000"
@@ -61,7 +67,7 @@ services:
     environment:
       PORT: 4000
       BACKEND_INTERNAL_URL: http://backend:8000
-      ORIGIN: http://localhost:4000
+      ORIGIN: ${ADMIN_PUBLIC_URL:-http://localhost:4000}
       BODY_SIZE_LIMIT: 50M
     ports:
       - "4000:4000"

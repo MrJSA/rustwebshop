@@ -2,6 +2,9 @@
   import { cart, isCartOpen } from '$lib/stores/cart.js';
   import { customer } from '$lib/stores/customer.js';
   import ProductCard from '$lib/components/ProductCard.svelte';
+  import Seo from '$lib/components/Seo.svelte';
+  import { page } from '$app/stores';
+  import { absoluteUrl, toDescription } from '$lib/seo.js';
   import {
     Download,
     ArrowLeft,
@@ -50,6 +53,46 @@
   })();
 
   $: activeImageUrl = currentImages[activeImageIndex] || currentImages[0] || currentVariant.image_url || product.image_url || '';
+
+  // --- SEO structured data (schema.org Product + BreadcrumbList) ---
+  $: storeName = data.store?.store_name || 'Shop';
+  $: origin = $page.url.origin;
+  $: productUrl = `${origin}/products/${product.slug}`;
+  $: variantPrice = (v) => v.price_override_cents || product.base_price_cents || 0;
+  $: variantInStock = (v) => isDigital || (v.stock_quantity || 0) > 0;
+  $: offerVariants = variants.length > 0 ? variants : [{}];
+  $: productJsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'Product',
+    name: product.title,
+    description: toDescription(product.short_description || product.description, 5000),
+    image: currentImages.map((src) => absoluteUrl(origin, src)),
+    sku: currentVariant.sku || product.slug,
+    url: productUrl,
+    brand: { '@type': 'Brand', name: storeName },
+    ...(product.category ? { category: product.category } : {}),
+    offers: offerVariants.map((v) => ({
+      '@type': 'Offer',
+      url: productUrl,
+      ...(v.sku ? { sku: v.sku } : {}),
+      priceCurrency: 'EUR',
+      price: (variantPrice(v) / 100).toFixed(2),
+      availability: variantInStock(v) ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+      itemCondition: 'https://schema.org/NewCondition',
+      seller: { '@type': 'Organization', name: storeName }
+    }))
+  };
+  $: breadcrumbJsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    itemListElement: [
+      { '@type': 'ListItem', position: 1, name: storeName, item: `${origin}/` },
+      ...(product.category
+        ? [{ '@type': 'ListItem', position: 2, name: product.category, item: `${origin}/?category=${encodeURIComponent(product.category)}` }]
+        : []),
+      { '@type': 'ListItem', position: product.category ? 3 : 2, name: product.title, item: productUrl }
+    ]
+  };
 
   // When variant changes, ensure activeImageIndex is valid
   $: if (activeImageIndex >= currentImages.length) {
@@ -202,47 +245,14 @@
 <svelte:window on:keydown={handleKeydown} />
 
 <!-- Full SEO Tags: Title, Description, OpenGraph, Twitter, Canonical, Product JSON-LD -->
-<svelte:head>
-  <title>{product.title} | RustCraft Gear</title>
-  <meta name="description" content={product.short_description || product.description || `Buy ${product.title} at RustCraft.`} />
-  <link rel="canonical" href={`https://rustcraft.io/products/${product.slug}`} />
-
-  <!-- OpenGraph -->
-  <meta property="og:type" content="product" />
-  <meta property="og:title" content={`${product.title} | RustCraft Gear`} />
-  <meta property="og:description" content={product.short_description || product.description || ''} />
-  {#if activeImageUrl}
-    <meta property="og:image" content={activeImageUrl} />
-  {/if}
-  <meta property="og:url" content={`https://rustcraft.io/products/${product.slug}`} />
-
-  <!-- Twitter Cards -->
-  <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content={`${product.title} | RustCraft Gear`} />
-  <meta name="twitter:description" content={product.short_description || product.description || ''} />
-  {#if activeImageUrl}
-    <meta name="twitter:image" content={activeImageUrl} />
-  {/if}
-
-  <!-- Schema.org Product JSON-LD Structured Data -->
-  {@html `<script type="application/ld+json">
-  ${JSON.stringify({
-    "@context": "https://schema.org/",
-    "@type": "Product",
-    "name": product.title,
-    "image": currentImages,
-    "description": product.short_description || product.description,
-    "sku": currentVariant.sku || product.slug,
-    "offers": {
-      "@type": "Offer",
-      "url": `https://rustcraft.io/products/${product.slug}`,
-      "priceCurrency": "EUR",
-      "price": (currentPriceCents / 100).toFixed(2),
-      "availability": inStock ? "https://schema.org/InStock" : "https://schema.org/OutOfStock"
-    }
-  })}
-  </script>`}
-</svelte:head>
+<Seo
+  title={`${product.title} | ${storeName}`}
+  description={product.short_description || product.description || `Buy ${product.title} at ${storeName}.`}
+  path={`/products/${product.slug}`}
+  image={currentImages[0] || product.image_url}
+  type="product"
+  jsonLd={[productJsonLd, breadcrumbJsonLd]}
+/>
 
 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
   <!-- Breadcrumb -->

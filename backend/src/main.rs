@@ -6,7 +6,6 @@ mod services;
 
 use std::net::SocketAddr;
 use std::time::Duration;
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -59,14 +58,12 @@ async fn main() -> anyhow::Result<()> {
     // Ensure uploads directory exists
     tokio::fs::create_dir_all("uploads").await.ok();
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    crate::services::auth::init(&pool).await.expect("Failed to initialise authentication secrets");
 
+    // No CORS layer: browsers never call this API directly (only the storefront/admin servers do),
+    // so cross-origin browser requests are refused by default.
     let app = routes::create_router(pool)
         .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))
-        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024));
 

@@ -21,7 +21,6 @@
       const token = localStorage.getItem('admin_token');
       const res = await fetch('/api/v1/admin/media', {
         headers: { 
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {}) 
         }
       });
@@ -51,7 +50,6 @@
         const res = await fetch('/api/v1/admin/media/upload', {
           method: 'POST',
           headers: { 
-            'X-Dev-Mode': 'true',
             ...(token ? { Authorization: `Bearer ${token}` } : {}) 
           },
           body: formData
@@ -84,7 +82,6 @@
       const res = await fetch(`/api/v1/admin/media/${id}`, {
         method: 'DELETE',
         headers: { 
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {}) 
         }
       });

@@ -155,6 +155,123 @@ This log tracks architectural decisions, state checkpoints, implementation miles
   - Storefront `storefront/src/routes/+page.svelte`: Added endless looping logic, 7-second auto-scroll interval, and hover detection.
   - Admin `admin/src/routes/products/+page.svelte`: Added Physical/Digital delivery toggle, multi-file uploader, stock disabled state, conditional VAT input, and BOM digital asset support.
   - End-to-end browser subagent verified all flows, order placement `#ORD-10001`, and instant downloads.
-- **Status**: Completed, Fully Verified & Production Ready.
 
+---
+
+### Milestone 12: Digital Auto-Fulfillment, Dynamic Downloads Hub, Promo Codes, Admin User Governance & Payment Engine Overhaul
+- **Date**: October 2026
+- **Context & User Requirements**:
+  1. **Automatic Completion for Digital-Only Orders**:
+     - When an order contains exclusively digital items and payment succeeds, immediately set `order_status = 'completed'` without requiring merchant fulfillment or shipping actions.
+  2. **Customer Digital Downloads Library & Dynamic File Updates**:
+     - Provide a dedicated customer account overview (`/account/downloads`) displaying all digital purchases with download buttons.
+     - **Dynamic Sync**: If the merchant alters, replaces, or adds files to a digital product or its BOM (`part_sku = 'DIGITAL_FILE'`) in the Admin, past customers must dynamically receive the updated and changed files whenever they download.
+  3. **Promo & Discount Codes Management (Under Products Category)**:
+     - Admin page under Products Category to create and manage promo/discount codes.
+     - Support 3 distinct discount models:
+       - **Free Shipping** (`free_shipping`): Zeroes out shipping cost while leaving product totals unchanged.
+       - **Fixed Currency Discount** (`fixed_amount`): Deducts a specific amount (e.g., 10.00 €) from the cart subtotal.
+       - **Percentage Discount** (`percentage`): Deducts a percentage (e.g., 15%) from the cart subtotal.
+     - Configurable minimum order amount, total usage limits, expiration date, and active toggle.
+     - Storefront checkout integration with live code validation, dynamic subtotal reduction, and backend validation.
+  4. **Admin Users & Access Governance (Settings Section)**:
+     - Admin page under Settings (`/settings?tab=users`) to view existing admin users and create new users with username, email, password (hashed with bcrypt), and role (`superadmin`, `admin`, `editor`).
+     - Safeguards to prevent deleting the final remaining admin user.
+  5. **Payment Engine Overhaul & Provider Filtering**:
+     - Filter out disabled payment providers on the storefront checkout page so only active providers are rendered.
+     - Eliminate false-positive payment approvals: backend `PaymentEngine` previously approved all payments unconditionally. Now strictly enforces card validation (Luhn algorithm, expiration date checking, CVC length) and Stripe test decline numbers (`4000 0000 0000 0002` = card declined, `4000 0000 0000 0069` = insufficient funds). Checkout fails with a 400 Bad Request if an invalid card is supplied.
+  6. **Technical Research & Best Practice Synthesis**:
+     - **Stripe & SvelteKit Integration** (`joshnuss/svelte-stripe`, `sveltekit-stripe`, `svelte-shop`):
+       - Tokenization/Elements flow: Payment details never touch merchant servers directly; client uses Stripe Elements or Web Payments SDK to create a PaymentMethod/token, passed to server for PaymentIntent confirmation.
+       - Webhook reconciliation: Rely on `payment_intent.succeeded` or `charge.failed` webhooks for asynchronous payment status verification.
+       - Strict error handling: Inform the user with actionable decline codes (`insufficient_funds`, `card_declined`, `expired_card`).
+     - **Square Payment Integration** (`developer.squareup.com`):
+       - Uses Web Payments SDK `payments.card()` attached to a container element.
+       - Secure client tokenization produces a single-use token sent to the backend.
+       - Backend charges token with `idempotencyKey` to guarantee zero duplicate charges.
+     - **SvelteKit SEO Guidelines** (`svelte.dev/docs/kit/seo`):
+       - Server-side rendering (SSR) is primary for search engines and social crawlers.
+       - Use `<svelte:head>` on all route templates to supply canonical URLs, structured Open Graph / Twitter metadata, and descriptive titles.
+       - Implement `<script type="application/ld+json">` for `Product`, `Offer`, `BreadcrumbList`, and `Organization` schemas.
+       - Maintain clean, descriptive URLs and dynamic XML sitemaps.
+     - **SvelteKit Performance Guidelines** (`svelte.dev/docs/kit/performance`):
+       - Shift data dependencies to server `load` functions (`+page.server.js`), minimizing client waterfall requests on mount.
+       - Optimize Core Web Vitals: specify explicit image dimensions (`width`, `height`) and `aspect-ratio` to avoid Cumulative Layout Shift (CLS).
+       - Use lazy-loading (`loading="lazy"`) and asynchronous decoding (`decoding="async"`) for non-critical assets.
+     - **Authentication & Security Architecture**:
+       - Distinct JWT claims and secrets for admin users vs storefront customers.
+       - Salting and hashing with bcrypt.
+       - Protected route guards on both API routes and SvelteKit server loaders.
+- **Architectural Implementation**:
+  - `backend/migrations/0013_coupons_and_admin_users.sql`: Created `coupons` table with constraints; added `coupon_code` and `discount_cents` to `orders`; added `email` and `role` to `admin_users`.
+  - Registered migration in `backend/src/db.rs`.
+  - Created models `backend/src/models/coupon.rs` and updated `backend/src/models/admin_user.rs` & `order.rs`.
+  - Backend payment validation in `backend/src/services/payment_engine.rs`: Luhn algorithm, expiry month/year check, CVC length verification, and Stripe decline card simulation.
+  - Backend checkout service `backend/src/services/checkout.rs`:
+    - Auto-completes digital-only orders when `payment_status == "paid"`.
+    - Validates coupon codes, calculates discounts, and increments coupon `used_count`.
+    - Blocks checkout if card fails validation or decline rules.
+  - Dynamic digital file resolution in `backend/src/routes/public.rs`:
+    - `GET /api/v1/customer/downloads`: Queries paid/completed digital items, joining live `products` and BOM `product_parts` (`part_sku = 'DIGITAL_FILE'`) on `product_id`.
+    - `GET /api/v1/customer/orders` & `GET /api/v1/orders/lookup/:order_number`: Dynamically resolve latest product files and BOM attachments.
+  - Admin UI:
+    - `admin/src/lib/components/CouponsManager.svelte`: Complete coupon creation/editing modal, discount type selection, expiration dates, and usage limits.
+    - `admin/src/lib/components/AdminUsersManager.svelte`: Admin user list, creation modal, password updates, and deletion prevention for the last admin.
+    - Admin nav updated with Products -> Promo & Discount Codes and Settings -> Admin Users & Access.
+  - Storefront UI:
+    - `storefront/src/routes/checkout/+page.svelte`: Enabled-only provider filtering, live promo code application and discount breakdown, card decline error feedback.
+    - `storefront/src/routes/account/downloads/+page.svelte`: Comprehensive customer digital downloads library with live sync guarantee, search filter, and individual file package download buttons.
+    - Updated `+layout.svelte`, `account/orders/+page.svelte`, and `order-success/[orderNumber]/+page.svelte` with direct links and multi-file download actions.
+- **Status**: Fully Implemented & Production Ready.
+
+
+
+### [2026-10-05] Milestone 13: Real Payment Gateways (Stripe Payment Element + Wallets, PayPal Orders v2), Exactly-Once Order Finalization & SEO
+- **Context & User Requirements**:
+  1. Checkout was not working reliably; only the Stripe hosted redirect had worked briefly.
+  2. Card details should be entered directly on the shop's checkout page.
+  3. PayPal button, plus Apple Pay / Google Pay / Amazon Pay — the latter regulated through Stripe, with on/off toggles in Admin → Payment Providers underneath the Stripe settings.
+  4. SEO optimization per https://svelte.dev/docs/kit/seo.
+- **Root Causes Found (diagnosis)**:
+  - `0014_add_stripe_elements_config.sql` was never registered in `db.rs`, so the `stripe_elements` provider row never existed → on-site Elements could never be selected.
+  - The browser chose the amount: `create-intent` and `create-checkout-session` accepted `amount_cents` / line-item prices from the client, and hosted-session verification only checked `payment_status == paid`, not the amount → a customer could pay 0.50 € for any order.
+  - `paypal`, `apple_pay`, `google_pay`, `amazon_pay` were simulated in `PaymentEngine` and **always approved** (client sent `tok_<provider>_<timestamp>`) → free orders marked `paid`.
+  - Offline "sandbox" fallback approved Stripe payments when no key was configured.
+  - Orders were only created if the browser returned and still had `sessionStorage`; a closed tab after paying = paid but no order.
+  - A new PaymentIntent was created on every total change (orphan intents); `cardholderName` was assigned without being declared (runtime ReferenceError for logged-in customers with saved addresses).
+  - `Order` FromRow lacked `#[sqlx(default)]` for `coupon_code`/`discount_cents` while invoice queries select explicit columns.
+  - **Security**: the public storefront proxy forwarded `/api/v1/admin/*` and the `X-Dev-Mode` header → anyone could read the Stripe secret key, orders and customers through port 8080.
+- **Rollback**: Milestone 12's raw-card Luhn/expiry/CVC engine and mock decline simulation (`payment_engine.rs`) were removed. Raw card data must never reach our server (PCI DSS); Stripe performs validation and test-card simulation itself. Rule 6 rewritten accordingly.
+- **Architectural Implementation**:
+  - `0014_payment_gateway_overhaul.sql` (replaces the unregistered file): `payment_configs.webhook_secret`; merges/deletes legacy `stripe_elements`; deletes simulated `apple_pay`/`google_pay`/`amazon_pay` rows; clears seeded placeholder keys; Stripe `config_data = {checkout_mode: elements|hosted, methods: {apple_pay, google_pay, link, amazon_pay, paypal}}`; new `pending_checkouts` table; `orders.payment_reference` with partial unique index.
+  - `services/payments.rs`: Stripe REST client (PaymentIntent with explicit `payment_method_types`, Checkout Session, retrieve, refund, idempotency keys, webhook HMAC-SHA256 verification) and PayPal Orders v2 client (OAuth, create order, idempotent capture via `PayPal-Request-Id`, refund). Unit-tested.
+  - `services/checkout.rs`: single `price_order` used by quote and order creation (row locks only when creating); shipping rate must belong to a zone serving the destination country; VAT reduced pro rata by discounts; `validate_for_order`; `create_pending` / `finalize_pending` (row-locked, idempotent, amount-checked) / `create_free_order`.
+  - `routes/payments.rs`: `POST /checkout/quote`, `/checkout/free`, `/checkout/stripe/intent|session|complete`, `/checkout/paypal/order|capture`, `/payments/stripe/webhook`. Failed finalization after a verified payment → automatic provider refund.
+  - Admin: `PaymentsManager.svelte` (used by Settings tab and `/settings/payments`): Stripe mode (on-site vs redirect), publishable/secret/webhook keys with test/live mismatch detection, per-method toggles under Stripe; PayPal with sandbox toggle and Pay Later. Secrets are write-only (API returns masked hints only). Order refund calls the provider; order is only marked refunded after success.
+  - Storefront checkout: server quote drives all totals; Stripe Payment Element in deferred-intent mode (`elements.submit()` first → server creates PaymentIntent → `confirmPayment` with `redirect: 'if_required'`); PayPal Smart Buttons via an action; `/checkout/complete` return page for redirect methods/hosted mode (replaces `stripe-success`).
+  - Storefront proxy blocks `admin/*` (incl. encoded) and strips `X-Dev-Mode` / `dev=true`.
+  - SEO: `Seo.svelte` + `$lib/seo.js`; canonical from request origin (previous product canonical pointed at a hard-coded `rustcraft.io` domain); Product (+ per-variant Offers), BreadcrumbList, Organization, WebSite/SearchAction JSON-LD with `<` escaping; central `noindex` for private paths; `/robots.txt`; dynamic `/sitemap.xml`; removed duplicate static `<title>` from `app.html`.
+- **Verification**: `cargo test` (webhook signature incl. tamper/stale/wrong-secret, amount formatting/parsing); storefront and admin production builds; SSR smoke test of SEO tags, robots, sitemap and proxy blocking; integration test against a throwaway Postgres: migrations 0001–0014 apply, quote/validation errors, signed webhook creates exactly one order (replay and 5 concurrent deliveries → 1 order, stock decremented once), underpaid payment rejected + refund attempted, forged signature rejected, 100 % coupon free order, invoice endpoint, admin refund keeps `paid` when the provider refund fails.
+- **Known Open Issue (not addressed here)**: Admin authentication is effectively disabled — the admin app's proxy and loaders inject `X-Dev-Mode: true`, so anyone reaching port 4000 (or backend port 8081) has full admin access. Needs a dedicated fix (real session cookie / JWT in the admin app, remove the bypass, stop publishing 8081).
+- **Status**: Implemented & verified locally; requires `docker compose up -d --build` plus Stripe/PayPal keys (see admin hints) for live end-to-end payments.
+
+### [2026-10-05] Milestone 14: Security Audit & Hardening, All Stripe Methods + Express Wallet Buttons, Working Import/Export, Privacy Cleanup
+- **Context & User Requirements**: checkboxes for all Stripe payment options; visible Apple Pay / Google Pay / Amazon Pay buttons; card form (not Link) as default; full safety/performance/code-quality review; verify import/export; protect the admin correctly; rule out SQL injection and data leakage; no sensitive or personal data in the repository or its history; generic defaults instead of the owner's name.
+- **Critical Findings (all fixed)**:
+  - Admin API fully open: `X-Dev-Mode: true` / `?dev=true` bypass, auto-injected by the admin proxy; hard-coded JWT secret published in the repo (anyone could forge admin tokens); backdoor passwords (`RustCraftAdmin2026!` while default, `admin`/`admin123`); default password prefilled on the login page and printed in README; no role checks (an editor could create a superadmin); `change-credentials` changed the *first* admin and only accepted POST while the UI sent PUT (could never succeed).
+  - Customer account takeover: `reset-password` set any account's password from just an email; registering an existing email overwrote its password.
+  - Data leakage: guessable sequential order numbers exposed name, email, items and download links; public product/BOM APIs exposed digital download URLs (free downloads); public `/store/info` exposed SMTP host/user; `StoreSettings` serialised the SMTP password (admin browser + export file); download links returned for unpaid orders.
+  - Import never worked: it inserted `pages.id` (column does not exist) and swallowed all errors inside one transaction → silent rollback while reporting success. Shipping zones/rates were exported but not imported; BOM parts and coupons were not exported; category/menu parents depended on file order.
+  - SQL built with `format!` in `list_products` (quote-escaped, but fragile) + N+1 variant queries; HTML injection of customer names in verification emails; verification emails never sent (StoreSettings query missing columns, hard-coded localhost URL); wide-open CORS; uploads accepted any extension.
+- **Architectural Implementation**:
+  - `0015_security_hardening.sql`: `server_secrets`, customer reset-token columns, `orders.access_token` (+ backfill), lowercase email index, role normalisation (oldest admin → superadmin), generic `ORD` order prefix, generic name in the seeded legal notice.
+  - `services/auth.rs` (JWT key management, role-bound tokens, CSPRNG tokens, SHA-256, login limiter; unit-tested); `middleware/auth.rs` rewritten with DB-backed `CurrentAdmin`, default-password lock and role gates (unit-tested).
+  - Admin app: `hooks.server.js` (route guard + security headers + `handleFetch`), `lib/server/session.js`, proxy rewritten (httpOnly session, credential stripping, JSON errors), login/layout without localStorage tokens, ~70 dead `X-Dev-Mode` headers removed.
+  - Storefront: proxy returns JSON errors and `no-store`; `hooks.server.js` security headers; uploads served sandboxed; order-success uses the access token; track page requires email; reset-password page implements the token flow; register handles "verify email first".
+  - Export v1.1 (complete, no secrets) / typed, fail-fast, order-independent import; media ZIP uses unique stored names and reports missing files.
+  - Payments: 13 optional Stripe methods + wallets with grouped admin checkboxes; Express Checkout Element for wallet buttons; card-first Payment Element; delayed-payment handling (pending → paid / cancelled + restock) incl. hosted-session async events; Apple Pay/Google Pay domain registration from the admin.
+  - Personal identifiers removed from code/docs (handle in prefixes/placeholders, first name in placeholders, `.github/FUNDING.yml`); compose: backend bound to 127.0.0.1, no default JWT secret, `ADMIN_INITIAL_PASSWORD`, `SHOP_PUBLIC_URL`/`ADMIN_PUBLIC_URL`.
+- **Repository / History Audit**: Every blob in all 9 commits scanned — no API keys, tokens, private keys, `.env` files or binaries; addresses/phones/VAT IDs are fictional. Remaining personal data in history: owner handle/first name in old placeholders and `FUNDING.yml`, and the author name/email on every commit → requires a history rewrite + force-push (owner decision).
+- **Verification**: `cargo test` (8 unit tests); 34 end-to-end security checks + 24 flow checks against a throwaway Postgres (forged tokens, bypasses, backdoors, forced password change, RBAC, brute-force lock, account takeover, reset tokens, order privacy, download leakage, SQL injection, delayed payments, export→import round trip and conflict rollback); admin app session/guard test; storefront and admin production builds; published-default-password rotation verified.
+- **Status**: Implemented & verified locally. Deploy with `docker compose up -d --build`; existing admin/customer sessions are invalidated once (new signing key).
 

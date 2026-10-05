@@ -1,6 +1,6 @@
 export async function load({ fetch }) {
   const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://backend:8000';
-  const headers = { 'X-Dev-Mode': 'true' };
+  const headers = {};
   let settings = {};
   let paymentConfigs = [];
   let shippingProviders = [];
@@ -32,6 +32,16 @@ export async function load({ fetch }) {
     console.error('Failed to load shipping providers in settings overview:', e);
   }
 
+  let adminUsers = [];
+  try {
+    const usersRes = await fetch(`${backendUrl}/api/v1/admin/users`, { headers });
+    if (usersRes.ok) {
+      adminUsers = await usersRes.json();
+    }
+  } catch (e) {
+    console.error('Failed to load admin users in settings overview:', e);
+  }
+
   return {
     settings: Object.keys(settings).length > 0 ? settings : {
       store_name: 'RustCraft Gear & Software',
@@ -50,6 +60,7 @@ export async function load({ fetch }) {
       logo_url: ''
     },
     paymentConfigs,
-    shippingProviders
+    shippingProviders,
+    adminUsers
   };
 }

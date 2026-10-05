@@ -25,6 +25,26 @@
    - Storefront and Admin talk to the Backend API via internal network `http://backend:8000`.
    - Customer Storefront runs on host port `8080`.
    - Admin Dashboard runs on host port `4000` to allow dedicated firewall, VPN, or reverse-proxy protection.
+   - **Public proxy hardening (CRITICAL)**: The storefront's `/api/v1/[...path]` proxy must return 404 for any `admin/*` path (including URL-encoded variants) and must strip the `X-Dev-Mode` header and `dev=true` query.
+   - The backend port is published on `127.0.0.1` only (local debugging); the backend has no CORS layer because browsers never call it directly.
+
+---
+
+## 2a. Authentication, Authorization & Data Protection (CRITICAL)
+- **No bypasses, no backdoors**: There is no development auth bypass (`X-Dev-Mode`, `?dev=true`, `?token=` are gone) and no hard-coded password. Never reintroduce one.
+- **Secrets**: The JWT signing key comes from `JWT_SECRET` (≥ 32 chars, not a published value) or is generated and persisted in `server_secrets`. Payment secrets, webhook secrets and the SMTP password are write-only (`#[serde(skip_serializing)]` / masked) and never appear in API responses, exports or logs.
+- **Tokens are role-bound**: `services::auth::verify_token(token, role)`; admin tokens (`sub` = admin id, 12 h) and customer tokens (`sub` = email, 30 d) are not interchangeable. The admin middleware reloads the admin from the DB on every request (deleted users lose access immediately).
+- **Admin sessions**: The admin app keeps the token only in the httpOnly, `SameSite=Strict` cookie `admin_session`. `hooks.server.js` guards every page/API/upload, `handleFetch` attaches the session to server-side loads, and the proxy strips client-supplied `Authorization`/`Cookie`/`X-Dev-Mode`. Page JavaScript never sees a token.
+- **Initial admin**: Created from `ADMIN_INITIAL_PASSWORD` or a random password logged once; `is_default` accounts can only call `auth/status|me|change-credentials` until they set a new password (≥ 12 chars). Accounts still using the formerly published password are rotated at startup.
+- **Roles**: `superadmin` > `admin` > `editor`. Editors cannot access users, payments, email, system-settings writes or import/export. Only superadmins grant/modify/delete superadmins; the last superadmin cannot be removed or demoted; nobody deletes themselves.
+- **Brute force**: Admin login, customer login and reset emails are limited per account (8 attempts / 15 min); unknown accounts take the same bcrypt time.
+- **Customer accounts**: Registration never overwrites an existing account (409). Password reset is a two-step emailed token flow (32-byte random token, only its SHA-256 stored, 1 h, single use). Emails are normalised to lowercase.
+- **Guest order privacy**: Order numbers are sequential (GoBD) and therefore guessable — `GET /orders/lookup/:number` requires the order's 64-hex `access_token` (returned at checkout, used on the order-success URL) or the matching email. Download links are only returned for paid orders.
+- **Digital goods**: Public catalogue APIs never return `digital_download_url` or `DIGITAL_FILE` BOM rows (`public_product()`); files are only listed for paid orders.
+- **SQL**: All user input is bound (`$n` parameters). Never build SQL with `format!` from request data; escape `%`, `_`, `\` for `ILIKE` searches.
+- **Uploads**: Extensions are validated (no `html/js/xml/...`); both upload proxies serve files with `Content-Security-Policy: sandbox` and `nosniff`.
+- **Security headers**: Storefront and admin set `X-Frame-Options`, `nosniff`, `Referrer-Policy`, `Permissions-Policy` (storefront keeps `payment` allowed for wallets), HSTS on HTTPS; admin responses are `Cache-Control: no-store`.
+- **Privacy in the repository**: No personal names, handles, addresses, keys or real credentials in code, seeds, placeholders or docs — use generic values (`Max Mustermann`, `Example Store`, `ORD`). `.env` stays git-ignored.
 2. **Product Modeling & Digital Goods**:
    - Products are either `physical` or `digital`.
    - When a product is marked as `digital`, physical stock tracking is deactivated (virtual unlimited inventory `∞`).
@@ -44,16 +64,42 @@
    - Configurable stock availability display template with `{stock}` placeholder.
    - Stock thresholds trigger low-stock alerts on the Admin logistics dashboard.
    - Packing slips must render warehouse-ready information (SKU, variant breakdown, quantity, shipping address).
-   - Invoices must render legally compliant tax invoice breakdowns (order number, subtotal, tax rate, shipping cost, payment method, customer billing address).
-6. **Payment Providers**:
-   - Multi-gateway architecture: Stripe, PayPal (primary priority), Apple Pay, Google Pay, Amazon Pay.
-   - Each provider has configurable sandbox/production modes and toggle switches managed in the Admin Settings.
-7. **Shipping Provider Matrix**:
-   - Zones configured by country codes and package tiers (`standard`, `express`, `fragile`, `heavy`).
-   - Shipping rates automatically determined during customer checkout based on country and basket items.
-8. **Environment Toggles**:
-   - **Debug Mode**: Displays live sandbox payment helpers, verbose logging, and mock triggers.
-   - **Deployment Mode**: `development`, `staging`, `production`, `demo`.
+    - Invoices must render legally compliant tax invoice breakdowns (order number, subtotal, tax rate, shipping cost, payment method, customer billing address).
+6. **Payment Providers & Validation Rules (CRITICAL)**:
+   - **Gateways**: Exactly two real gateways exist in `payment_configs`: `stripe` and `paypal`. All other methods are payment *methods of Stripe*, toggled in `config_data.methods` (keys = `stripe::OPTIONAL_METHODS` + `apple_pay`/`google_pay`; mirrored in `storefront/src/lib/stripeMethods.js` and the admin `PaymentsManager`). They are never separate providers. Never add a provider that approves payments without verifying them with the real provider API.
+   - **Checkout UI**: The Payment Element always lists `card` first (default tab); wallets/one-click methods (Apple Pay, Google Pay, Link, Amazon Pay, PayPal via Stripe, Klarna) render as Express Checkout buttons that only appear once the form is complete and the legal checkboxes are ticked. Apple Pay/Google Pay require HTTPS and a domain registered via Admin → Payment Providers.
+   - **Delayed methods** (e.g. SEPA Direct Debit): a `processing` PaymentIntent creates the order with `payment_status = pending`; `payment_intent.succeeded` marks it paid (digital-only → completed), `payment_intent.payment_failed` cancels it and returns stock and coupon usage. A paid order is never cancelled by a late event.
+   - **PCI Scope**: Card numbers, CVCs and wallet tokens must never reach our servers. Card data is entered only in Stripe Elements (Payment Element) or on Stripe's hosted page; PayPal is authorized in PayPal's own buttons/popup.
+   - **Server-Side Amounts**: The amount charged is always computed by the backend (`CheckoutService::quote` / `price_order`). The browser never sends an amount. The storefront displays the server quote (`POST /checkout/quote`).
+   - **Pending Checkout → Order (exactly once)**: Before redirecting to/authorizing with a provider, the backend stores the checkout in `pending_checkouts` keyed by the provider reference (PaymentIntent / Checkout Session / PayPal order id). Orders are created only by `CheckoutService::finalize_pending`, which locks the pending row, verifies the paid amount equals the stored amount, and is idempotent (customer return page and webhook may race).
+   - **Verification**: Stripe PaymentIntents must be `succeeded` with `amount_received` == expected and currency `eur`; Checkout Sessions must be `payment_status = paid`; PayPal captures must be `COMPLETED` (or `PENDING` → order `payment_status = pending`). Stripe webhooks must pass HMAC-SHA256 signature verification (`Stripe-Signature`, 5-minute tolerance).
+   - **Automatic Refunds**: If an order cannot be created after a verified payment (e.g. stock sold out meanwhile, amount mismatch), refund it automatically at the provider and tell the customer. Admin refunds call the provider refund API via `orders.payment_reference`; an order is only marked `refunded` after the provider confirmed the refund.
+   - **Provider Visibility**: Storefront checkout MUST ONLY display gateways with `is_enabled == true` and a configured public key (`pk_...` / PayPal client id).
+   - **Secrets**: `secret_key` and `webhook_secret` are write-only — the admin API returns only `has_*` flags and masked hints; `config_data` is public (sent to the storefront) and must never contain secrets.
+   - **Testing**: Use Stripe test keys (`pk_test_`/`sk_test_`) with Stripe's test cards (`4242 4242 4242 4242` success, `4000 0000 0000 0002` declined, `4000 0000 0000 9995` insufficient funds, `4000 0025 0000 3155` 3-D Secure) and PayPal sandbox credentials. There is no offline mock approval path.
+   - **Zero False Approvals**: Never create an order or transition to `order-success` unless the provider confirmed the payment (or the server-computed total is exactly 0 € → `free` order). Otherwise return an explicit HTTP 4xx with descriptive messaging.
+   - **Button-Lösung with wallets/PayPal**: Wallet sheets open from our own "Order with Obligation to Pay" button (Payment Element). PayPal buttons are rendered directly beneath the label "Order with Obligation to Pay (… €) via PayPal" and refuse to open until terms are accepted.
+7. **Digital Fulfillment & Dynamic Updates**:
+   - **Instant Auto-Completion**: If an order contains only digital products, set `order_status = 'completed'` immediately upon successful payment. Do not queue for physical warehouse shipping.
+   - **Dynamic Asset Resolution**: When customers download digital products via `/account/downloads` or order details, dynamically query the current `products` table and `product_parts` (`part_sku = 'DIGITAL_FILE'`). If files are updated or revised by the merchant, customers must automatically receive the latest files.
+8. **Promo & Discount Code Engine**:
+   - Supported discount types: `free_shipping`, `fixed_amount`, `percentage`.
+   - Constraints: enforce `is_active`, `min_order_amount_cents`, `max_uses`, and `expires_at`.
+   - Atomic usage increment: increment `used_count` within the checkout transaction.
+9. **Admin User Governance**:
+   - Passwords must be hashed using bcrypt before storage.
+   - Protect against privilege escalation and ensure the final remaining `superadmin` user cannot be deleted.
+10. **SvelteKit SEO & Performance Standards**:
+    - **SEO**: Every public route renders `$lib/components/Seo.svelte` (title, description, canonical, OpenGraph/Twitter, JSON-LD such as `Product`, `BreadcrumbList`, `Organization`, `WebSite`). Canonical and OG URLs are built from the request origin (`$page.url.origin`) — never hard-code a domain; production must set the `ORIGIN` env var to the real shop URL.
+    - **Indexing**: Private paths (`/account`, `/checkout`, `/order-success`, `/track`) are `noindex` (set centrally in `+layout.svelte` via `PRIVATE_PATH`) and disallowed in `/robots.txt`; search result pages are `noindex, follow`. `/sitemap.xml` is generated dynamically from products, categories and menu-linked policy pages.
+    - **JSON-LD safety**: Always serialize via `jsonLdScript()` (escapes `<`) — never interpolate raw JSON into `{@html}`.
+    - **Performance**: Preload critical assets, enforce explicit dimensions on images to prevent CLS, use `loading="lazy"` on below-the-fold content, and leverage server `load` functions (`+page.server.js`) to avoid client waterfall latency.
+11. **Shipping Provider Matrix**:
+    - Zones configured by country codes and package tiers (`standard`, `express`, `fragile`, `heavy`).
+    - Shipping rates automatically determined during customer checkout based on country and basket items.
+12. **Environment Toggles**:
+    - **Debug Mode**: Displays live sandbox payment helpers, verbose logging, and mock triggers.
+    - **Deployment Mode**: `development`, `staging`, `production`, `demo`.
 
 ---
 
@@ -62,4 +108,5 @@
 - Maintain clean TypeScript and Svelte components with reactive stores and SSR loaders.
 - Ensure Dockerfiles are multi-stage and optimized for layer caching and minimal image size.
 - Log every major architectural decision and rollback in `.agent/backtracking_log.md`.
+
 

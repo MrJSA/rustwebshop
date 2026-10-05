@@ -112,8 +112,9 @@ impl DocumentGenerator {
 
         let payment_lower = order.payment_provider.to_lowercase();
         let payment_provider_display = match payment_lower.as_str() {
-            "stripe" => "Credit Card / Stripe",
+            "stripe" => "Card / Wallet (Stripe)",
             "paypal" => "PayPal",
+            "free" => "No payment required",
             "apple_pay" => "Apple Pay",
             "google_pay" => "Google Pay",
             "amazon_pay" => "Amazon Pay",

@@ -4,7 +4,7 @@ export async function load({ fetch }) {
 
   try {
     const res = await fetch(`${backendUrl}/api/v1/admin/settings/system`, {
-      headers: { 'X-Dev-Mode': 'true' }
+      headers: {}
     });
     if (res.ok) {
       settings = await res.json();

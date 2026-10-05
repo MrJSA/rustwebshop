@@ -6,7 +6,7 @@ export async function load({ fetch }) {
 
   try {
     const res = await fetch(`${backendUrl}/api/v1/admin/menu`, {
-      headers: { 'X-Dev-Mode': 'true' }
+      headers: {}
     });
     if (res.ok) menuItems = await res.json();
   } catch (e) {
@@ -15,7 +15,7 @@ export async function load({ fetch }) {
 
   try {
     const cRes = await fetch(`${backendUrl}/api/v1/admin/categories`, {
-      headers: { 'X-Dev-Mode': 'true' }
+      headers: {}
     });
     if (cRes.ok) categories = await cRes.json();
   } catch (e) {
@@ -24,7 +24,7 @@ export async function load({ fetch }) {
 
   try {
     const pRes = await fetch(`${backendUrl}/api/v1/admin/pages`, {
-      headers: { 'X-Dev-Mode': 'true' }
+      headers: {}
     });
     if (pRes.ok) pages = await pRes.json();
   } catch (e) {

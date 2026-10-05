@@ -3,6 +3,8 @@
   import { cart, cartCount, cartSubtotal, isCartOpen } from '$lib/stores/cart.js';
   import { customer } from '$lib/stores/customer.js';
   import CookieBanner from '$lib/components/CookieBanner.svelte';
+  import { page } from '$app/stores';
+  import { PRIVATE_PATH } from '$lib/seo.js';
   import {
     ShoppingBag,
     X,
@@ -22,11 +24,13 @@
     KeyRound,
     LogIn,
     Mail,
-    Phone
+    Phone,
+    Download
   } from 'lucide-svelte';
 
   export let data;
   $: store = data.store || {};
+  $: isPrivatePage = PRIVATE_PATH.test($page.url.pathname);
   $: currencySymbol = store.currency_symbol || '€';
   $: headerMenu = data.headerMenu || data.menuItems || [];
   $: footerMenu = data.footerMenu || [];
@@ -89,6 +93,13 @@
   }
 </script>
 
+<svelte:head>
+  {#if isPrivatePage}
+    <meta name="robots" content="noindex, nofollow" />
+  {/if}
+  <meta name="theme-color" content="#020617" />
+</svelte:head>
+
 <svelte:window on:click={(e) => {
   if (!e.target.closest('#account-dropdown-container')) {
     isAccountMenuOpen = false;
@@ -98,9 +109,10 @@
 <div class="min-h-screen flex flex-col bg-slate-950 text-slate-100 selection:bg-orange-500 selection:text-white">
   <!-- Top Announcement / Debug Bar (No admin button) -->
   {#if store.debug_mode}
-    <div class="bg-gradient-to-r from-orange-600 to-amber-600 px-4 py-1 text-center text-xs font-semibold tracking-wide text-white flex items-center justify-center gap-2 shadow-sm">
-      <span class="bg-white/20 px-1.5 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider">Sandbox Active</span>
-      <span>Simulated payment test mode enabled for Stripe, PayPal, Apple Pay, Google Pay & Amazon Pay.</span>
+    {@const liveStripe = (data.paymentProviders || []).some(p => p.provider === 'stripe' && !p.is_sandbox && p.is_enabled)}
+    <div class="bg-gradient-to-r {liveStripe ? 'from-emerald-700 to-teal-800' : 'from-orange-600 to-amber-600'} px-4 py-1 text-center text-xs font-semibold tracking-wide text-white flex items-center justify-center gap-2 shadow-sm">
+      <span class="bg-white/20 px-1.5 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider">{liveStripe ? 'Stripe Live Active' : 'Sandbox Active'}</span>
+      <span>{liveStripe ? 'Live Stripe payment gateway connected with live bank network authentication.' : 'Simulated payment test mode enabled for sandbox providers.'}</span>
     </div>
   {/if}
 
@@ -287,6 +299,14 @@
                 >
                   <Box size={15} class="text-slate-400" />
                   <span>Orders</span>
+                </a>
+                <a
+                  href="/account/downloads"
+                  on:click={() => isAccountMenuOpen = false}
+                  class="flex items-center gap-2.5 px-4 py-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-sky-400 transition-colors"
+                >
+                  <Download size={15} class="text-slate-400" />
+                  <span>Digital Downloads</span>
                 </a>
                 <a
                   href="/account/wishlist"

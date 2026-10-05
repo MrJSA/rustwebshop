@@ -33,3 +33,20 @@ pub struct ChangeAdminCredentialsRequest {
     pub new_username: String,
     pub new_password: String,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct CreateAdminUserRequest {
+    pub username: String,
+    pub password: String,
+    pub email: Option<String>,
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateAdminUserRequest {
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub email: Option<String>,
+    pub role: Option<String>,
+}
+

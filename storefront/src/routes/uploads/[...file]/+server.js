@@ -1,9 +1,14 @@
 export async function GET({ params, fetch }) {
   const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://backend:8000';
-  const filePath = params.file;
-  
+  const filePath = params.file || '';
+
+  // Only plain file names inside the uploads folder
+  if (!filePath || filePath.includes('..') || filePath.includes('\\')) {
+    return new Response('Not Found', { status: 404 });
+  }
+
   try {
-    const response = await fetch(`${backendUrl}/uploads/${filePath}`);
+    const response = await fetch(`${backendUrl}/uploads/${encodeURI(filePath)}`);
     if (!response.ok) {
       return new Response('Not Found', { status: response.status });
     }
@@ -15,7 +20,10 @@ export async function GET({ params, fetch }) {
       status: 200,
       headers: {
         'content-type': contentType,
-        'cache-control': cacheControl
+        'cache-control': cacheControl,
+        // Uploaded files are data, never active content (e.g. scripts embedded in SVGs)
+        'content-security-policy': "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox",
+        'x-content-type-options': 'nosniff'
       }
     });
   } catch (err) {

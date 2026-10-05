@@ -1,97 +1,106 @@
-use crate::models::Claims;
+use crate::services::auth::{bearer_token, verify_token, ROLE_ADMIN_TOKEN};
 use axum::{
     body::Body,
-    extract::Request,
-    http::{header::AUTHORIZATION, StatusCode},
+    extract::{Request, State},
+    http::{Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
 };
-use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde_json::json;
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
 
-pub async fn admin_auth_middleware(req: Request<Body>, next: Next) -> Result<Response, Response> {
-    // Check for development bypass header or query param
-    if let Some(dev_hdr) = req.headers().get("X-Dev-Mode") {
-        if dev_hdr == "true" {
-            return Ok(next.run(req).await);
-        }
+/// The authenticated admin, available to handlers via `Extension<CurrentAdmin>`.
+#[derive(Debug, Clone)]
+pub struct CurrentAdmin {
+    pub id: Uuid,
+    pub username: String,
+    pub role: String,
+    pub is_default: bool,
+}
+
+impl CurrentAdmin {
+    pub fn is_superadmin(&self) -> bool {
+        self.role == "superadmin"
     }
-
-    if let Some(query) = req.uri().query() {
-        if query.contains("dev=true") {
-            return Ok(next.run(req).await);
-        }
+    pub fn can_manage_store(&self) -> bool {
+        self.role == "superadmin" || self.role == "admin"
     }
+}
 
-    // Check Authorization header or query param "token=" or cookie "admin_token="
-    let mut token_opt = req
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|header| {
-            if header.starts_with("Bearer ") {
-                Some(header[7..].to_string())
-            } else {
-                None
-            }
-        });
+fn deny(status: StatusCode, code: &str, message: &str) -> Response {
+    (status, Json(json!({ "error": message, "code": code }))).into_response()
+}
 
-    if token_opt.is_none() {
-        if let Some(query) = req.uri().query() {
-            for param in query.split('&') {
-                if let Some(val) = param.strip_prefix("token=") {
-                    token_opt = Some(val.to_string());
-                    break;
-                }
-            }
-        }
-    }
+/// Paths an account that still has its initial password may use.
+fn allowed_with_default_password(path: &str) -> bool {
+    matches!(path, "/auth/status" | "/auth/me" | "/auth/change-credentials")
+}
 
-    if token_opt.is_none() {
-        if let Some(cookie) = req.headers().get(axum::http::header::COOKIE).and_then(|c| c.to_str().ok()) {
-            for part in cookie.split(';') {
-                let part = part.trim();
-                if let Some(val) = part.strip_prefix("admin_token=") {
-                    token_opt = Some(val.to_string());
-                    break;
-                }
-            }
-        }
-    }
+/// Store-wide configuration & data that editors must not touch.
+fn requires_store_manager(method: &Method, path: &str) -> bool {
+    path.starts_with("/users")
+        || path.starts_with("/settings/payments")
+        || path.starts_with("/export/")
+        || path.starts_with("/import/")
+        || path.starts_with("/settings/email")
+        || (path.starts_with("/settings/system") && method != Method::GET)
+}
 
-    let token = match token_opt {
-        Some(t) => t,
-        None => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "Missing or invalid Authorization header" })),
-            )
-                .into_response());
-        }
+pub async fn admin_auth_middleware(State(pool): State<PgPool>, mut req: Request<Body>, next: Next) -> Result<Response, Response> {
+    let claims = bearer_token(req.headers())
+        .and_then(|t| verify_token(t, ROLE_ADMIN_TOKEN))
+        .ok_or_else(|| deny(StatusCode::UNAUTHORIZED, "unauthenticated", "Please log in"))?;
+
+    let admin_id = Uuid::parse_str(&claims.sub).map_err(|_| deny(StatusCode::UNAUTHORIZED, "unauthenticated", "Please log in again"))?;
+    let row = sqlx::query("SELECT id, username, role, is_default FROM admin_users WHERE id = $1")
+        .bind(admin_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| deny(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Database unavailable"))?
+        .ok_or_else(|| deny(StatusCode::UNAUTHORIZED, "unauthenticated", "This admin account no longer exists"))?;
+
+    let admin = CurrentAdmin {
+        id: row.get("id"),
+        username: row.get("username"),
+        role: row.get("role"),
+        is_default: row.get("is_default"),
     };
 
-    let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "super_secret_rustwebshop_jwt_token_2026".to_string());
+    // Nested routers see the path without the /api/v1/admin prefix
+    let path = req.uri().path().trim_start_matches("/api/v1/admin").to_string();
 
-    match decode::<Claims>(
-        &token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    ) {
-        Ok(token_data) => {
-            if token_data.claims.role != "admin" {
-                return Err((
-                    StatusCode::FORBIDDEN,
-                    Json(json!({ "error": "Insufficient permissions" })),
-                )
-                    .into_response());
-            }
-            Ok(next.run(req).await)
-        }
-        Err(_) => Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Invalid or expired token" })),
-        )
-            .into_response()),
+    if admin.is_default && !allowed_with_default_password(&path) {
+        return Err(deny(StatusCode::FORBIDDEN, "password_change_required", "Please change the initial password before using the admin area"));
+    }
+    if requires_store_manager(req.method(), &path) && !admin.can_manage_store() {
+        return Err(deny(StatusCode::FORBIDDEN, "forbidden", "Your role does not allow this action"));
+    }
+
+    req.extensions_mut().insert(admin);
+    Ok(next.run(req).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editors_cannot_reach_store_configuration() {
+        assert!(requires_store_manager(&Method::GET, "/users"));
+        assert!(requires_store_manager(&Method::PUT, "/settings/payments/stripe"));
+        assert!(requires_store_manager(&Method::GET, "/export/store-data"));
+        assert!(requires_store_manager(&Method::POST, "/import/store-data"));
+        assert!(requires_store_manager(&Method::PUT, "/settings/system"));
+        assert!(!requires_store_manager(&Method::GET, "/settings/system"));
+        assert!(!requires_store_manager(&Method::GET, "/orders"));
+        assert!(!requires_store_manager(&Method::POST, "/products"));
+    }
+
+    #[test]
+    fn default_password_accounts_are_limited() {
+        assert!(allowed_with_default_password("/auth/change-credentials"));
+        assert!(!allowed_with_default_password("/orders"));
     }
 }

@@ -5,7 +5,7 @@ use sqlx::FromRow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct PaymentConfig {
-    pub provider: String, // 'stripe', 'paypal', 'apple_pay', 'google_pay', 'amazon_pay'
+    pub provider: String, // 'stripe', 'paypal'
     pub display_name: String,
     pub is_enabled: bool,
     pub is_sandbox: bool,
@@ -33,5 +33,6 @@ pub struct UpdatePaymentConfigRequest {
     pub is_sandbox: Option<bool>,
     pub public_client_id: Option<String>,
     pub secret_key: Option<String>,
+    pub webhook_secret: Option<String>,
     pub config_data: Option<JsonValue>,
 }

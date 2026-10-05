@@ -1,12 +1,12 @@
 use crate::models::{
-    CartItemInput, Category, CheckoutRequest, Claims, CreateStockNotificationRequest, CustomerAddress,
+    CartItemInput, Category, Claims, Coupon, CreateStockNotificationRequest, CustomerAddress,
     CustomerChangePasswordRequest, CustomerLoginRequest, CustomerRegisterRequest, EstimateShippingRequest,
     NavigationItem, OrderItem, PageContent, Product, ProductPart, ProductVariant, ProductWithVariants,
     PublicPaymentProviderInfo, ResetPasswordRequest, SaveAddressRequest, ShippingProvider,
     ShippingProviderWithZones, ShippingRate, ShippingZone, ShippingZoneWithRates, StoreSettings,
-    StoreSettingsDTO, ToggleWishlistRequest, UpdateCustomerProfileRequest,
+    StoreSettingsDTO, ToggleWishlistRequest, UpdateCustomerProfileRequest, ValidateCouponRequest,
+    ValidateCouponResponse,
 };
-use crate::services::checkout::CheckoutService;
 use axum::{
     extract::{Path, Query, State},
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
@@ -15,8 +15,8 @@ use axum::{
     Json, Router,
 };
 use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use serde::Deserialize;
+use crate::services::auth;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -43,8 +43,8 @@ pub fn public_router() -> Router<PgPool> {
         .route("/products/:id/notify-stock", post(public_subscribe_stock_notification))
         .route("/products/:slug/parts", get(public_get_product_parts))
         .route("/cart/validate", post(validate_cart))
+        .route("/coupons/validate", post(public_validate_coupon))
         .route("/shipping/rates", get(get_shipping_rates))
-        .route("/checkout", post(execute_checkout))
         .route("/orders/lookup/:order_number", get(lookup_order))
         // Customer Authentication & Profile
         .route("/auth/customer/register", post(public_customer_register))
@@ -54,6 +54,7 @@ pub fn public_router() -> Router<PgPool> {
         .route("/customer/change-password", post(public_customer_change_password))
         .route("/customer/profile", get(public_get_customer_profile).put(public_update_customer_profile))
         .route("/customer/orders", get(public_get_customer_orders))
+        .route("/customer/downloads", get(public_get_customer_downloads))
         .route("/customer/wishlist", get(public_get_customer_wishlist))
         .route("/customer/wishlist/toggle", post(public_toggle_wishlist))
         .route("/customer/addresses", get(public_get_customer_addresses).post(public_save_customer_address))
@@ -82,12 +83,6 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
         logo_url: settings.logo_url,
         phone: settings.phone,
         hero_config: settings.hero_config,
-        smtp_host: settings.smtp_host,
-        smtp_port: settings.smtp_port,
-        smtp_username: settings.smtp_username,
-        smtp_from_email: settings.smtp_from_email,
-        smtp_from_name: settings.smtp_from_name,
-        smtp_enabled: settings.smtp_enabled,
         require_registered_checkout: settings.require_registered_checkout,
         require_email_verification: settings.require_email_verification,
         store_subtitle: settings.store_subtitle,
@@ -147,6 +142,12 @@ struct PaymentProviderRow {
     config_data: serde_json::Value,
 }
 
+/// Download URLs of digital products are only handed out for paid orders, never in catalogue responses.
+fn public_product(mut product: Product) -> Product {
+    product.digital_download_url = None;
+    product
+}
+
 async fn get_category_and_descendants(pool: &PgPool, cat_name_or_slug: &str) -> Vec<String> {
     let rows: Vec<String> = sqlx::query_scalar(
         r#"
@@ -177,52 +178,69 @@ async fn list_products(
     State(pool): State<PgPool>,
     Query(query): Query<ProductQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let mut sql = "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE is_active = true".to_string();
+    // All user input is passed as bind parameters — never interpolated into SQL.
+    let category_names: Option<Vec<String>> = match query.category.as_deref().filter(|c| !c.is_empty()) {
+        Some(cat) => Some(get_category_and_descendants(&pool, cat).await),
+        None => None,
+    };
+    let subcategory_names: Option<Vec<String>> = match query.subcategory.as_deref().filter(|c| !c.is_empty()) {
+        Some(sub) => Some(get_category_and_descendants(&pool, sub).await),
+        None => None,
+    };
+    let product_type = query.product_type.as_deref().filter(|t| !t.is_empty());
+    // Escape LIKE wildcards so a search for "%" or "_" is literal
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let term: String = s.chars().take(100).collect();
+            format!("%{}%", term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
+        });
 
-    if let Some(cat) = &query.category {
-        let descendant_names = get_category_and_descendants(&pool, cat).await;
-        let formatted_in = descendant_names
-            .iter()
-            .map(|n| format!("'{}'", n.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        sql.push_str(&format!(" AND (category IN ({}) OR subcategory IN ({}))", formatted_in, formatted_in));
-    }
-    if let Some(subcat) = &query.subcategory {
-        let descendant_names = get_category_and_descendants(&pool, subcat).await;
-        let formatted_in = descendant_names
-            .iter()
-            .map(|n| format!("'{}'", n.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        sql.push_str(&format!(" AND (category IN ({}) OR subcategory IN ({}))", formatted_in, formatted_in));
-    }
-    if let Some(ptype) = &query.product_type {
-        sql.push_str(&format!(" AND product_type = '{}'", ptype.replace('\'', "''")));
-    }
-    if let Some(s) = &query.search {
-        let clean_search = s.replace('\'', "''");
-        sql.push_str(&format!(" AND (title ILIKE '%{}%' OR description ILIKE '%{}%')", clean_search, clean_search));
-    }
-    sql.push_str(" ORDER BY created_at DESC");
+    let products = sqlx::query_as::<_, Product>(
+        r#"
+        SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent
+        FROM products
+        WHERE is_active = true
+          AND ($1::text[] IS NULL OR category = ANY($1) OR subcategory = ANY($1))
+          AND ($2::text[] IS NULL OR category = ANY($2) OR subcategory = ANY($2))
+          AND ($3::text IS NULL OR product_type = $3)
+          AND ($4::text IS NULL OR title ILIKE $4 OR description ILIKE $4)
+        ORDER BY created_at DESC
+        "#,
+    )
+    .bind(category_names)
+    .bind(subcategory_names)
+    .bind(product_type)
+    .bind(search)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let products = sqlx::query_as::<_, Product>(&sql)
-        .fetch_all(&pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // One query for all variants instead of one per product
+    let ids: Vec<Uuid> = products.iter().map(|p| p.id).collect();
+    let all_variants = sqlx::query_as::<_, ProductVariant>(
+        "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = ANY($1) ORDER BY created_at ASC"
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
 
-    let mut result = Vec::new();
-    for product in products {
-        let variants = sqlx::query_as::<_, ProductVariant>(
-            "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
-        )
-        .bind(product.id)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
-
-        result.push(ProductWithVariants { product, variants });
+    let mut by_product: std::collections::HashMap<Uuid, Vec<ProductVariant>> = std::collections::HashMap::new();
+    for v in all_variants {
+        by_product.entry(v.product_id).or_default().push(v);
     }
+
+    let result: Vec<ProductWithVariants> = products
+        .into_iter()
+        .map(|product| {
+            let variants = by_product.remove(&product.id).unwrap_or_default();
+            ProductWithVariants { product: public_product(product), variants }
+        })
+        .collect();
 
     Ok(Json(result))
 }
@@ -248,7 +266,7 @@ async fn get_product_by_slug(
     .await
     .unwrap_or_default();
 
-    Ok(Json(ProductWithVariants { product, variants }))
+    Ok(Json(ProductWithVariants { product: public_product(product), variants }))
 }
 
 async fn validate_cart(
@@ -352,80 +370,43 @@ async fn get_shipping_rates(
     }
 }
 
-async fn execute_checkout(
-    State(pool): State<PgPool>,
-    Json(payload): Json<CheckoutRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // 1. Check require_registered_checkout and require_email_verification
-    if let Ok(settings_row) = sqlx::query("SELECT require_registered_checkout, require_email_verification FROM store_settings WHERE id = 1")
-        .fetch_one(&pool)
-        .await
-    {
-        let req_reg: bool = settings_row.get("require_registered_checkout");
-        let req_verify: bool = settings_row.get("require_email_verification");
-
-        if req_reg {
-            let cust_opt = sqlx::query("SELECT is_verified FROM customers WHERE email = $1")
-                .bind(&payload.customer_email)
-                .fetch_optional(&pool)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-            match cust_opt {
-                None => {
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        "Purchases are restricted to registered customers. Please log in or create an account to complete checkout.".to_string(),
-                    ));
-                }
-                Some(cust) => {
-                    let is_verified: bool = cust.get("is_verified");
-                    if req_verify && !is_verified {
-                        return Err((
-                            StatusCode::FORBIDDEN,
-                            "Your account email has not been verified yet. Please check your inbox and verify your email before placing an order.".to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    match CheckoutService::execute_checkout(&pool, payload).await {
-        Ok(res) => {
-            // Trigger order created confirmation email
-            let pool_clone = pool.clone();
-            let order_num = res.order_number.clone();
-            let is_paid = res.payment_status == "paid" || res.payment_status == "authorized";
-            tokio::spawn(async move {
-                crate::services::email::send_order_created_notification(&pool_clone, &order_num).await;
-                if is_paid {
-                    crate::services::email::send_payment_received_notification(&pool_clone, &order_num).await;
-                }
-            });
-            Ok(Json(res))
-        }
-        Err(err) => Err((StatusCode::BAD_REQUEST, err.to_string())),
-    }
+#[derive(Debug, Deserialize)]
+pub struct OrderLookupQuery {
+    /// Secret returned to the buyer at checkout (order confirmation page)
+    pub token: Option<String>,
+    /// Alternative proof of ownership for the "track order" form
+    pub email: Option<String>,
 }
 
+/// Order status for guests. Requires the order's secret access token or the matching email address,
+/// because order numbers are sequential (GoBD) and therefore guessable.
 async fn lookup_order(
     State(pool): State<PgPool>,
     Path(order_number): Path<String>,
+    Query(proof): Query<OrderLookupQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let not_found = || (StatusCode::NOT_FOUND, "Order not found. Please check the order number and email address.".to_string());
+    let token = proof.token.as_deref().map(str::trim).filter(|t| t.len() >= 32);
+    let email = proof.email.as_deref().map(|e| e.trim().to_lowercase()).filter(|e| e.contains('@'));
+    if token.is_none() && email.is_none() {
+        return Err(not_found());
+    }
     let order_row = sqlx::query(
         r#"
         SELECT id, order_number, customer_name, customer_email, total_cents,
                payment_provider, payment_status, order_status, tracking_number, created_at
         FROM orders
         WHERE order_number = $1
+          AND (($2::text IS NOT NULL AND access_token = $2) OR ($3::text IS NOT NULL AND LOWER(customer_email) = $3))
         "#,
     )
     .bind(&order_number)
+    .bind(token)
+    .bind(email)
     .fetch_optional(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
+    .ok_or_else(not_found)?;
 
     let order_id: Uuid = order_row.get("id");
     let num: String = order_row.get("order_number");
@@ -440,7 +421,7 @@ async fn lookup_order(
 
     let items_rows = sqlx::query(
         r#"
-        SELECT product_title, variant_title, sku, quantity, unit_price_cents, is_digital, download_url
+        SELECT product_id, product_title, variant_title, sku, quantity, unit_price_cents, is_digital, download_url
         FROM order_items
         WHERE order_id = $1
         "#,
@@ -450,17 +431,77 @@ async fn lookup_order(
     .await
     .unwrap_or_default();
 
-    let items = items_rows.into_iter().map(|r| {
-        json!({
-            "product_title": r.get::<String, _>("product_title"),
-            "variant_title": r.get::<String, _>("variant_title"),
-            "sku": r.get::<String, _>("sku"),
-            "quantity": r.get::<i32, _>("quantity"),
-            "unit_price_cents": r.get::<i32, _>("unit_price_cents"),
-            "is_digital": r.get::<bool, _>("is_digital"),
-            "download_url": r.get::<Option<String>, _>("download_url"),
-        })
-    }).collect::<Vec<_>>();
+    let mut items = Vec::new();
+    for r in items_rows {
+        let pid: Option<Uuid> = r.try_get("product_id").ok().flatten();
+        let ptitle: String = r.get("product_title");
+        let vtitle: String = r.get("variant_title");
+        let sku: String = r.get("sku");
+        let qty: i32 = r.get("quantity");
+        let unit_price: i32 = r.get("unit_price_cents");
+        let is_digital: bool = r.get("is_digital");
+        let orig_url: Option<String> = r.try_get("download_url").ok().flatten();
+
+        let mut files = Vec::new();
+        let order_paid = pay_status == "paid";
+        // Never hand out download links for unpaid, failed or refunded orders
+        let mut effective_url = if order_paid { orig_url.clone() } else { None };
+
+        if is_digital && order_paid {
+            if let Some(product_id) = pid {
+                let live_prod = sqlx::query("SELECT digital_download_url FROM products WHERE id = $1")
+                    .bind(product_id)
+                    .fetch_optional(&pool)
+                    .await
+                    .ok()
+                    .flatten();
+                let live_url = live_prod.and_then(|lp| lp.try_get::<Option<String>, _>("digital_download_url").ok().flatten());
+                effective_url = live_url.or(orig_url);
+
+                if let Some(ref u) = effective_url {
+                    if let Ok(json_files) = serde_json::from_str::<Vec<serde_json::Value>>(u) {
+                        for f in json_files {
+                            let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("File");
+                            let link = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                            if !link.is_empty() {
+                                files.push(json!({ "name": name, "url": link }));
+                            }
+                        }
+                    } else if !u.trim().is_empty() {
+                        files.push(json!({ "name": format!("{} Package", ptitle), "url": u }));
+                    }
+                }
+
+                // Also BOM files
+                let bom_parts = sqlx::query("SELECT part_name, notes FROM product_parts WHERE product_id = $1 AND part_sku = 'DIGITAL_FILE'")
+                    .bind(product_id)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap_or_default();
+                for bp in bom_parts {
+                    let pname: String = bp.get("part_name");
+                    let furl: Option<String> = bp.get("notes");
+                    if let Some(fu) = furl {
+                        if !fu.trim().is_empty() && !files.iter().any(|f| f.get("url").and_then(|v| v.as_str()) == Some(&fu)) {
+                            files.push(json!({ "name": pname, "url": fu }));
+                        }
+                    }
+                }
+            }
+        }
+
+        items.push(json!({
+            "product_id": pid,
+            "product_title": ptitle,
+            "variant_title": vtitle,
+            "sku": sku,
+            "quantity": qty,
+            "unit_price_cents": unit_price,
+            "is_digital": is_digital,
+            "download_url": effective_url,
+            "files": files,
+        }));
+    }
 
     Ok(Json(json!({
         "order": {
@@ -620,7 +661,7 @@ async fn public_get_product_parts(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Product not found".to_string()))?;
 
     let parts = sqlx::query_as::<_, ProductPart>(
-        "SELECT id, product_id, variant_id, part_name, part_sku, quantity, notes, created_at FROM product_parts WHERE product_id = $1 ORDER BY created_at ASC"
+        "SELECT id, product_id, variant_id, part_name, part_sku, quantity, notes, created_at FROM product_parts WHERE product_id = $1 AND COALESCE(part_sku, '') <> 'DIGITAL_FILE' ORDER BY created_at ASC"
     )
     .bind(product_id)
     .fetch_all(&pool)
@@ -632,119 +673,108 @@ async fn public_get_product_parts(
 
 // 11. Customer Authentication & Account Actions
 fn extract_customer_email(headers: &HeaderMap) -> Option<String> {
-    let auth_header = headers.get(AUTHORIZATION)?.to_str().ok()?;
-    if !auth_header.starts_with("Bearer ") {
-        return None;
-    }
-    let token = &auth_header[7..];
-    let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "super_secret_rustwebshop_jwt_token_2026".to_string());
-    let token_data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    ).ok()?;
-    Some(token_data.claims.sub)
+    let token = auth::bearer_token(headers)?;
+    auth::verify_token(token, auth::ROLE_CUSTOMER_TOKEN).map(|c| c.sub)
 }
+
+fn customer_token(email: &str) -> Result<String, (StatusCode, String)> {
+    auth::issue_token(email, auth::ROLE_CUSTOMER_TOKEN, Duration::days(30))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn normalize_email(email: &str) -> Result<String, (StatusCode, String)> {
+    let email = email.trim().to_lowercase();
+    if email.len() < 3 || email.len() > 254 || !email.contains('@') || email.contains(char::is_whitespace) {
+        return Err((StatusCode::BAD_REQUEST, "Please enter a valid email address".to_string()));
+    }
+    Ok(email)
+}
+
+const MIN_CUSTOMER_PASSWORD: usize = 8;
 
 async fn public_customer_register(
     State(pool): State<PgPool>,
     Json(payload): Json<CustomerRegisterRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let user_id = Uuid::new_v4();
-    let hashed = bcrypt::hash(&payload.password, bcrypt::DEFAULT_COST)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let email = normalize_email(&payload.email)?;
+    if payload.password.len() < MIN_CUSTOMER_PASSWORD {
+        return Err((StatusCode::BAD_REQUEST, format!("Password must be at least {} characters", MIN_CUSTOMER_PASSWORD)));
+    }
 
     let full_name = payload.full_name.clone().unwrap_or_else(|| {
         let first = payload.first_name.clone().unwrap_or_default();
         let last = payload.last_name.clone().unwrap_or_default();
         format!("{} {}", first, last).trim().to_string()
     });
-
-    let first_name = payload.first_name.clone().unwrap_or_else(|| {
-        full_name.split_whitespace().next().unwrap_or("").to_string()
-    });
+    let first_name = payload.first_name.clone().unwrap_or_else(|| full_name.split_whitespace().next().unwrap_or("").to_string());
     let last_name = payload.last_name.clone().unwrap_or_else(|| {
         let parts: Vec<&str> = full_name.split_whitespace().collect();
-        if parts.len() > 1 { parts[1..].join(" ") } else { "".to_string() }
+        if parts.len() > 1 { parts[1..].join(" ") } else { String::new() }
     });
-    let display_name = if !full_name.is_empty() { full_name.clone() } else { payload.email.split('@').next().unwrap_or("Customer").to_string() };
+    let display_name = if !full_name.is_empty() { full_name.clone() } else { email.split('@').next().unwrap_or("Customer").to_string() };
 
-    // Check if email verification is required
     let require_verification: bool = sqlx::query_scalar("SELECT require_email_verification FROM store_settings WHERE id = 1")
         .fetch_one(&pool)
         .await
         .unwrap_or(false);
+    let verification_token = require_verification.then(|| auth::random_token(32));
 
-    let is_verified = !require_verification;
-    let verification_token = if require_verification {
-        Some(Uuid::new_v4().to_string())
-    } else {
-        None
-    };
+    let hashed = bcrypt::hash(&payload.password, bcrypt::DEFAULT_COST)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Insert into users
-    sqlx::query(
-        "INSERT INTO users (id, username, email, password_hash, role) VALUES ($1, $2, $3, $4, 'customer') ON CONFLICT (email) DO NOTHING"
-    )
-    .bind(user_id)
-    .bind(&payload.email)
-    .bind(&payload.email)
-    .bind(&hashed)
-    .execute(&pool)
-    .await
-    .ok();
-
-    // Insert into customers
-    sqlx::query(
+    // Never overwrite an existing account: registering with a taken email must not reset its password.
+    let inserted = sqlx::query(
         r#"
         INSERT INTO customers (id, email, password_hash, first_name, last_name, display_name, preferred_currency, is_verified, verification_token)
-        VALUES ($1, $2, $3, $4, $5, $6, 'EUR', $7, $8)
-        ON CONFLICT (email) DO UPDATE
-        SET password_hash = $3, first_name = $4, last_name = $5, display_name = $6, is_verified = $7, verification_token = $8, updated_at = NOW()
+        SELECT $1, $2, $3, $4, $5, $6, 'EUR', $7, $8
+        WHERE NOT EXISTS (SELECT 1 FROM customers WHERE LOWER(email) = $2)
+        ON CONFLICT (email) DO NOTHING
         "#
     )
-    .bind(user_id)
-    .bind(&payload.email)
+    .bind(Uuid::new_v4())
+    .bind(&email)
     .bind(&hashed)
-    .bind(&first_name)
-    .bind(&last_name)
-    .bind(&display_name)
-    .bind(is_verified)
+    .bind(first_name.trim())
+    .bind(last_name.trim())
+    .bind(display_name.trim())
+    .bind(!require_verification)
     .bind(&verification_token)
     .execute(&pool)
     .await
-    .map_err(|e| (StatusCode::BAD_REQUEST, format!("Email already registered: {}", e)))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .rows_affected();
 
-    // Send verification email if required
-    if let Some(tok) = verification_token.clone() {
-        let pool_clone = pool.clone();
-        let email_copy = payload.email.clone();
-        let name_copy = display_name.clone();
-        tokio::spawn(async move {
-            if let Ok(settings) = sqlx::query_as::<_, StoreSettings>("SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, updated_at FROM store_settings WHERE id = 1").fetch_one(&pool_clone).await {
-                crate::services::email::send_verification_email(&settings, &email_copy, &name_copy, &tok, "http://localhost:8080").await;
-            }
-        });
+    if inserted == 0 {
+        return Err((StatusCode::CONFLICT, "An account with this email already exists. Please log in or reset your password.".to_string()));
     }
 
-    let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "super_secret_rustwebshop_jwt_token_2026".to_string());
-    let claims = Claims {
-        sub: payload.email.clone(),
-        role: "customer".to_string(),
-        exp: (Utc::now() + Duration::days(30)).timestamp() as usize,
-    };
-    let token = encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(tok) = verification_token {
+        let pool_clone = pool.clone();
+        let email_copy = email.clone();
+        let name_copy = display_name.clone();
+        tokio::spawn(async move {
+            if let Ok(settings) = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1").fetch_one(&pool_clone).await {
+                crate::services::email::send_verification_email(&settings, &email_copy, &name_copy, &tok, &crate::services::email::shop_public_url()).await;
+            }
+        });
+        // No session until the email address is confirmed
+        return Ok((StatusCode::CREATED, Json(json!({
+            "email": email,
+            "full_name": display_name,
+            "is_verified": false,
+            "verification_pending": true
+        }))));
+    }
 
     Ok((StatusCode::CREATED, Json(json!({
-        "token": token,
-        "email": payload.email,
+        "token": customer_token(&email)?,
+        "email": email,
         "full_name": display_name,
         "first_name": first_name,
         "last_name": last_name,
         "preferred_currency": "EUR",
-        "is_verified": is_verified,
-        "verification_pending": require_verification
+        "is_verified": true,
+        "verification_pending": false
     }))))
 }
 
@@ -752,106 +782,116 @@ async fn public_customer_login(
     State(pool): State<PgPool>,
     Json(payload): Json<CustomerLoginRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // Check customers table first
-    let cust_row = sqlx::query(
-        "SELECT id, email, password_hash, first_name, last_name, display_name, preferred_currency, is_verified FROM customers WHERE email = $1"
+    let email = payload.email.trim().to_lowercase();
+    let limiter_key = format!("customer:{}", email);
+    auth::check_login_allowed(&limiter_key).map_err(|m| (StatusCode::TOO_MANY_REQUESTS, m))?;
+
+    let row = sqlx::query(
+        "SELECT email, password_hash, first_name, last_name, display_name, preferred_currency, is_verified FROM customers WHERE LOWER(email) = $1"
     )
-    .bind(&payload.email)
+    .bind(&email)
     .fetch_optional(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let (email, hash, first_name, last_name, display_name, preferred_currency, is_verified) = if let Some(r) = cust_row {
-        (
-            r.get::<String, _>("email"),
-            r.get::<String, _>("password_hash"),
-            r.get::<String, _>("first_name"),
-            r.get::<String, _>("last_name"),
-            r.get::<String, _>("display_name"),
-            r.get::<String, _>("preferred_currency"),
-            r.get::<bool, _>("is_verified"),
-        )
-    } else {
-        let user_row = sqlx::query("SELECT id, username, email, password_hash FROM users WHERE email = $1 OR username = $1")
-            .bind(&payload.email)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid email or password".to_string()))?;
-
-        (
-            user_row.get::<String, _>("email"),
-            user_row.get::<String, _>("password_hash"),
-            "".to_string(),
-            "".to_string(),
-            user_row.get::<String, _>("username"),
-            "EUR".to_string(),
-            true,
-        )
+    let hash = match &row {
+        Some(r) => r.get::<String, _>("password_hash"),
+        None => dummy_password_hash().to_string(), // equalise timing for unknown accounts
     };
-
-    let is_valid = bcrypt::verify(&payload.password, &hash).unwrap_or(false);
-    if !is_valid {
+    let valid = bcrypt::verify(&payload.password, &hash).unwrap_or(false);
+    let Some(r) = row.filter(|_| valid) else {
+        auth::record_login_failure(&limiter_key);
         return Err((StatusCode::UNAUTHORIZED, "Invalid email or password".to_string()));
-    }
+    };
+    auth::clear_login_failures(&limiter_key);
 
-    // Check verification status if required
     let require_verification: bool = sqlx::query_scalar("SELECT require_email_verification FROM store_settings WHERE id = 1")
         .fetch_one(&pool)
         .await
         .unwrap_or(false);
-
-    if require_verification && !is_verified {
+    if require_verification && !r.get::<bool, _>("is_verified") {
         return Err((
             StatusCode::FORBIDDEN,
             "Please verify your email address before logging in. Check your inbox for the activation link.".to_string(),
         ));
     }
 
-    let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "super_secret_rustwebshop_jwt_token_2026".to_string());
-    let claims = Claims {
-        sub: email.clone(),
-        role: "customer".to_string(),
-        exp: (Utc::now() + Duration::days(30)).timestamp() as usize,
-    };
-    let token = encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
+    let stored_email: String = r.get("email");
+    let display_name: String = r.get("display_name");
     Ok(Json(json!({
-        "token": token,
-        "email": email,
-        "full_name": if !display_name.is_empty() { display_name } else { email.split('@').next().unwrap_or("Customer").to_string() },
-        "first_name": first_name,
-        "last_name": last_name,
-        "preferred_currency": preferred_currency
+        "token": customer_token(&stored_email)?,
+        "email": stored_email,
+        "full_name": if !display_name.is_empty() { display_name } else { stored_email.split('@').next().unwrap_or("Customer").to_string() },
+        "first_name": r.get::<String, _>("first_name"),
+        "last_name": r.get::<String, _>("last_name"),
+        "preferred_currency": r.get::<String, _>("preferred_currency")
     })))
 }
 
+fn dummy_password_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| bcrypt::hash(auth::random_token(16), bcrypt::DEFAULT_COST).unwrap_or_default())
+}
+
+/// Token-based password reset. The response never reveals whether an account exists.
 async fn public_customer_reset_password(
     State(pool): State<PgPool>,
     Json(payload): Json<ResetPasswordRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    if let Some(new_pass) = payload.new_password {
-        let hashed = bcrypt::hash(&new_pass, bcrypt::DEFAULT_COST)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        sqlx::query("UPDATE users SET password_hash = $1 WHERE email = $2")
-            .bind(&hashed)
-            .bind(&payload.email)
-            .execute(&pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Step 2: set a new password with the emailed token
+    if let (Some(token), Some(new_pass)) = (payload.token.as_deref(), payload.new_password.as_deref()) {
+        if new_pass.len() < MIN_CUSTOMER_PASSWORD {
+            return Err((StatusCode::BAD_REQUEST, format!("Password must be at least {} characters", MIN_CUSTOMER_PASSWORD)));
+        }
+        let hashed = bcrypt::hash(new_pass, bcrypt::DEFAULT_COST).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE customers
+            SET password_hash = $1, reset_token_hash = NULL, reset_token_expires_at = NULL, is_verified = TRUE, updated_at = NOW()
+            WHERE reset_token_hash = $2 AND reset_token_expires_at > NOW()
+            "#
+        )
+        .bind(&hashed)
+        .bind(auth::sha256_hex(token.trim()))
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .rows_affected();
 
-        sqlx::query("UPDATE customers SET password_hash = $1, updated_at = NOW() WHERE email = $2")
-            .bind(&hashed)
-            .bind(&payload.email)
-            .execute(&pool)
-            .await
-            .ok();
-
+        if updated == 0 {
+            return Err((StatusCode::BAD_REQUEST, "This reset link is invalid or has expired. Please request a new one.".to_string()));
+        }
         return Ok(Json(json!({ "message": "Password successfully reset. You may now log in." })));
     }
 
-    Ok(Json(json!({ "message": "A password reset confirmation link has been sent to your email address." })))
+    // Step 1: email a reset link (only the token's hash is stored)
+    if let Some(email) = payload.email.as_deref().map(|e| e.trim().to_lowercase()).filter(|e| e.contains('@')) {
+        let limiter_key = format!("reset:{}", email);
+        if auth::check_login_allowed(&limiter_key).is_ok() {
+            auth::record_login_failure(&limiter_key); // also caps reset emails per address
+            let token = auth::random_token(32);
+            let found = sqlx::query(
+                "UPDATE customers SET reset_token_hash = $1, reset_token_expires_at = NOW() + INTERVAL '1 hour' WHERE LOWER(email) = $2 RETURNING email"
+            )
+            .bind(auth::sha256_hex(&token))
+            .bind(&email)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+            if let Some(row) = found {
+                let to: String = row.get("email");
+                let pool_clone = pool.clone();
+                tokio::spawn(async move {
+                    if let Ok(settings) = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1").fetch_one(&pool_clone).await {
+                        crate::services::email::send_password_reset_email(&settings, &to, &token).await;
+                    }
+                });
+            }
+        }
+    }
+
+    Ok(Json(json!({ "message": "If an account exists for this email, a password reset link has been sent." })))
 }
 
 async fn public_customer_change_password(
@@ -1031,6 +1071,58 @@ async fn public_get_customer_orders(
 
         let shipping_addr: serde_json::Value = r.try_get("shipping_address").unwrap_or(json!({}));
 
+        let mut items_with_files = Vec::new();
+        for mut item in items {
+            let mut files = Vec::new();
+            if item.is_digital {
+                if let Some(pid) = item.product_id {
+                    let live_prod = sqlx::query("SELECT digital_download_url FROM products WHERE id = $1")
+                        .bind(pid)
+                        .fetch_optional(&pool)
+                        .await
+                        .ok()
+                        .flatten();
+                    let live_url = live_prod.and_then(|lp| lp.try_get::<Option<String>, _>("digital_download_url").ok().flatten());
+                    let effective_url = live_url.or_else(|| item.download_url.clone());
+                    if let Some(ref u) = effective_url {
+                        item.download_url = Some(u.clone());
+                        if let Ok(json_files) = serde_json::from_str::<Vec<serde_json::Value>>(u) {
+                            for f in json_files {
+                                let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("File");
+                                let link = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                                if !link.is_empty() {
+                                    files.push(json!({ "name": name, "url": link }));
+                                }
+                            }
+                        } else if !u.trim().is_empty() {
+                            files.push(json!({ "name": format!("{} File", item.product_title), "url": u }));
+                        }
+                    }
+
+                    // Also BOM files
+                    let bom_parts = sqlx::query("SELECT part_name, notes FROM product_parts WHERE product_id = $1 AND part_sku = 'DIGITAL_FILE'")
+                        .bind(pid)
+                        .fetch_all(&pool)
+                        .await
+                        .unwrap_or_default();
+                    for bp in bom_parts {
+                        let pname: String = bp.get("part_name");
+                        let furl: Option<String> = bp.get("notes");
+                        if let Some(fu) = furl {
+                            if !fu.trim().is_empty() && !files.iter().any(|f| f.get("url").and_then(|v| v.as_str()) == Some(&fu)) {
+                                files.push(json!({ "name": pname, "url": fu }));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut item_json = serde_json::to_value(&item).unwrap_or(json!({}));
+            if let Some(obj) = item_json.as_object_mut() {
+                obj.insert("files".to_string(), json!(files));
+            }
+            items_with_files.push(item_json);
+        }
+
         list.push(json!({
             "id": order_id,
             "order_number": r.get::<String, _>("order_number"),
@@ -1047,7 +1139,7 @@ async fn public_get_customer_orders(
             "tracking_number": r.get::<Option<String>, _>("tracking_number"),
             "notes": r.get::<Option<String>, _>("notes"),
             "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
-            "items": items
+            "items": items_with_files
         }));
     }
 
@@ -1295,7 +1387,7 @@ async fn public_get_related_products(
         .await
         .unwrap_or_default();
 
-        result.push(ProductWithVariants { product: p, variants });
+        result.push(ProductWithVariants { product: public_product(p), variants });
     }
 
     Ok(Json(result))
@@ -1418,7 +1510,7 @@ async fn public_get_carousels(
             .await
             .unwrap_or_default();
 
-            items_with_variants.push(ProductWithVariants { product, variants });
+            items_with_variants.push(ProductWithVariants { product: public_product(product), variants });
         }
 
         carousels.push(json!({
@@ -1429,5 +1521,238 @@ async fn public_get_carousels(
     }
 
     Ok(Json(carousels))
+}
+
+// ==========================================
+// Coupon Code Validation
+// ==========================================
+
+async fn public_validate_coupon(
+    State(pool): State<PgPool>,
+    Json(payload): Json<ValidateCouponRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let clean_code = payload.code.trim().to_uppercase();
+    if clean_code.is_empty() {
+        return Ok(Json(ValidateCouponResponse {
+            valid: false,
+            code: String::new(),
+            discount_type: String::new(),
+            discount_cents: 0,
+            message: "Please enter a promo code".to_string(),
+        }));
+    }
+
+    let coupon_opt = sqlx::query_as::<_, Coupon>(
+        "SELECT * FROM coupons WHERE UPPER(code) = UPPER($1) AND is_active = true"
+    )
+    .bind(&clean_code)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let coupon = match coupon_opt {
+        Some(c) => c,
+        None => {
+            return Ok(Json(ValidateCouponResponse {
+                valid: false,
+                code: clean_code,
+                discount_type: String::new(),
+                discount_cents: 0,
+                message: "Coupon code is invalid or not active".to_string(),
+            }));
+        }
+    };
+
+    if let Some(exp) = coupon.expires_at {
+        if exp < chrono::Utc::now() {
+            return Ok(Json(ValidateCouponResponse {
+                valid: false,
+                code: clean_code,
+                discount_type: coupon.discount_type,
+                discount_cents: 0,
+                message: "This coupon code has expired".to_string(),
+            }));
+        }
+    }
+
+    if let Some(max_u) = coupon.max_uses {
+        if coupon.used_count >= max_u {
+            return Ok(Json(ValidateCouponResponse {
+                valid: false,
+                code: clean_code,
+                discount_type: coupon.discount_type,
+                discount_cents: 0,
+                message: "This coupon code has reached its maximum usage limit".to_string(),
+            }));
+        }
+    }
+
+    if payload.subtotal_cents < coupon.min_order_cents {
+        return Ok(Json(ValidateCouponResponse {
+            valid: false,
+            code: clean_code,
+            discount_type: coupon.discount_type,
+            discount_cents: 0,
+            message: format!(
+                "Order subtotal of {:.2} € is below the minimum {:.2} € required for this code",
+                (payload.subtotal_cents as f64) / 100.0,
+                (coupon.min_order_cents as f64) / 100.0
+            ),
+        }));
+    }
+
+    let shipping_cents = payload.shipping_cost_cents.unwrap_or(0);
+    let (discount_cents, msg) = match coupon.discount_type.as_str() {
+        "free_shipping" => {
+            (shipping_cents, "Free shipping coupon applied!".to_string())
+        }
+        "fixed_amount" => {
+            let disc = std::cmp::min(coupon.value_cents, payload.subtotal_cents);
+            (disc, format!("{:.2} € discount applied!", (disc as f64) / 100.0))
+        }
+        "percentage" => {
+            let pct = std::cmp::min(100, std::cmp::max(0, coupon.value_cents));
+            let disc = ((payload.subtotal_cents as f64) * (pct as f64 / 100.0)).round() as i32;
+            (disc, format!("{}% discount applied!", pct))
+        }
+        _ => (0, "Coupon applied".to_string()),
+    };
+
+    Ok(Json(ValidateCouponResponse {
+        valid: true,
+        code: coupon.code,
+        discount_type: coupon.discount_type,
+        discount_cents,
+        message: msg,
+    }))
+}
+
+// ==========================================
+// Customer Digital Downloads Overview
+// Dynamic resolution from latest product records and BOM
+// ==========================================
+
+#[derive(Serialize)]
+struct DownloadFileItem {
+    name: String,
+    url: String,
+}
+
+#[derive(Serialize)]
+struct CustomerDownloadProduct {
+    product_id: Option<Uuid>,
+    product_title: String,
+    image_url: Option<String>,
+    order_id: Uuid,
+    order_number: String,
+    purchase_date: chrono::DateTime<chrono::Utc>,
+    files: Vec<DownloadFileItem>,
+}
+
+async fn public_get_customer_downloads(
+    headers: HeaderMap,
+    State(pool): State<PgPool>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let email = extract_customer_email(&headers)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))?;
+
+    // Query all digital order items from paid/completed orders for this customer
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            oi.id as order_item_id, oi.product_id, oi.product_title, oi.download_url as original_download_url,
+            o.id as order_id, o.order_number, o.created_at as purchase_date,
+            p.title as live_product_title, p.digital_download_url as live_download_url, p.image_url as live_image_url
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN products p ON p.id = oi.product_id
+        WHERE o.customer_email = $1 
+          AND (o.payment_status = 'paid' OR o.order_status = 'completed')
+          AND oi.is_digital = true
+        ORDER BY o.created_at DESC
+        "#
+    )
+    .bind(&email)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut result = Vec::new();
+
+    for r in rows {
+        let product_id: Option<Uuid> = r.get("product_id");
+        let order_id: Uuid = r.get("order_id");
+        let order_number: String = r.get("order_number");
+        let purchase_date: chrono::DateTime<chrono::Utc> = r.get("purchase_date");
+
+        // Prefer live product title and image if product still exists
+        let live_title: Option<String> = r.try_get("live_product_title").ok().flatten();
+        let fallback_title: String = r.get("product_title");
+        let product_title = live_title.unwrap_or(fallback_title);
+        let image_url: Option<String> = r.try_get("live_image_url").ok().flatten();
+
+        // Always resolve latest files from product record first, falling back to original if product deleted
+        let live_url: Option<String> = r.try_get("live_download_url").ok().flatten();
+        let orig_url: Option<String> = r.try_get("original_download_url").ok().flatten();
+        let effective_url = live_url.or(orig_url);
+
+        let mut files = Vec::new();
+
+        if let Some(ref url_str) = effective_url {
+            if let Ok(json_files) = serde_json::from_str::<Vec<serde_json::Value>>(url_str) {
+                for f in json_files {
+                    let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("File");
+                    let u = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    if !u.is_empty() {
+                        files.push(DownloadFileItem {
+                            name: name.to_string(),
+                            url: u.to_string(),
+                        });
+                    }
+                }
+            } else if !url_str.trim().is_empty() {
+                files.push(DownloadFileItem {
+                    name: format!("{} Package", product_title),
+                    url: url_str.clone(),
+                });
+            }
+        }
+
+        // ALSO check current BOM product_parts where part_sku = 'DIGITAL_FILE'
+        if let Some(pid) = product_id {
+            let parts = sqlx::query("SELECT part_name, notes FROM product_parts WHERE product_id = $1 AND part_sku = 'DIGITAL_FILE'")
+                .bind(pid)
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
+
+            for p in parts {
+                let pname: String = p.get("part_name");
+                let file_url: Option<String> = p.get("notes");
+                if let Some(furl) = file_url {
+                    if !furl.trim().is_empty() {
+                        if !files.iter().any(|existing| existing.url == furl) {
+                            files.push(DownloadFileItem {
+                                name: pname,
+                                url: furl,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        result.push(CustomerDownloadProduct {
+            product_id,
+            product_title,
+            image_url,
+            order_id,
+            order_number,
+            purchase_date,
+            files,
+        });
+    }
+
+    Ok(Json(result))
 }
 

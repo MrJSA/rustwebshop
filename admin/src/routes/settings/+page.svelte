@@ -35,11 +35,14 @@
   } from 'lucide-svelte';
   import ShippingManager from '$lib/components/ShippingManager.svelte';
   import MediaManager from '$lib/components/MediaManager.svelte';
+  import AdminUsersManager from '$lib/components/AdminUsersManager.svelte';
+  import PaymentsManager from '$lib/components/PaymentsManager.svelte';
 
   export let data;
   let settings = data.settings || {};
   let paymentConfigs = data.paymentConfigs || [];
   let shippingProviders = data.shippingProviders || [];
+  let adminUsers = data.adminUsers || [];
 
   $: activeTab = $page.url.searchParams.get('tab') || 'identity';
   function setTab(tab) {
@@ -110,7 +113,6 @@
     const token = localStorage.getItem('admin_token');
     const headers = {
       'Content-Type': 'application/json',
-      'X-Dev-Mode': 'true',
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     };
 
@@ -201,18 +203,20 @@
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: text
       });
 
-      const resData = await res.json().catch(() => ({}));
+      const bodyText = await res.text();
+      let resData = {};
+      try { resData = JSON.parse(bodyText); } catch (_) {}
       if (res.ok) {
-        exportSuccessNotice = `Store restored successfully! Restored: ${resData.restored?.products || 0} products, ${resData.restored?.categories || 0} categories, ${resData.restored?.pages || 0} policy pages, ${resData.restored?.menu_items || 0} menu items. Reloading...`;
+        const r = resData.restored || {};
+        exportSuccessNotice = `Store restored successfully! Restored: ${r.products || 0} products, ${r.variants || 0} variants, ${r.categories || 0} categories, ${r.pages || 0} pages, ${r.menu_items || 0} menu items, ${r.shipping_zones || 0} shipping zones, ${r.coupons || 0} coupons. Reloading...`;
         setTimeout(() => window.location.reload(), 2500);
       } else {
-        exportErrorNotice = resData.error || 'Failed to restore store data.';
+        exportErrorNotice = resData.error || bodyText || 'Failed to restore store data.';
       }
     } catch (err) {
       exportErrorNotice = 'Invalid JSON backup file or parse failure: ' + err.message;
@@ -230,7 +234,6 @@
       const token = localStorage.getItem('admin_token');
       const res = await fetch('/api/v1/admin/export/store-data', {
         headers: {
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         }
       });
@@ -261,7 +264,6 @@
       const token = localStorage.getItem('admin_token');
       const res = await fetch('/api/v1/admin/export/media', {
         headers: {
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         }
       });
@@ -281,40 +283,6 @@
       exportErrorNotice = 'Failed to export media library: ' + err.message;
     } finally {
       isExportingMedia = false;
-    }
-  }
-
-  // --- Payment Providers State ---
-  let savingProvider = null;
-  let paymentNotice = '';
-
-  async function savePaymentConfig(provider) {
-    savingProvider = provider.provider;
-    paymentNotice = '';
-
-    try {
-      const res = await fetch(`/api/v1/admin/settings/payments/${provider.provider}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true'
-        },
-        body: JSON.stringify({
-          display_name: provider.display_name,
-          is_enabled: provider.is_enabled,
-          is_sandbox: provider.is_sandbox,
-          public_client_id: provider.public_client_id
-        })
-      });
-
-      if (res.ok) {
-        paymentNotice = `Saved settings for ${provider.display_name} successfully!`;
-        setTimeout(() => paymentNotice = '', 3500);
-      }
-    } catch (e) {
-      console.error('Failed to save payment config:', e);
-    } finally {
-      savingProvider = null;
     }
   }
 
@@ -349,7 +317,6 @@
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({
@@ -392,7 +359,6 @@
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dev-Mode': 'true',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({ recipient: testRecipient })
@@ -477,6 +443,16 @@
     >
       <Image size={15} />
       <span>Media Library</span>
+    </button>
+
+    <button
+      type="button"
+      on:click={() => setTab('users')}
+      class="px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 {activeTab === 'users' ? 'bg-orange-600 text-white shadow-lg shadow-orange-600/25 ring-1 ring-orange-500' : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'}"
+    >
+      <UserCheck size={15} />
+      <span>Admin Users & Access</span>
+      <span class="text-[10px] px-2 py-0.5 rounded-full {activeTab === 'users' ? 'bg-white/20 text-white' : 'bg-slate-800 text-slate-400'}">{adminUsers.length}</span>
     </button>
 
     <button
@@ -985,105 +961,7 @@
 
   <!-- TAB 2: Payment Providers -->
   {:else if activeTab === 'payments'}
-    <div class="space-y-6">
-      <div>
-        <h2 class="text-xl font-black text-white tracking-tight flex items-center gap-2.5">
-          <CreditCard size={22} class="text-orange-500" />
-          Payment Gateway Processors
-        </h2>
-        <p class="text-xs text-slate-400 mt-1">
-          Manage active payment methods. Stripe and PayPal are primary; Apple Pay, Google Pay, and Crypto are configurable.
-        </p>
-      </div>
-
-      {#if paymentNotice}
-        <div class="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold flex items-center gap-2">
-          <Check size={16} />
-          <span>{paymentNotice}</span>
-        </div>
-      {/if}
-
-      <div class="space-y-5">
-        {#each paymentConfigs as provider}
-          {@const isStripe = provider.provider === 'stripe'}
-          <div class="p-6 rounded-3xl border shadow-xl space-y-4 {isStripe ? 'bg-gradient-to-br from-slate-900 via-slate-900 to-orange-950/20 border-orange-500/50 shadow-orange-950/20 ring-1 ring-orange-500/20' : 'bg-slate-900 border-slate-800'}">
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
-              <div class="flex items-center gap-3">
-                <div class="w-10 h-10 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-center font-black text-orange-400">
-                  {#if provider.provider === 'stripe'}S
-                  {:else if provider.provider === 'paypal'}P
-                  {:else if provider.provider === 'apple_pay'}
-                  {:else if provider.provider === 'google_pay'}G
-                  {:else if provider.provider === 'crypto'}₿
-                  {:else}M{/if}
-                </div>
-                <div>
-                  <h3 class="text-sm font-bold text-white flex items-center gap-2">
-                    <span>{provider.display_name}</span>
-                    {#if isStripe}
-                      <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-500/20 text-orange-400 border border-orange-500/30">Primary</span>
-                    {/if}
-                  </h3>
-                  <span class="text-xs text-slate-500 font-mono">provider: {provider.provider}</span>
-                </div>
-              </div>
-
-              <!-- Toggles: Enabled & Sandbox -->
-              <div class="flex items-center gap-6 text-xs">
-                <label class="flex items-center gap-2 cursor-pointer font-semibold text-slate-300">
-                  <input type="checkbox" bind:checked={provider.is_sandbox} class="accent-orange-500 w-4 h-4" />
-                  <span>Sandbox / Test Mode</span>
-                </label>
-
-                <label class="flex items-center gap-2 cursor-pointer font-semibold text-slate-300">
-                  <input type="checkbox" bind:checked={provider.is_enabled} class="accent-orange-500 w-4 h-4" />
-                  <span>Enabled</span>
-                </label>
-              </div>
-            </div>
-
-            <!-- Provider Configuration Inputs -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-              <div>
-                <label class="block text-slate-400 mb-1 font-semibold">Storefront Display Title</label>
-                <input
-                  type="text"
-                  bind:value={provider.display_name}
-                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
-                />
-              </div>
-
-              <div>
-                <label class="block text-slate-400 mb-1 font-semibold">Public Key / Merchant Client ID</label>
-                <input
-                  type="text"
-                  bind:value={provider.public_client_id}
-                  placeholder={provider.is_sandbox ? 'pk_test_...' : 'pk_live_...'}
-                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-                />
-              </div>
-            </div>
-
-            <!-- Footer Save & Webhook Info -->
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-800/80 text-xs">
-              <span class="text-slate-500 font-mono text-[11px]">
-                Webhook Endpoint: <code class="text-orange-400">/api/v1/payments/{provider.provider}/webhook</code>
-              </span>
-
-              <button
-                type="button"
-                on:click={() => savePaymentConfig(provider)}
-                disabled={savingProvider === provider.provider}
-                class="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-orange-600/30 flex items-center gap-1.5 self-start sm:self-auto transition-all"
-              >
-                <Save size={14} />
-                <span>{savingProvider === provider.provider ? 'Saving...' : 'Save Provider'}</span>
-              </button>
-            </div>
-          </div>
-        {/each}
-      </div>
-    </div>
+    <PaymentsManager configs={paymentConfigs} />
 
   <!-- TAB 3: Email & Auth Policies -->
   {:else if activeTab === 'email'}
@@ -1165,7 +1043,7 @@
               <input
                 type="password"
                 bind:value={smtpPassword}
-                placeholder="••••••••••••"
+                placeholder="Leave empty to keep the saved password"
                 class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
               />
             </div>
@@ -1421,6 +1299,8 @@
         </div>
       </div>
     </div>
+  {:else if activeTab === 'users'}
+    <AdminUsersManager initialUsers={adminUsers} />
   {/if}
 </div>
 
