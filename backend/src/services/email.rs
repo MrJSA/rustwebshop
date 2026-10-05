@@ -110,7 +110,7 @@ pub async fn send_verification_email(
     customer_name: &str,
     token: &str,
     origin: &str,
-) {
+) -> Result<(), String> {
     let verify_url = format!("{}/account/verify?token={}", origin.trim_end_matches('/'), token);
     let subject = format!("Verify your account - {}", settings.store_name);
     let html = format!(
@@ -134,7 +134,7 @@ pub async fn send_verification_email(
         html_escape(&settings.store_name), html_escape(customer_name), verify_url, verify_url, verify_url
     );
 
-    let _ = send_email_raw(settings, to_email, &subject, &html).await;
+    send_email_raw(settings, to_email, &subject, &html).await
 }
 
 pub async fn send_order_created_email(

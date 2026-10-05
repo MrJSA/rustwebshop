@@ -10,6 +10,28 @@
   let errorMsg = '';
   let successMsg = '';
   let isLoading = false;
+  let needsVerification = false;
+  let isResending = false;
+
+  async function resendVerification() {
+    isResending = true;
+    errorMsg = '';
+    successMsg = '';
+    try {
+      const res = await fetch('/api/v1/auth/customer/resend-verification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) successMsg = `${data.message} Please check your inbox and spam folder.`;
+      else errorMsg = data.error || 'The email could not be sent. Please try again later.';
+    } catch (e) {
+      errorMsg = 'Network error. Please try again.';
+    } finally {
+      isResending = false;
+    }
+  }
 
   async function handleLogin() {
     errorMsg = '';
@@ -23,6 +45,8 @@
       const data = await res.json();
       if (!res.ok) {
         errorMsg = data.error || 'Invalid email or password';
+        // 403 = correct password but email not verified yet
+        needsVerification = res.status === 403;
       } else {
         customer.login(data.token, data.email, data.full_name);
         goto('/');
@@ -47,9 +71,14 @@
       if (!res.ok) {
         errorMsg = data.error || 'Registration failed. Email may already be in use.';
       } else if (data.verification_pending || !data.token) {
-        successMsg = 'Account created! Please confirm your email address via the link we just sent you, then log in.';
         activeTab = 'login';
         password = '';
+        needsVerification = true;
+        if (data.verification_email_sent === false) {
+          errorMsg = 'Your account was created, but the verification email could not be sent right now. Please try "Resend verification email" later or contact the shop.';
+        } else {
+          successMsg = `Account created! We sent a verification link to ${data.email}. Please confirm your email address, then log in.`;
+        }
       } else {
         customer.login(data.token, data.email, data.full_name);
         goto('/');
@@ -90,10 +119,28 @@
 
     <!-- Error Alert -->
     {#if errorMsg}
-      <div class="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs flex items-center gap-2">
+      <div role="alert" class="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs flex items-center gap-2">
         <AlertCircle size={16} class="flex-shrink-0" />
         <span>{errorMsg}</span>
       </div>
+    {/if}
+
+    {#if successMsg}
+      <div role="status" class="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs flex items-center gap-2">
+        <CheckCircle2 size={16} class="flex-shrink-0" />
+        <span>{successMsg}</span>
+      </div>
+    {/if}
+
+    {#if needsVerification}
+      <button
+        type="button"
+        on:click={resendVerification}
+        disabled={isResending || !email}
+        class="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition-all disabled:opacity-50"
+      >
+        {isResending ? 'Sending…' : 'Resend verification email'}
+      </button>
     {/if}
 
     {#if activeTab === 'login'}

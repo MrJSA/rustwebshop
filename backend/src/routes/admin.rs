@@ -1428,12 +1428,36 @@ async fn check_settings_permissions(pool: &PgPool, admin: &CurrentAdmin, payload
     Ok(())
 }
 
+/// Customers can only verify their email if the shop can send emails. Refuse saves that would
+/// require verification while sending is off (checked only when one of the involved fields changes,
+/// so unrelated saves never fail because of an existing configuration).
+async fn check_email_verification_possible(pool: &PgPool, payload: &UpdateStoreSettingsRequest) -> Result<(), (StatusCode, String)> {
+    let current = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let verify = payload.require_email_verification.unwrap_or(current.require_email_verification);
+    let enabled = payload.smtp_enabled.unwrap_or(current.smtp_enabled);
+    let host = payload.smtp_host.clone().unwrap_or_else(|| current.smtp_host.clone());
+    let touched = payload.require_email_verification.map_or(false, |v| v != current.require_email_verification)
+        || payload.smtp_enabled.map_or(false, |v| v != current.smtp_enabled)
+        || payload.smtp_host.as_ref().map_or(false, |h| h.trim() != current.smtp_host.trim());
+    if touched && verify && !(enabled && !host.trim().is_empty()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "\"Require email verification\" needs working email sending: turn on SMTP and enter a mail server first — otherwise new customers can never activate their accounts.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn admin_update_system_settings(
     State(pool): State<PgPool>,
     Extension(admin): Extension<CurrentAdmin>,
     Json(payload): Json<UpdateStoreSettingsRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     check_settings_permissions(&pool, &admin, &payload).await?;
+    check_email_verification_possible(&pool, &payload).await?;
 
     sqlx::query(
         r#"
@@ -1550,6 +1574,7 @@ async fn admin_test_email(
     .fetch_one(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let saved = settings.clone();
 
     // Test exactly what is in the form, even if it has not been saved yet
     if let Some(o) = payload.smtp {
@@ -1567,7 +1592,22 @@ async fn admin_test_email(
         .await
         .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
 
-    Ok(Json(json!({ "success": true, "message": "Test email sent successfully!" })))
+    // The shop itself uses the *saved* settings — say so if they would not send anything
+    let differs = saved.smtp_host.trim() != settings.smtp_host.trim()
+        || saved.smtp_port != settings.smtp_port
+        || saved.smtp_username.trim() != settings.smtp_username.trim()
+        || saved.smtp_password != settings.smtp_password
+        || saved.smtp_encryption != settings.smtp_encryption
+        || saved.smtp_from_email.trim() != settings.smtp_from_email.trim();
+    let warning = if !saved.smtp_enabled || saved.smtp_host.trim().is_empty() {
+        Some("The test worked with the values in the form, but email sending is switched OFF in the saved settings — the shop does not send any emails (verification, orders) until you enable SMTP and click Save.")
+    } else if differs {
+        Some("The test used the values in the form, which differ from the saved settings. Click Save so the shop uses them.")
+    } else {
+        None
+    };
+
+    Ok(Json(json!({ "success": true, "message": "Test email sent successfully!", "warning": warning })))
 }
 
 // 9. Media Library Handlers

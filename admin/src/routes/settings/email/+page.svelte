@@ -98,7 +98,8 @@
       if (res.ok) {
         testResult = {
           success: true,
-          message: resData.message || `Test email dispatched successfully to ${testRecipient}!`
+          message: resData.message || `Test email dispatched successfully to ${testRecipient}!`,
+          warning: resData.warning
         };
       } else {
         testResult = {
@@ -330,6 +331,12 @@
         {/if}
         <span>{testResult.message}</span>
       </div>
+      {#if testResult.warning}
+        <div class="p-3.5 rounded-xl text-xs font-semibold bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-start gap-2">
+          <AlertCircle size={16} class="flex-shrink-0" />
+          <span>{testResult.warning}</span>
+        </div>
+      {/if}
     {/if}
   </div>
 

@@ -379,7 +379,7 @@
 
       const data = await res.json();
       if (res.ok) {
-        testResult = { success: true, message: data.message || `Test email dispatched successfully to ${testRecipient}!` };
+        testResult = { success: true, message: data.message || `Test email dispatched successfully to ${testRecipient}!`, warning: data.warning };
       } else {
         testResult = { success: false, message: data.error || 'Failed to send test email. Check SMTP credentials.' };
       }
@@ -1028,6 +1028,11 @@
               </span>
             </label>
           </div>
+          {#if !smtpEnabled}
+            <p class="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2">
+              Email sending is switched off: the shop sends no emails at all (account verification, password reset, order confirmations). Turn it on and click Save.
+            </p>
+          {/if}
 
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
             <div class="sm:col-span-2">
@@ -1170,6 +1175,12 @@
             {/if}
             <span>{testResult.message}</span>
           </div>
+          {#if testResult.warning}
+            <div class="p-3.5 rounded-xl text-xs font-semibold bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-start gap-2">
+              <AlertCircle size={16} class="flex-shrink-0" />
+              <span>{testResult.warning}</span>
+            </div>
+          {/if}
         {/if}
       </form>
     </div>

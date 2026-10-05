@@ -50,6 +50,7 @@ pub fn public_router() -> Router<PgPool> {
         .route("/auth/customer/register", post(public_customer_register))
         .route("/auth/customer/login", post(public_customer_login))
         .route("/auth/customer/reset-password", post(public_customer_reset_password))
+        .route("/auth/customer/resend-verification", post(public_resend_verification))
         .route("/customer/verify", get(public_verify_customer_email))
         .route("/customer/change-password", post(public_customer_change_password))
         .route("/customer/profile", get(public_get_customer_profile).put(public_update_customer_profile))
@@ -692,6 +693,55 @@ fn normalize_email(email: &str) -> Result<String, (StatusCode, String)> {
 
 const MIN_CUSTOMER_PASSWORD: usize = 8;
 
+async fn send_verification(pool: &PgPool, email: &str, name: &str, token: &str) -> Result<(), String> {
+    let settings = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    crate::services::email::send_verification_email(&settings, email, name, token, &crate::services::email::shop_public_url()).await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResendVerificationRequest {
+    pub email: String,
+}
+
+/// Sends a new verification link to an unverified account. The answer never reveals whether the
+/// account exists — except that email sending as a whole is unavailable.
+async fn public_resend_verification(
+    State(pool): State<PgPool>,
+    Json(payload): Json<ResendVerificationRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let email = payload.email.trim().to_lowercase();
+    let generic = Json(json!({ "message": "If an unverified account exists for this email, a new verification link has been sent." }));
+
+    let limiter_key = format!("verify:{}", email);
+    if auth::check_login_allowed(&limiter_key).is_err() {
+        return Ok(generic);
+    }
+    auth::record_login_failure(&limiter_key); // caps resend emails per address
+
+    let token = auth::random_token(32);
+    let row = sqlx::query(
+        "UPDATE customers SET verification_token = $1, updated_at = NOW() WHERE LOWER(email) = $2 AND is_verified = FALSE RETURNING email, display_name"
+    )
+    .bind(&token)
+    .bind(&email)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if let Some(r) = row {
+        let to: String = r.get("email");
+        let name: String = r.get("display_name");
+        if let Err(e) = send_verification(&pool, &to, &name, &token).await {
+            tracing::error!("Resending a verification email failed: {}", e);
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "Emails cannot be sent at the moment. Please try again later or contact the shop.".to_string()));
+        }
+    }
+    Ok(generic)
+}
+
 async fn public_customer_register(
     State(pool): State<PgPool>,
     Json(payload): Json<CustomerRegisterRequest>,
@@ -749,20 +799,18 @@ async fn public_customer_register(
     }
 
     if let Some(tok) = verification_token {
-        let pool_clone = pool.clone();
-        let email_copy = email.clone();
-        let name_copy = display_name.clone();
-        tokio::spawn(async move {
-            if let Ok(settings) = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1").fetch_one(&pool_clone).await {
-                crate::services::email::send_verification_email(&settings, &email_copy, &name_copy, &tok, &crate::services::email::shop_public_url()).await;
-            }
-        });
+        // Sent before answering so the customer learns immediately if the email could not go out
+        let sent = send_verification(&pool, &email, &display_name, &tok).await;
+        if let Err(e) = &sent {
+            tracing::error!("Verification email for a new customer could not be sent: {}", e);
+        }
         // No session until the email address is confirmed
         return Ok((StatusCode::CREATED, Json(json!({
             "email": email,
             "full_name": display_name,
             "is_verified": false,
-            "verification_pending": true
+            "verification_pending": true,
+            "verification_email_sent": sent.is_ok()
         }))));
     }
 
