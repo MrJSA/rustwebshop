@@ -6,8 +6,8 @@
   // Keys must match the backend's stripe::OPTIONAL_METHODS (+ apple_pay / google_pay wallets)
   const STRIPE_METHOD_GROUPS = [
     {
-      title: 'Express buttons & wallets',
-      note: 'Shown as one-click buttons above the order button.',
+      title: 'Wallets & quick payment',
+      note: 'Each one is listed as its own option at checkout.',
       methods: [
         { key: 'apple_pay', label: 'Apple Pay', hint: 'Safari on iPhone / iPad / Mac. Needs HTTPS and your domain registered below.' },
         { key: 'google_pay', label: 'Google Pay', hint: 'Chrome / Android with a saved card. Needs HTTPS and your domain registered below.' },
@@ -19,7 +19,7 @@
     },
     {
       title: 'Bank transfers & local methods',
-      note: 'Shown as additional tabs next to the card form.',
+      note: 'Each one is listed as its own option at checkout.',
       methods: [
         { key: 'sepa_debit', label: 'SEPA Direct Debit', hint: 'Delayed: the order is created as "payment pending" and marked paid by the webhook after 2–14 days.' },
         { key: 'ideal', label: 'iDEAL', hint: 'Netherlands' },
@@ -310,7 +310,7 @@
         <div class="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-start gap-3 opacity-80">
           <input type="checkbox" checked disabled class="mt-0.5 w-4 h-4 accent-orange-600" />
           <div class="text-xs">
-            <div class="font-bold text-white">Credit &amp; debit cards <span class="text-[10px] text-emerald-400 font-semibold">(default form)</span></div>
+            <div class="font-bold text-white">Credit / Debit card <span class="text-[10px] text-emerald-400 font-semibold">(default, always first)</span></div>
             <p class="text-[10px] text-slate-500">Visa, Mastercard, American Express … always enabled and pre-selected.</p>
           </div>
         </div>

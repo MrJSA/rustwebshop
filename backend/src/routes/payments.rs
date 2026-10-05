@@ -138,14 +138,26 @@ async fn free_order(State(pool): State<PgPool>, Json(req): Json<CheckoutRequest>
 
 // ---------------------------------------------------------------- Stripe
 
-async fn stripe_create_intent(State(pool): State<PgPool>, Json(req): Json<CheckoutRequest>) -> Result<impl IntoResponse, ApiError> {
+#[derive(Deserialize)]
+struct StripeIntentRequest {
+    #[serde(flatten)]
+    checkout: CheckoutRequest,
+    /// Method chosen in the checkout list (card, apple_pay, klarna, …); all enabled methods if absent
+    payment_method: Option<String>,
+}
+
+async fn stripe_create_intent(State(pool): State<PgPool>, Json(body): Json<StripeIntentRequest>) -> Result<impl IntoResponse, ApiError> {
+    let req = body.checkout;
     let cfg = ProviderConfig::load_enabled(&pool, "stripe").await.map_err(bad_request)?;
     stripe::secret_key(&cfg).map_err(bad_request)?;
+    if let Some(m) = body.payment_method.as_deref() {
+        stripe::intent_type_for(&cfg, m).map_err(bad_request)?;
+    }
     let amount = prepare_paid_checkout(&pool, &req, stripe::MIN_AMOUNT_CENTS).await?;
 
     let pending_id = CheckoutService::create_pending(&pool, "stripe", &req, amount).await.map_err(bad_request)?;
     let description = order_description(&store_name(&pool).await, &req);
-    let intent = stripe::create_payment_intent(&cfg, amount, &pending_id.to_string(), req.customer_email.trim(), &description)
+    let intent = stripe::create_payment_intent(&cfg, amount, &pending_id.to_string(), req.customer_email.trim(), &description, body.payment_method.as_deref())
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
 

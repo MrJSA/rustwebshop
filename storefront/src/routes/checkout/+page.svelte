@@ -7,7 +7,7 @@
   import { ShieldCheck, Lock, CreditCard, AlertCircle, ArrowRight, MapPin, UserCheck, Tag, Loader2, ExternalLink, Gift } from 'lucide-svelte';
   import { loadStripe } from '@stripe/stripe-js';
   import { Elements, PaymentElement, ExpressCheckout } from '$lib/stripe';
-  import { paymentMethodTypes, methodLabels, expressPaymentMethods, hasExpressMethods } from '$lib/stripeMethods.js';
+  import { checkoutMethods } from '$lib/stripeMethods.js';
 
   export let data;
   $: store = data.store || {};
@@ -28,17 +28,28 @@
   $: stripeTestMode = !!stripeKey && stripeKey.startsWith('pk_test_');
   $: stripeHosted = stripeProvider?.config_data?.checkout_mode === 'hosted';
   $: stripeMethods = stripeProvider?.config_data?.methods || {};
-  $: stripePaymentMethodTypes = paymentMethodTypes(stripeMethods);
-  $: stripeMethodLabels = methodLabels(stripeMethods);
-  $: stripeExpressMethods = expressPaymentMethods(stripeMethods);
-  $: showExpressCheckout = hasExpressMethods(stripeMethods);
-  // Wallets get their own buttons (Express Checkout); the form below defaults to card entry
+  // Wallets are their own list entries; the card form never shows them (or Link)
   const paymentElementWallets = { applePay: 'never', googlePay: 'never' };
 
-  let selectedProvider = '';
-  $: if (enabledProviders.length > 0 && !enabledProviders.some((p) => p.provider === selectedProvider)) {
-    selectedProvider = enabledProviders[0].provider;
+  // Apple Pay / Google Pay only exist on supported devices: detected once Stripe has loaded
+  let walletAvailability = {};
+  $: walletsToDetect = !!stripeKey && !stripeHosted && (stripeMethods.apple_pay || stripeMethods.google_pay);
+
+  // Every payment method as its own entry, listed underneath each other
+  $: paymentMethods = checkoutMethods({
+    stripeEnabled: !!stripeKey,
+    stripeHosted,
+    stripeMethods,
+    paypalEnabled: !!paypalProvider,
+    walletAvailability
+  });
+  // Credit / debit card is the default
+  let selectedMethodId = 'card';
+  $: if (paymentMethods.length > 0 && !paymentMethods.some((m) => m.id === selectedMethodId)) {
+    selectedMethodId = paymentMethods[0].id;
   }
+  $: selectedMethod = paymentMethods.find((m) => m.id === selectedMethodId);
+  $: selectedProvider = selectedMethod?.kind === 'paypal' ? 'paypal' : 'stripe';
 
   // Form State
   let customerName = '';
@@ -372,19 +383,26 @@
     return problem[0];
   }
 
-  // Express buttons only appear once everything (incl. the legal checkboxes) is filled in — the
-  // wallet sheet then completes a legally binding order (Button-Lösung). Arguments list the dependencies.
-  $: expressBlocker = (customerName, customerEmail, streetAddress, postalCode, city, selectedShippingRateId,
-    availableRates, acceptedTerms, acceptedDigitalWaiver, quote, quoteError, isQuoting, $cart, formProblem());
-  let expressElements = null;
-  let expressAvailable = null; // null = unknown, false = no wallet on this device
+  // ---------------------------------------------------------------- Apple Pay / Google Pay
+  // A hidden wallet element reports which wallets this device/browser supports; only those are listed.
+  let walletElements = null;
 
-  function onExpressReady(event) {
-    const available = event.availablePaymentMethods;
-    expressAvailable = !!available && Object.values(available).some(Boolean);
+  function onWalletDetect(event) {
+    const available = event.availablePaymentMethods || {};
+    walletAvailability = { apple_pay: !!available.applePay, google_pay: !!available.googlePay };
   }
 
-  function onExpressClick(event) {
+  // Button shown for the selected wallet only
+  $: walletButtonMethods = {
+    applePay: selectedMethodId === 'apple_pay' ? 'always' : 'never',
+    googlePay: selectedMethodId === 'google_pay' ? 'always' : 'never',
+    link: 'never',
+    amazonPay: 'never',
+    paypal: 'never',
+    klarna: 'never'
+  };
+
+  function onWalletClick(event) {
     const problem = validateForm();
     if (problem) {
       showError(problem);
@@ -394,31 +412,42 @@
     event.resolve({ emailRequired: false });
   }
 
-  async function onExpressConfirm(event) {
+  async function onWalletConfirm(event) {
     isSubmitting = true;
     errorMessage = '';
     try {
-      await payWithStripe(expressElements, buildCheckoutRequest());
+      await payWithStripe(walletElements, buildCheckoutRequest(), selectedMethodId);
     } catch (e) {
       event.paymentFailed?.({ reason: 'fail' });
       showError(e.message || 'The payment was not completed.');
     }
   }
 
-  /** Server creates the PaymentIntent for the server-computed total; Stripe.js confirms it. */
-  async function payWithStripe(elements, request) {
+  /** Server creates the PaymentIntent (only for the chosen method) for the server-computed total; Stripe.js confirms it. */
+  async function payWithStripe(elements, request, method) {
     // Must be the first await after the click: it validates the form and opens wallet sheets.
     const { error: submitError } = await elements.submit();
     if (submitError) throw new Error(submitError.message);
 
-    const intent = await postJson('/api/v1/checkout/stripe/intent', request, 'Could not start the payment.');
+    const intent = await postJson('/api/v1/checkout/stripe/intent', { ...request, payment_method: method }, 'Could not start the payment.');
+    const address = request.shipping_address;
     const { error, paymentIntent } = await stripe.confirmPayment({
       elements,
       clientSecret: intent.client_secret,
       confirmParams: {
         return_url: `${window.location.origin}/checkout/complete`,
         payment_method_data: {
-          billing_details: { name: request.customer_name, email: request.customer_email }
+          billing_details: {
+            name: request.customer_name,
+            email: request.customer_email,
+            // Required by Klarna and SEPA; harmless for cards
+            address: {
+              country: address.country_code,
+              ...(address.street_address ? { line1: address.street_address } : {}),
+              ...(address.postal_code ? { postal_code: address.postal_code } : {}),
+              ...(address.city ? { city: address.city } : {})
+            }
+          }
         }
       },
       redirect: 'if_required'
@@ -487,7 +516,7 @@
         return;
       }
 
-      if (selectedProvider === 'stripe' && stripeHosted) {
+      if (selectedMethod?.kind === 'hosted') {
         const session = await postJson(
           '/api/v1/checkout/stripe/session',
           { ...request, return_origin: window.location.origin },
@@ -498,9 +527,9 @@
         return;
       }
 
-      if (selectedProvider === 'stripe') {
+      if (selectedMethod?.kind === 'element') {
         if (!stripe || !stripeElements) throw new Error('The payment form is still loading. Please try again in a moment.');
-        await payWithStripe(stripeElements, request);
+        await payWithStripe(stripeElements, request, selectedMethod.type);
         return;
       }
 
@@ -853,7 +882,7 @@
         <div id="payment-section" class="p-6 rounded-2xl bg-slate-900/60 border border-slate-800">
           <h2 class="text-base font-bold text-white mb-4 flex items-center gap-2">
             <span class="w-6 h-6 rounded-full bg-orange-600 text-white text-xs font-bold flex items-center justify-center">3</span>
-            Payment
+            Payment method
           </h2>
 
           {#if isFreeOrder}
@@ -861,94 +890,113 @@
               <Gift size={18} class="text-emerald-400 flex-shrink-0" />
               <span>Your order total is <strong>0.00 €</strong> — no payment is required.</span>
             </div>
-          {:else if enabledProviders.length === 0}
+          {:else if paymentMethods.length === 0}
             <div class="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs">
               No payment methods are currently available. Please contact store support.
             </div>
           {:else}
-            {#if enabledProviders.length > 1}
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5" role="radiogroup" aria-label="Payment method">
-                {#each enabledProviders as p}
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={selectedProvider === p.provider}
-                    on:click={() => { selectedProvider = p.provider; errorMessage = ''; }}
-                    class="p-4 rounded-xl border text-left transition-all flex items-center gap-3 {selectedProvider === p.provider ? 'bg-orange-600/15 border-orange-500 text-white ring-1 ring-orange-500' : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'}"
-                  >
-                    {#if p.provider === 'stripe'}
-                      <CreditCard size={22} class="text-orange-400 flex-shrink-0" />
-                      <div class="min-w-0">
-                        <div class="text-xs font-bold">{p.display_name || 'Credit / Debit Card'}</div>
-                        <div class="text-[10px] text-slate-400 mt-0.5 truncate">{stripeMethodLabels.join(' · ')}</div>
-                      </div>
-                    {:else}
-                      <span class="w-[22px] text-center text-lg font-black text-sky-400 flex-shrink-0">P</span>
-                      <div class="min-w-0">
-                        <div class="text-xs font-bold">{p.display_name || 'PayPal'}</div>
-                        <div class="text-[10px] text-slate-400 mt-0.5">{p.config_data?.allow_pay_later === false ? 'PayPal account' : 'PayPal · Pay Later'}</div>
-                      </div>
-                    {/if}
-                  </button>
-                {/each}
-              </div>
-            {/if}
-
-            {#if selectedProvider === 'stripe'}
-              {#if !stripeKey}
-                <div class="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs">
-                  Card payment is not fully configured yet (missing Stripe publishable key). Please choose another payment method or contact store support.
-                </div>
-              {:else if stripeHosted}
-                <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-start gap-3">
-                  <ExternalLink size={16} class="text-orange-400 flex-shrink-0 mt-0.5" />
-                  <span>After clicking <strong class="text-white">"Order with Obligation to Pay"</strong> you will be redirected to Stripe's secure payment page to complete your payment ({stripeMethodLabels.join(', ')}).</span>
-                </div>
-              {:else if stripeLoadError}
-                <div class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">{stripeLoadError}</div>
-              {:else if !stripe}
-                <div class="p-8 rounded-xl bg-slate-950 border border-slate-800 flex flex-col items-center justify-center gap-3 text-center">
-                  <Loader2 size={24} class="animate-spin text-orange-500" />
-                  <span class="text-xs text-slate-400">Loading secure payment form…</span>
-                </div>
-              {:else}
-                <div class="p-4 rounded-xl bg-slate-950 border border-slate-800">
-                  <Elements
-                    {stripe}
-                    mode="payment"
-                    currency="eur"
-                    amount={stripeAmount}
-                    paymentMethodTypes={stripePaymentMethodTypes}
-                    appearance={stripeAppearance}
-                    bind:elements={stripeElements}
-                  >
-                    <PaymentElement
-                      layout={{ type: 'tabs', defaultCollapsed: false }}
-                      paymentMethodOrder={stripePaymentMethodTypes}
-                      wallets={paymentElementWallets}
-                      onloaderror={(e) => (paymentElementError = e.error?.message || 'The payment form could not be loaded.')}
+            <!-- All payment methods underneath each other; the selected one opens its form -->
+            <div class="rounded-xl border border-slate-800 divide-y divide-slate-800 overflow-hidden" role="radiogroup" aria-label="Payment method">
+              {#each paymentMethods as m (m.id)}
+                <div class="{selectedMethodId === m.id ? 'bg-slate-950' : 'bg-slate-950/40'}">
+                  <label class="flex items-center gap-3 px-4 py-3.5 cursor-pointer hover:bg-slate-900/60 transition-colors">
+                    <input
+                      type="radio"
+                      name="payment-method"
+                      value={m.id}
+                      bind:group={selectedMethodId}
+                      on:change={() => { errorMessage = ''; paymentElementError = ''; }}
+                      class="w-4 h-4 accent-orange-600 flex-shrink-0"
                     />
-                  </Elements>
-                  {#if paymentElementError}
-                    <p class="mt-3 text-[11px] text-rose-300">{paymentElementError}</p>
+                    <span class="flex-1 min-w-0">
+                      <span class="block text-sm font-bold {selectedMethodId === m.id ? 'text-white' : 'text-slate-200'}">{m.label}</span>
+                      <span class="block text-[11px] text-slate-500">{m.hint}</span>
+                    </span>
+                    {#if m.id === 'card' || m.id === 'hosted'}
+                      <CreditCard size={20} class="text-slate-400 flex-shrink-0" />
+                    {/if}
+                  </label>
+
+                  {#if selectedMethodId === m.id}
+                    <div class="px-4 pb-4">
+                      {#if m.kind === 'element'}
+                        {#if stripeLoadError}
+                          <div class="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">{stripeLoadError}</div>
+                        {:else if !stripe}
+                          <div class="py-6 flex items-center justify-center gap-2 text-xs text-slate-400">
+                            <Loader2 size={18} class="animate-spin text-orange-500" /> Loading secure payment form…
+                          </div>
+                        {:else}
+                          {#key m.id}
+                            <Elements
+                              {stripe}
+                              mode="payment"
+                              currency="eur"
+                              amount={stripeAmount}
+                              paymentMethodTypes={[m.type]}
+                              appearance={stripeAppearance}
+                              bind:elements={stripeElements}
+                            >
+                              <PaymentElement
+                                layout={{ type: 'tabs' }}
+                                wallets={paymentElementWallets}
+                                onloaderror={(e) => (paymentElementError = e.error?.message || 'The payment form could not be loaded.')}
+                              />
+                            </Elements>
+                          {/key}
+                          {#if paymentElementError}
+                            <p class="mt-3 text-[11px] text-rose-300">
+                              {paymentElementError}
+                              {#if stripeTestMode} (Shop owner: activate this payment method in the Stripe Dashboard → Settings → Payment methods.){/if}
+                            </p>
+                          {/if}
+                          {#if m.id === 'card'}
+                            <p class="mt-3 text-[11px] text-slate-500 flex items-center gap-1.5">
+                              <Lock size={12} class="text-emerald-400" /> Your card details are encrypted and never stored by us.
+                            </p>
+                          {/if}
+                        {/if}
+                      {:else if m.kind === 'wallet'}
+                        <p class="text-xs text-slate-400">Use the {m.label} button next to the order summary to pay.</p>
+                      {:else if m.kind === 'paypal'}
+                        <p class="text-xs text-slate-400">Use the PayPal button next to the order summary to pay with your PayPal account.</p>
+                      {:else if m.kind === 'hosted'}
+                        <p class="text-xs text-slate-400 flex items-start gap-2">
+                          <ExternalLink size={14} class="text-orange-400 flex-shrink-0 mt-0.5" />
+                          After clicking "Order with Obligation to Pay" you will be forwarded to a secure payment page to complete your payment.
+                        </p>
+                      {/if}
+                    </div>
                   {/if}
                 </div>
-              {/if}
-              <p class="mt-3 text-[11px] text-slate-500 flex items-center gap-1.5">
-                <Lock size={12} class="text-emerald-400" /> Card details are entered in Stripe's secure form and never reach our servers.
-              </p>
-            {:else if selectedProvider === 'paypal'}
-              <div class="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300">
-                Pay securely with your PayPal account. Use the PayPal button in the order summary to place your order.
-              </div>
-            {/if}
+              {/each}
+            </div>
 
             {#if (selectedProvider === 'stripe' && stripeTestMode) || (selectedProvider === 'paypal' && paypalProvider?.is_sandbox)}
               <div class="mt-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-300 flex items-center gap-2">
                 <ShieldCheck size={14} class="text-amber-400" />
-                <span>Test mode — no real money is charged.{selectedProvider === 'stripe' ? ' Use card 4242 4242 4242 4242, any future date and any CVC.' : ''}</span>
+                <span>Test mode — no real money is charged.{selectedMethodId === 'card' ? ' Use card 4242 4242 4242 4242, any future date and any CVC.' : ''}</span>
               </div>
             {/if}
+          {/if}
+
+          <!-- Invisible probe: tells us whether Apple Pay / Google Pay are available on this device -->
+          {#if walletsToDetect && stripe && !isFreeOrder}
+            <div class="absolute -left-[10000px] top-0 w-[300px] h-px overflow-hidden" aria-hidden="true">
+              <Elements {stripe} mode="payment" currency="eur" amount={stripeAmount} paymentMethodTypes={['card']} appearance={stripeAppearance}>
+                <ExpressCheckout
+                  paymentMethods={{
+                    applePay: stripeMethods.apple_pay ? 'always' : 'never',
+                    googlePay: stripeMethods.google_pay ? 'always' : 'never',
+                    link: 'never',
+                    amazonPay: 'never',
+                    paypal: 'never',
+                    klarna: 'never'
+                  }}
+                  onready={onWalletDetect}
+                />
+              </Elements>
+            </div>
           {/if}
         </div>
       </div>
@@ -1098,51 +1146,39 @@
             </div>
           {/if}
 
-          <!-- Express wallets (Apple Pay, Google Pay, Amazon Pay, PayPal, Link, Klarna) via Stripe -->
-          {#if selectedProvider === 'stripe' && !stripeHosted && stripe && showExpressCheckout && !isFreeOrder}
-            <div class="space-y-2">
-              {#if expressBlocker}
-                <p class="text-[11px] text-slate-500 text-center">
-                  Express checkout ({stripeMethodLabels.filter((l) => l !== 'Card').join(', ')}) becomes available once your details are complete and the terms are accepted.
-                </p>
-              {:else}
-                {#if expressAvailable !== false}
-                  <p class="text-xs font-bold text-white text-center">Order with Obligation to Pay ({formatEuro(totalCents)}) via express checkout:</p>
-                {/if}
-                <Elements
-                  {stripe}
-                  mode="payment"
-                  currency="eur"
-                  amount={stripeAmount}
-                  paymentMethodTypes={stripePaymentMethodTypes}
-                  appearance={stripeAppearance}
-                  bind:elements={expressElements}
-                >
-                  <ExpressCheckout
-                    paymentMethods={stripeExpressMethods}
-                    buttonType={{ applePay: 'order', googlePay: 'order' }}
-                    buttonHeight={44}
-                    onready={onExpressReady}
-                    onclick={onExpressClick}
-                    onconfirm={onExpressConfirm}
-                    oncancel={() => (isSubmitting = false)}
-                  />
-                </Elements>
-                {#if expressAvailable === false}
-                  <p class="text-[10px] text-slate-500 text-center">
-                    No express wallet is available in this browser. Apple Pay and Google Pay need HTTPS, a supported device and a saved card.
-                  </p>
-                {:else}
-                  <div class="flex items-center gap-3 text-[10px] text-slate-500 uppercase tracking-wider">
-                    <span class="flex-1 h-px bg-slate-800"></span> or pay with the form <span class="flex-1 h-px bg-slate-800"></span>
-                  </div>
-                {/if}
-              {/if}
-            </div>
-          {/if}
-
           <!-- Button-Lösung gem. § 312j Abs. 3 BGB -->
-          {#if selectedProvider === 'paypal' && !isFreeOrder && paypalProvider}
+          {#if selectedMethod?.kind === 'wallet' && !isFreeOrder && stripe}
+            <div class="space-y-2">
+              <p class="text-xs font-bold text-white text-center">Order with Obligation to Pay ({formatEuro(totalCents)}) via {selectedMethod.label}:</p>
+              {#if isSubmitting}
+                <div class="py-4 flex items-center justify-center gap-2 text-xs text-slate-300">
+                  <Loader2 size={16} class="animate-spin text-orange-500" /> Confirming your payment…
+                </div>
+              {/if}
+              <div class:hidden={isSubmitting}>
+                {#key selectedMethodId}
+                  <Elements
+                    {stripe}
+                    mode="payment"
+                    currency="eur"
+                    amount={stripeAmount}
+                    paymentMethodTypes={['card']}
+                    appearance={stripeAppearance}
+                    bind:elements={walletElements}
+                  >
+                    <ExpressCheckout
+                      paymentMethods={walletButtonMethods}
+                      buttonType={{ applePay: 'order', googlePay: 'order' }}
+                      buttonHeight={48}
+                      onclick={onWalletClick}
+                      onconfirm={onWalletConfirm}
+                      oncancel={() => (isSubmitting = false)}
+                    />
+                  </Elements>
+                {/key}
+              </div>
+            </div>
+          {:else if selectedProvider === 'paypal' && !isFreeOrder && paypalProvider}
             <div class="space-y-2">
               <p class="text-xs font-bold text-white text-center">Order with Obligation to Pay ({formatEuro(totalCents)}) via PayPal:</p>
               {#if isSubmitting}
@@ -1160,7 +1196,7 @@
               id="submit-order-btn"
               type="button"
               on:click={handleSubmitOrder}
-              disabled={isSubmitting || !acceptedTerms || (hasDigitalItems && !acceptedDigitalWaiver) || (!isFreeOrder && enabledProviders.length === 0)}
+              disabled={isSubmitting || !acceptedTerms || (hasDigitalItems && !acceptedDigitalWaiver) || (!isFreeOrder && paymentMethods.length === 0)}
               class="w-full py-4 px-6 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-sm shadow-xl shadow-orange-600/30 transition-all flex items-center justify-center gap-2 hover:scale-[1.01] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {#if isSubmitting}

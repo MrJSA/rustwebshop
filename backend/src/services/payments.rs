@@ -93,6 +93,21 @@ pub mod stripe {
         "wechat_pay",
     ];
 
+    /// PaymentIntent type for the method chosen at checkout (wallets are card payments).
+    /// Rejects methods that are not enabled in the admin.
+    pub fn intent_type_for(cfg: &ProviderConfig, method: &str) -> Result<&'static str> {
+        let methods = &cfg.config_data["methods"];
+        match method {
+            "card" => Ok("card"),
+            "apple_pay" | "google_pay" if methods[method].as_bool().unwrap_or(false) => Ok("card"),
+            other => OPTIONAL_METHODS
+                .iter()
+                .copied()
+                .find(|m| *m == other && methods[*m].as_bool().unwrap_or(false))
+                .ok_or_else(|| anyhow!("This payment method is not available")),
+        }
+    }
+
     pub fn payment_method_types(cfg: &ProviderConfig) -> Vec<&'static str> {
         let methods = &cfg.config_data["methods"];
         let mut types = vec!["card"];
@@ -156,6 +171,7 @@ pub mod stripe {
         pending_id: &str,
         customer_email: &str,
         description: &str,
+        selected_method: Option<&str>,
     ) -> Result<JsonValue> {
         let secret = secret_key(cfg)?;
         let mut form = vec![
@@ -165,7 +181,10 @@ pub mod stripe {
             ("receipt_email".to_string(), customer_email.to_string()),
             ("metadata[pending_checkout_id]".to_string(), pending_id.to_string()),
         ];
-        let types = payment_method_types(cfg);
+        let types = match selected_method {
+            Some(m) => vec![intent_type_for(cfg, m)?],
+            None => payment_method_types(cfg),
+        };
         if types.contains(&"wechat_pay") {
             form.push(("payment_method_options[wechat_pay][client]".to_string(), "web".to_string()));
         }
@@ -430,5 +449,32 @@ mod tests {
         assert_eq!(format_amount(1999), "19.99");
         assert_eq!(format_amount(5), "0.05");
         assert_eq!(format_amount(100), "1.00");
+    }
+}
+
+#[cfg(test)]
+mod method_tests {
+    use super::*;
+
+    fn cfg(methods: JsonValue) -> ProviderConfig {
+        ProviderConfig {
+            is_enabled: true,
+            is_sandbox: true,
+            public_client_id: String::new(),
+            secret_key: String::new(),
+            webhook_secret: String::new(),
+            config_data: json!({ "methods": methods }),
+        }
+    }
+
+    #[test]
+    fn selected_methods_must_be_enabled() {
+        let c = cfg(json!({ "apple_pay": true, "klarna": true, "link": false }));
+        assert_eq!(stripe::intent_type_for(&c, "card").unwrap(), "card");
+        assert_eq!(stripe::intent_type_for(&c, "apple_pay").unwrap(), "card");
+        assert_eq!(stripe::intent_type_for(&c, "klarna").unwrap(), "klarna");
+        assert!(stripe::intent_type_for(&c, "google_pay").is_err());
+        assert!(stripe::intent_type_for(&c, "link").is_err());
+        assert!(stripe::intent_type_for(&c, "bitcoin").is_err());
     }
 }
