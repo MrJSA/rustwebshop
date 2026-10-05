@@ -51,6 +51,7 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, sqlx::Error> {
         ("0013_coupons_and_admin_users", include_str!("../migrations/0013_coupons_and_admin_users.sql")),
         ("0014_payment_gateway_overhaul", include_str!("../migrations/0014_payment_gateway_overhaul.sql")),
         ("0015_security_hardening", include_str!("../migrations/0015_security_hardening.sql")),
+        ("0016_admin_permissions", include_str!("../migrations/0016_admin_permissions.sql")),
     ];
 
     // If schema already existed prior to migration tracking, mark initial migrations 0001..0006 as applied if not tracked

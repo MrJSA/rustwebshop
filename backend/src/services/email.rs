@@ -1,6 +1,7 @@
 use crate::models::StoreSettings;
 use lettre::message::header::ContentType;
-use lettre::message::SinglePart;
+use lettre::message::{Mailbox, SinglePart};
+use lettre::Address;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use tracing::{error, info};
@@ -11,50 +12,62 @@ pub async fn send_email_raw(
     subject: &str,
     html_body: &str,
 ) -> Result<(), String> {
-    if !settings.smtp_enabled || settings.smtp_host.trim().is_empty() {
-        info!(
-            "[SMTP DISABLED / DEV SIMULATION] To: {} | Subject: {}\nBody snippet: {}",
-            to_email,
-            subject,
-            &html_body[..std::cmp::min(160, html_body.len())]
-        );
-        return Ok(());
+    let host = settings.smtp_host.trim();
+    if !settings.smtp_enabled || host.is_empty() {
+        info!("[SMTP disabled] Not sending \"{}\" to {}", subject, to_email);
+        return Err("Email sending is switched off or no SMTP server is configured (Settings → Email).".to_string());
     }
 
-    let from_header = format!("{} <{}>", settings.smtp_from_name, settings.smtp_from_email);
-    let to_parsed = to_email.parse().map_err(|e| format!("Invalid to_email: {}", e))?;
-    let from_parsed = from_header.parse().map_err(|e| format!("Invalid from_email: {}", e))?;
+    // Sender: explicit from-address, otherwise the SMTP login (most providers require them to match)
+    let from_address = if !settings.smtp_from_email.trim().is_empty() {
+        settings.smtp_from_email.trim()
+    } else {
+        settings.smtp_username.trim()
+    };
+    let from_address: Address = from_address
+        .parse()
+        .map_err(|_| format!("The sender address '{}' is not a valid email address.", from_address))?;
+    let from_name = settings.smtp_from_name.trim();
+    let from = Mailbox::new((!from_name.is_empty()).then(|| from_name.to_string()), from_address);
+    let to: Mailbox = to_email
+        .trim()
+        .parse()
+        .map_err(|_| format!("The recipient '{}' is not a valid email address.", to_email))?;
 
     let email = Message::builder()
-        .from(from_parsed)
-        .to(to_parsed)
+        .from(from)
+        .to(to)
         .subject(subject)
         .singlepart(SinglePart::builder().header(ContentType::TEXT_HTML).body(html_body.to_string()))
         .map_err(|e| format!("Failed to build email message: {}", e))?;
 
-    let port = settings.smtp_port as u16;
-    let mut transport_builder = if settings.smtp_encryption == "tls" {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&settings.smtp_host)
-            .map_err(|e| format!("Failed to configure SMTP relay: {}", e))?
-            .port(port)
-    } else if settings.smtp_encryption == "starttls" {
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&settings.smtp_host)
-            .map_err(|e| format!("Failed to configure SMTP STARTTLS relay: {}", e))?
-            .port(port)
-    } else {
-        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&settings.smtp_host).port(port)
+    let port = u16::try_from(settings.smtp_port).unwrap_or(587);
+    // Well-known ports dictate the TLS mode; a mismatch would otherwise just hang or be rejected
+    let mode = match port {
+        465 => "tls",
+        587 => "starttls",
+        _ => settings.smtp_encryption.as_str(),
     };
+    let mut transport_builder = match mode {
+        "tls" => AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+            .map_err(|e| format!("Invalid SMTP host '{}': {}", host, e))?,
+        "starttls" => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+            .map_err(|e| format!("Invalid SMTP host '{}': {}", host, e))?,
+        _ => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host),
+    }
+    .port(port)
+    .timeout(Some(std::time::Duration::from_secs(20)));
 
-    if !settings.smtp_username.is_empty() {
-        let creds = Credentials::new(settings.smtp_username.clone(), settings.smtp_password.clone());
+    if !settings.smtp_username.trim().is_empty() {
+        let creds = Credentials::new(settings.smtp_username.trim().to_string(), settings.smtp_password.clone());
         transport_builder = transport_builder.credentials(creds);
     }
 
     let transport = transport_builder.build();
 
     transport.send(email).await.map_err(|e| {
-        error!("SMTP send failure to {}: {}", to_email, e);
-        format!("SMTP send failed: {}", e)
+        error!("SMTP send failure to {} via {}:{} ({}): {}", to_email, host, port, mode, e);
+        format!("The mail server {}:{} ({}) rejected or did not answer: {}", host, port, mode, e)
     })?;
 
     info!("Email successfully dispatched to {}", to_email);
@@ -260,9 +273,12 @@ pub async fn send_back_in_stock_email(
 }
 
 pub async fn send_order_created_notification(pool: &sqlx::PgPool, order_number: &str) {
-    let settings = match sqlx::query_as::<_, StoreSettings>("SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, updated_at FROM store_settings WHERE id = 1").fetch_one(pool).await {
+    let settings = match sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1").fetch_one(pool).await {
         Ok(s) => s,
-        Err(_) => return,
+        Err(e) => {
+            error!("Cannot load store settings for order email {}: {}", order_number, e);
+            return;
+        }
     };
 
     if let Ok(order_row) = sqlx::query("SELECT customer_email, total_cents FROM orders WHERE order_number = $1")
@@ -278,9 +294,12 @@ pub async fn send_order_created_notification(pool: &sqlx::PgPool, order_number: 
 }
 
 pub async fn send_payment_received_notification(pool: &sqlx::PgPool, order_number: &str) {
-    let settings = match sqlx::query_as::<_, StoreSettings>("SELECT id, store_name, currency, currency_symbol, tax_rate_percent, deployment_mode, debug_mode, support_email, company_address, vat_id, logo_url, phone, hero_config, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, smtp_from_email, smtp_from_name, smtp_enabled, require_registered_checkout, require_email_verification, store_subtitle, show_store_title, show_store_subtitle, carousels_config, updated_at FROM store_settings WHERE id = 1").fetch_one(pool).await {
+    let settings = match sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1").fetch_one(pool).await {
         Ok(s) => s,
-        Err(_) => return,
+        Err(e) => {
+            error!("Cannot load store settings for order email {}: {}", order_number, e);
+            return;
+        }
     };
 
     if let Ok(order_row) = sqlx::query("SELECT customer_email, total_cents FROM orders WHERE order_number = $1")

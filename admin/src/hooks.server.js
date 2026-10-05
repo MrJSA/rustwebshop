@@ -12,6 +12,24 @@ const SECURITY_HEADERS = {
   'Cross-Origin-Opener-Policy': 'same-origin'
 };
 
+// Admin section of a page path (same sections as the backend permission system)
+export function sectionForPath(path) {
+  if (path === '/' || path.startsWith('/analytics')) return 'overview';
+  if (path.startsWith('/products') || path.startsWith('/categories') || path.startsWith('/logistics')) return 'products';
+  if (path.startsWith('/orders')) return 'orders';
+  if (path.startsWith('/settings/system') || path.startsWith('/settings/menu') || path.startsWith('/settings/pages')) return 'storefront';
+  if (path.startsWith('/settings')) return 'settings';
+  return null;
+}
+
+const SECTION_HOME = {
+  overview: '/',
+  products: '/products',
+  orders: '/orders',
+  storefront: '/settings/system',
+  settings: '/settings'
+};
+
 export async function handle({ event, resolve }) {
   const token = event.cookies.get(SESSION_COOKIE) || null;
   event.locals.adminToken = token;
@@ -30,6 +48,20 @@ export async function handle({ event, resolve }) {
       redirect(303, `/login?next=${encodeURIComponent(path + event.url.search)}`);
     }
     event.locals.admin = admin;
+
+    // Pages of sections this admin may not use redirect to the first allowed section
+    const section = sectionForPath(path);
+    const perms = admin.permissions || {};
+    if (section && !admin.is_default && perms[section] === false) {
+      const fallback = Object.keys(SECTION_HOME).find((s) => perms[s]);
+      if (!fallback) {
+        return new Response('Your account has no admin sections enabled. Please ask a superadmin.', {
+          status: 403,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+        });
+      }
+      redirect(303, SECTION_HOME[fallback]);
+    }
   }
 
   const response = await resolve(event);

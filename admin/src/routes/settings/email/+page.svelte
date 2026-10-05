@@ -9,14 +9,14 @@
   let smtpUsername = settings.smtp_username || '';
   let smtpPassword = settings.smtp_password || '';
   let smtpEncryption = settings.smtp_encryption || 'starttls';
-  let smtpFromEmail = settings.smtp_from_email || 'noreply@rustcraft.com';
-  let smtpFromName = settings.smtp_from_name || 'RustCraft Gear';
+  let smtpFromEmail = settings.smtp_from_email || '';
+  let smtpFromName = settings.smtp_from_name || settings.store_name || '';
   let smtpEnabled = Boolean(settings.smtp_enabled);
 
   let requireRegisteredCheckout = Boolean(settings.require_registered_checkout);
   let requireEmailVerification = Boolean(settings.require_email_verification);
 
-  let testRecipient = settings.support_email || 'admin@rustcraft.com';
+  let testRecipient = settings.support_email || '';
   let isSendingTest = false;
   let testResult = null; // { success: boolean, message: string }
   let isSavingSettings = false;
@@ -79,7 +79,19 @@
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({ to_email: testRecipient })
+        // Test the values currently in the form (an empty password keeps the saved one)
+        body: JSON.stringify({
+          recipient_email: testRecipient,
+          smtp: {
+            host: smtpHost,
+            port: parseInt(smtpPort) || 587,
+            username: smtpUsername,
+            password: smtpPassword,
+            encryption: smtpEncryption,
+            from_email: smtpFromEmail,
+            from_name: smtpFromName
+          }
+        })
       });
 
       const resData = await res.json();

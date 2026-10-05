@@ -2,9 +2,20 @@
 
 A fast, memory-safe, and ACID-compliant webshop built with a **Rust (Axum + SQLx + PostgreSQL)** backend and modern **SvelteKit** user storefront and administrative dashboard, containerized with Docker.
 
+> **Installing on a server?** Follow **[INSTALL.md](INSTALL.md)** — domains/subdomains, automatic HTTPS, backups and one-click updates.
+
+### Architecture
+
+| Part | Technology |
+| :--- | :--- |
+| Backend API, business logic, payments, emails | **Rust** (Axum, SQLx, PostgreSQL) |
+| Updater (releases, self-update, domain setup) | **Rust** |
+| Customer storefront & admin dashboard | **Svelte** (SvelteKit; a thin Node runtime only renders pages and forwards API calls) |
+| HTTPS proxy (optional) | Caddy |
+
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start (local)
 
 Start the entire stack using Docker Compose:
 
@@ -18,8 +29,8 @@ docker compose up -d --build
 | :--- | :--- | :--- |
 | **Customer Storefront** | [http://localhost:8080](http://localhost:8080) | Customer-facing shop, product showcase, shopping cart, and checkout. |
 | **Admin Dashboard** | [http://localhost:4000](http://localhost:4000) | Management back-office for inventory, orders, media, categories, and settings. |
-| **Backend REST API** | [http://localhost:8081](http://localhost:8081) | Rust Axum API (Internal container port: `8000`). |
-| **PostgreSQL Database** | `localhost:5432` | ACID-compliant relational storage. |
+| **Backend REST API** | [http://localhost:8081](http://localhost:8081) | Rust Axum API, reachable from this machine only (container port `8000`). |
+| **PostgreSQL Database** | internal only | Not published; reachable by the backend over the Docker network. |
 
 ---
 

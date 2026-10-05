@@ -40,6 +40,7 @@ pub struct CreateAdminUserRequest {
     pub password: String,
     pub email: Option<String>,
     pub role: Option<String>,
+    pub permissions: Option<std::collections::BTreeMap<String, bool>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,5 +49,6 @@ pub struct UpdateAdminUserRequest {
     pub password: Option<String>,
     pub email: Option<String>,
     pub role: Option<String>,
+    pub permissions: Option<std::collections::BTreeMap<String, bool>>,
 }
 

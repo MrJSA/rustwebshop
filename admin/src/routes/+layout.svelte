@@ -72,7 +72,8 @@
         { href: '/settings?tab=shipping', label: 'Shipping & Delivery', tab: 'shipping', match: (p, t) => p === '/settings/shipping' || (p === '/settings' && t === 'shipping') },
         { href: '/settings?tab=media', label: 'Media Library', tab: 'media', match: (p, t) => p === '/settings/media' || (p === '/settings' && t === 'media') },
         { href: '/settings?tab=users', label: 'Admin Users & Access', tab: 'users', match: (p, t) => (p === '/settings' && t === 'users') },
-        { href: '/settings?tab=export', label: 'Export & Backups', tab: 'export', match: (p, t) => (p === '/settings' && t === 'export') }
+        { href: '/settings?tab=export', label: 'Export & Backups', tab: 'export', match: (p, t) => (p === '/settings' && t === 'export') },
+        { href: '/settings?tab=system', label: 'System & Updates', tab: 'system', match: (p, t) => (p === '/settings' && t === 'system') }
       ]
     }
   ];
@@ -106,6 +107,9 @@
   }
 
   $: isLoginPage = $page.url.pathname === '/login';
+
+  // Only sections this admin may use are shown (enforced again server-side)
+  $: visibleNavGroups = navGroups.filter((g) => !data.admin?.permissions || data.admin.permissions[g.id] !== false);
 
   // The session is validated server-side (hooks.server.js); the token itself lives in an httpOnly cookie.
   $: if (data.admin) {
@@ -210,7 +214,7 @@
 
       <!-- Navigation links with Sub-menus -->
       <nav class="flex-1 px-3 py-6 space-y-2 overflow-y-auto">
-        {#each navGroups as group}
+        {#each visibleNavGroups as group}
           {@const isGroupActive = group.match($page.url.pathname)}
           {@const isExpanded = expandedGroups[group.id] ?? isGroupActive}
           <div class="space-y-0.5">

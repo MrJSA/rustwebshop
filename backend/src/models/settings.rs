@@ -96,7 +96,7 @@ pub struct StoreSettingsDTO {
     pub stock_display_template: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateStoreSettingsRequest {
     pub store_name: Option<String>,
     pub currency: Option<String>,
@@ -147,7 +147,22 @@ pub struct UpdateStoreSettingsRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct TestEmailRequest {
+    #[serde(alias = "recipient", alias = "to_email")]
     pub recipient_email: String,
+    /// Unsaved values from the settings form; an empty password keeps the stored one
+    #[serde(default)]
+    pub smtp: Option<SmtpOverride>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SmtpOverride {
+    pub host: Option<String>,
+    pub port: Option<i32>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub encryption: Option<String>,
+    pub from_email: Option<String>,
+    pub from_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

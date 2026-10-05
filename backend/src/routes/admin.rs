@@ -90,6 +90,11 @@ pub fn admin_router(pool: PgPool) -> Router<PgPool> {
         .route("/menu/:id", put(admin_update_menu_item).delete(admin_delete_menu_item))
         .route("/settings/system", get(admin_get_system_settings).put(admin_update_system_settings))
         .route("/settings/email/test", post(admin_test_email))
+        .route("/system/status", get(admin_system_status))
+        .route("/system/check", post(admin_system_check))
+        .route("/system/update", post(admin_system_update))
+        .route("/system/job", get(admin_system_job))
+        .route("/system/domains", get(admin_get_domains).put(admin_put_domains))
         .route("/export/store-data", get(admin_export_store_data))
         .route("/export/media", get(admin_export_media_library))
         .route("/import/store-data", post(admin_import_store_data))
@@ -150,7 +155,8 @@ async fn admin_auth_status(Extension(admin): Extension<CurrentAdmin>) -> impl In
         "authenticated": true,
         "username": admin.username,
         "role": admin.role,
-        "is_default": admin.is_default
+        "is_default": admin.is_default,
+        "permissions": admin.permissions
     }))
 }
 
@@ -1374,10 +1380,61 @@ async fn admin_get_system_settings(State(pool): State<PgPool>) -> Result<impl In
     Ok(Json(settings))
 }
 
+/// Store settings edited on the "Storefront & Design" pages; every other field belongs to "Settings".
+const STOREFRONT_SETTING_FIELDS: &[&str] = &[
+    "hero_config",
+    "carousels_config",
+    "footer_config",
+    "cookie_banner_enabled",
+    "cookie_banner_title",
+    "cookie_banner_description",
+    "cookie_banner_policy_url",
+    "cookie_accept_label",
+    "cookie_deny_label",
+    "cookie_preferences_label",
+    "store_subtitle",
+    "show_store_title",
+    "show_store_subtitle",
+    "stock_display_template",
+    "logo_url",
+];
+
+/// Rejects the save if it changes a field from a section the admin has no access to.
+/// Forms often send the whole settings object, so only *changed* values count.
+async fn check_settings_permissions(pool: &PgPool, admin: &CurrentAdmin, payload: &UpdateStoreSettingsRequest) -> Result<(), (StatusCode, String)> {
+    if admin.can("storefront") && admin.can("settings") {
+        return Ok(());
+    }
+    let current = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let current = serde_json::to_value(&current).unwrap_or_default();
+    let requested = serde_json::to_value(payload).unwrap_or_default();
+
+    for (field, value) in requested.as_object().into_iter().flatten() {
+        let changed = match field.as_str() {
+            "smtp_password" => value.as_str().map(|p| !p.is_empty()).unwrap_or(false),
+            _ => !value.is_null() && current.get(field) != Some(value),
+        };
+        if !changed {
+            continue;
+        }
+        let section = if STOREFRONT_SETTING_FIELDS.contains(&field.as_str()) { "storefront" } else { "settings" };
+        if !admin.can(section) {
+            return Err((StatusCode::FORBIDDEN, format!("You do not have permission to change '{}'", field)));
+        }
+    }
+    Ok(())
+}
+
 async fn admin_update_system_settings(
     State(pool): State<PgPool>,
+    Extension(admin): Extension<CurrentAdmin>,
     Json(payload): Json<UpdateStoreSettingsRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    check_settings_permissions(&pool, &admin, &payload).await?;
+
     sqlx::query(
         r#"
         UPDATE store_settings
@@ -1487,12 +1544,24 @@ async fn admin_test_email(
     State(pool): State<PgPool>,
     Json(payload): Json<TestEmailRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let settings = sqlx::query_as::<_, StoreSettings>(
+    let mut settings = sqlx::query_as::<_, StoreSettings>(
         "SELECT * FROM store_settings WHERE id = 1"
     )
     .fetch_one(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Test exactly what is in the form, even if it has not been saved yet
+    if let Some(o) = payload.smtp {
+        if let Some(v) = o.host { settings.smtp_host = v; }
+        if let Some(v) = o.port { settings.smtp_port = v; }
+        if let Some(v) = o.username { settings.smtp_username = v; }
+        if let Some(v) = o.password.filter(|p| !p.is_empty()) { settings.smtp_password = v; }
+        if let Some(v) = o.encryption { settings.smtp_encryption = v; }
+        if let Some(v) = o.from_email { settings.smtp_from_email = v; }
+        if let Some(v) = o.from_name { settings.smtp_from_name = v; }
+        settings.smtp_enabled = true;
+    }
 
     crate::services::email::send_test_email(&settings, &payload.recipient_email)
         .await
@@ -3000,37 +3069,34 @@ async fn admin_delete_coupon(
 // Admin Users Management
 // ==========================================
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct AdminUserDto {
     id: Uuid,
     username: String,
     email: Option<String>,
     role: String,
     is_default: bool,
+    /// Effective access per admin section
+    permissions: std::collections::BTreeMap<String, bool>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-async fn admin_list_users(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let rows = sqlx::query(
-        "SELECT id, username, email, role, is_default, created_at, updated_at FROM admin_users ORDER BY created_at ASC"
-    )
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let list: Vec<AdminUserDto> = rows.into_iter().map(|r| AdminUserDto {
+fn admin_user_dto(r: &sqlx::postgres::PgRow) -> AdminUserDto {
+    let role: String = r.get("role");
+    AdminUserDto {
         id: r.get("id"),
         username: r.get("username"),
-        email: r.try_get("email").ok(),
-        role: r.try_get("role").unwrap_or_else(|_| "admin".to_string()),
+        email: r.try_get("email").ok().flatten(),
+        permissions: crate::middleware::effective_permissions(&role, &r.get::<serde_json::Value, _>("permissions")),
+        role,
         is_default: r.get("is_default"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
-    }).collect();
-
-    Ok(Json(list))
+    }
 }
+
+const ADMIN_USER_COLUMNS: &str = "id, username, email, role, is_default, permissions, created_at, updated_at";
 
 const ADMIN_ROLES: &[&str] = &["superadmin", "admin", "editor"];
 
@@ -3044,11 +3110,37 @@ fn validate_role_assignment(actor: &CurrentAdmin, role: &str) -> Result<(), (Sta
     Ok(())
 }
 
+/// Complete permission object for a role: requested values over the role defaults.
+fn resolve_permissions(role: &str, requested: Option<&std::collections::BTreeMap<String, bool>>) -> Result<serde_json::Value, (StatusCode, String)> {
+    let mut out = serde_json::Map::new();
+    for section in crate::middleware::SECTIONS {
+        let value = match requested.and_then(|r| r.get(section)) {
+            Some(v) => *v,
+            None => crate::middleware::default_permission(role, section),
+        };
+        out.insert(section.to_string(), json!(role == "superadmin" || value));
+    }
+    if let Some(r) = requested {
+        if let Some(unknown) = r.keys().find(|k| !crate::middleware::SECTIONS.contains(&k.as_str())) {
+            return Err((StatusCode::BAD_REQUEST, format!("Unknown permission section '{}'", unknown)));
+        }
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
 async fn superadmin_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM admin_users WHERE role = 'superadmin'")
         .fetch_one(pool)
         .await
         .unwrap_or(0)
+}
+
+async fn admin_list_users(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let rows = sqlx::query(&format!("SELECT {} FROM admin_users ORDER BY created_at ASC", ADMIN_USER_COLUMNS))
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(rows.iter().map(admin_user_dto).collect::<Vec<_>>()))
 }
 
 async fn admin_create_user(
@@ -3063,38 +3155,27 @@ async fn admin_create_user(
     if payload.password.len() < 12 {
         return Err((StatusCode::BAD_REQUEST, "Password must be at least 12 characters long".to_string()));
     }
-    let role = payload.role.unwrap_or_else(|| "editor".to_string());
+    let role = payload.role.clone().unwrap_or_else(|| "editor".to_string());
     validate_role_assignment(&actor, &role)?;
+    let permissions = resolve_permissions(&role, payload.permissions.as_ref())?;
 
     let password_hash = bcrypt::hash(&payload.password, 12)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let row = sqlx::query(
-        r#"
-        INSERT INTO admin_users (username, password_hash, email, role, is_default)
-        VALUES ($1, $2, $3, $4, FALSE)
-        RETURNING id, username, email, role, is_default, created_at, updated_at
-        "#
-    )
+    let row = sqlx::query(&format!(
+        "INSERT INTO admin_users (username, password_hash, email, role, permissions, is_default) VALUES ($1, $2, $3, $4, $5, FALSE) RETURNING {}",
+        ADMIN_USER_COLUMNS
+    ))
     .bind(username)
     .bind(password_hash)
-    .bind(payload.email)
+    .bind(payload.email.as_deref().map(str::trim).filter(|e| !e.is_empty()))
     .bind(&role)
+    .bind(&permissions)
     .fetch_one(&pool)
     .await
-    .map_err(|_| (StatusCode::BAD_REQUEST, "Could not create the admin user (is the username already taken?)".to_string()))?;
+    .map_err(|_| (StatusCode::BAD_REQUEST, "Could not create the user (is the username already taken?)".to_string()))?;
 
-    let dto = AdminUserDto {
-        id: row.get("id"),
-        username: row.get("username"),
-        email: row.try_get("email").ok(),
-        role: row.get("role"),
-        is_default: row.get("is_default"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    };
-
-    Ok((StatusCode::CREATED, Json(dto)))
+    Ok((StatusCode::CREATED, Json(admin_user_dto(&row))))
 }
 
 async fn admin_update_user(
@@ -3103,7 +3184,7 @@ async fn admin_update_user(
     Extension(actor): Extension<CurrentAdmin>,
     Json(payload): Json<UpdateAdminUserRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let current = sqlx::query("SELECT username, email, role FROM admin_users WHERE id = $1")
+    let current = sqlx::query("SELECT username, email, role, permissions FROM admin_users WHERE id = $1")
         .bind(id)
         .fetch_optional(&pool)
         .await
@@ -3115,13 +3196,29 @@ async fn admin_update_user(
         return Err((StatusCode::FORBIDDEN, "Only a superadmin can modify a superadmin account".to_string()));
     }
 
-    let username = payload.username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()).unwrap_or_else(|| current.get("username"));
-    let email = payload.email.or_else(|| current.try_get("email").ok());
-    let role = payload.role.unwrap_or_else(|| current_role.clone());
+    let username = payload.username.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(str::to_string).unwrap_or_else(|| current.get("username"));
+    let email = match payload.email.as_deref() {
+        Some(e) => Some(e.trim().to_string()).filter(|e| !e.is_empty()),
+        None => current.try_get("email").ok().flatten(),
+    };
+    let role = payload.role.clone().unwrap_or_else(|| current_role.clone());
     validate_role_assignment(&actor, &role)?;
+
+    // Nobody changes their own role or access (prevents lock-outs and self-promotion)
+    let access_changed = role != current_role || payload.permissions.is_some();
+    if id == actor.id && access_changed {
+        return Err((StatusCode::FORBIDDEN, "You cannot change your own role or permissions".to_string()));
+    }
     if current_role == "superadmin" && role != "superadmin" && superadmin_count(&pool).await <= 1 {
         return Err((StatusCode::BAD_REQUEST, "The last superadmin cannot be demoted".to_string()));
     }
+
+    let permissions = match payload.permissions.as_ref() {
+        Some(p) => resolve_permissions(&role, Some(p))?,
+        // Role changed without explicit permissions: use the new role's defaults
+        None if role != current_role => resolve_permissions(&role, None)?,
+        None => current.get::<serde_json::Value, _>("permissions"),
+    };
 
     let new_hash = match payload.password.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         Some(p) if p.len() < 12 => return Err((StatusCode::BAD_REQUEST, "Password must be at least 12 characters long".to_string())),
@@ -3129,26 +3226,29 @@ async fn admin_update_user(
         None => None,
     };
 
-    sqlx::query(
+    let row = sqlx::query(&format!(
         r#"
         UPDATE admin_users
-        SET username = $1, email = $2, role = $3,
-            password_hash = COALESCE($4, password_hash),
-            is_default = CASE WHEN $4 IS NULL THEN is_default ELSE FALSE END,
+        SET username = $1, email = $2, role = $3, permissions = $4,
+            password_hash = COALESCE($5, password_hash),
+            is_default = CASE WHEN $5 IS NULL THEN is_default ELSE FALSE END,
             updated_at = NOW()
-        WHERE id = $5
-        "#
-    )
+        WHERE id = $6
+        RETURNING {}
+        "#,
+        ADMIN_USER_COLUMNS
+    ))
     .bind(username)
     .bind(email)
-    .bind(role)
+    .bind(&role)
+    .bind(&permissions)
     .bind(new_hash)
     .bind(id)
-    .execute(&pool)
+    .fetch_one(&pool)
     .await
-    .map_err(|_| (StatusCode::BAD_REQUEST, "Could not update the admin user (is the username already taken?)".to_string()))?;
+    .map_err(|_| (StatusCode::BAD_REQUEST, "Could not update the user (is the username already taken?)".to_string()))?;
 
-    Ok(Json(json!({ "success": true, "message": "Admin user updated successfully" })))
+    Ok(Json(admin_user_dto(&row)))
 }
 
 async fn admin_delete_user(
@@ -3226,4 +3326,77 @@ async fn admin_stripe_register_domain(
     let cfg = crate::services::payments::ProviderConfig::load(&pool, "stripe").await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let created = crate::services::payments::stripe::register_domain(&cfg, &domain).await.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(summarize_domain(&created)))
+}
+
+// ==========================================
+// System: version, updates and domains (proxied to the updater service, superadmins only)
+// ==========================================
+
+fn require_superadmin(admin: &CurrentAdmin) -> Result<(), (StatusCode, String)> {
+    if admin.is_superadmin() {
+        Ok(())
+    } else {
+        Err((StatusCode::FORBIDDEN, "Only a superadmin can update the shop or change its domains".to_string()))
+    }
+}
+
+async fn updater_request(method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let base = std::env::var("UPDATER_URL").unwrap_or_else(|_| "http://updater:9000".to_string());
+    let token_file = std::env::var("UPDATER_TOKEN_FILE").unwrap_or_else(|_| "/secrets/updater_token".to_string());
+    let token = tokio::fs::read_to_string(&token_file).await.map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, "The updater service is not installed or not running (see the install guide).".to_string())
+    })?;
+
+    let mut req = reqwest::Client::new()
+        .request(method, format!("{}{}", base, path))
+        .bearer_auth(token.trim())
+        .timeout(std::time::Duration::from_secs(60));
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "The updater service is not reachable.".to_string()))?;
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err((status, text));
+    }
+    Ok(Json(serde_json::from_str(&text).unwrap_or_else(|_| json!({}))))
+}
+
+async fn admin_system_status(Extension(admin): Extension<CurrentAdmin>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_superadmin(&admin)?;
+    updater_request(reqwest::Method::GET, "/status", None).await
+}
+
+async fn admin_system_check(Extension(admin): Extension<CurrentAdmin>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_superadmin(&admin)?;
+    updater_request(reqwest::Method::POST, "/check", None).await
+}
+
+async fn admin_system_update(Extension(admin): Extension<CurrentAdmin>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_superadmin(&admin)?;
+    tracing::warn!("Shop update started by admin '{}'", admin.username);
+    updater_request(reqwest::Method::POST, "/update", None).await
+}
+
+async fn admin_system_job(Extension(admin): Extension<CurrentAdmin>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_superadmin(&admin)?;
+    updater_request(reqwest::Method::GET, "/job", None).await
+}
+
+async fn admin_get_domains(Extension(admin): Extension<CurrentAdmin>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_superadmin(&admin)?;
+    updater_request(reqwest::Method::GET, "/config", None).await
+}
+
+async fn admin_put_domains(
+    Extension(admin): Extension<CurrentAdmin>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_superadmin(&admin)?;
+    tracing::warn!("Domain settings changed by admin '{}'", admin.username);
+    updater_request(reqwest::Method::PUT, "/config", Some(payload)).await
 }

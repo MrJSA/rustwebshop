@@ -37,6 +37,7 @@
   import MediaManager from '$lib/components/MediaManager.svelte';
   import AdminUsersManager from '$lib/components/AdminUsersManager.svelte';
   import PaymentsManager from '$lib/components/PaymentsManager.svelte';
+  import SystemManager from '$lib/components/SystemManager.svelte';
 
   export let data;
   let settings = data.settings || {};
@@ -292,14 +293,14 @@
   let smtpUsername = settings.smtp_username || '';
   let smtpPassword = settings.smtp_password || '';
   let smtpEncryption = settings.smtp_encryption || 'starttls';
-  let smtpFromEmail = settings.smtp_from_email || 'noreply@rustcraft.com';
-  let smtpFromName = settings.smtp_from_name || 'RustCraft Gear';
+  let smtpFromEmail = settings.smtp_from_email || '';
+  let smtpFromName = settings.smtp_from_name || settings.store_name || '';
   let smtpEnabled = Boolean(settings.smtp_enabled);
 
   let requireRegisteredCheckout = Boolean(settings.require_registered_checkout);
   let requireEmailVerification = Boolean(settings.require_email_verification);
 
-  let testRecipient = supportEmail || 'admin@rustcraft.com';
+  let testRecipient = supportEmail || '';
   let isSendingTest = false;
   let testResult = null;
   let isSavingEmail = false;
@@ -361,7 +362,19 @@
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({ recipient: testRecipient })
+        // Test the values currently in the form (an empty password keeps the saved one)
+        body: JSON.stringify({
+          recipient_email: testRecipient,
+          smtp: {
+            host: smtpHost,
+            port: parseInt(smtpPort) || 587,
+            username: smtpUsername,
+            password: smtpPassword,
+            encryption: smtpEncryption,
+            from_email: smtpFromEmail,
+            from_name: smtpFromName
+          }
+        })
       });
 
       const data = await res.json();
@@ -462,6 +475,15 @@
     >
       <Download size={15} />
       <span>Export & Backups</span>
+    </button>
+
+    <button
+      type="button"
+      on:click={() => setTab('system')}
+      class="px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 {activeTab === 'system' ? 'bg-orange-600 text-white shadow-lg shadow-orange-600/25 ring-1 ring-orange-500' : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'}"
+    >
+      <Server size={15} />
+      <span>System & Updates</span>
     </button>
   </div>
 
@@ -1301,6 +1323,10 @@
     </div>
   {:else if activeTab === 'users'}
     <AdminUsersManager initialUsers={adminUsers} />
+
+  <!-- System, updates & domains -->
+  {:else if activeTab === 'system'}
+    <SystemManager />
   {/if}
 </div>
 

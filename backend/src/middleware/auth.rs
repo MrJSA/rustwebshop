@@ -7,9 +7,34 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 use sqlx::{PgPool, Row};
+use std::collections::BTreeMap;
 use uuid::Uuid;
+
+/// Admin areas that can be granted per user (matches the admin navigation groups).
+pub const SECTIONS: [&str; 5] = ["overview", "products", "orders", "storefront", "settings"];
+
+/// Defaults for a role: settings only for superadmins, overview & storefront not for editors.
+pub fn default_permission(role: &str, section: &str) -> bool {
+    match (role, section) {
+        ("superadmin", _) => true,
+        (_, "settings") => false,
+        ("editor", "overview" | "storefront") => false,
+        _ => true,
+    }
+}
+
+/// Stored permissions merged over the role defaults. Superadmins always have everything.
+pub fn effective_permissions(role: &str, stored: &JsonValue) -> BTreeMap<String, bool> {
+    SECTIONS
+        .iter()
+        .map(|s| {
+            let allowed = role == "superadmin" || stored[*s].as_bool().unwrap_or_else(|| default_permission(role, s));
+            (s.to_string(), allowed)
+        })
+        .collect()
+}
 
 /// The authenticated admin, available to handlers via `Extension<CurrentAdmin>`.
 #[derive(Debug, Clone)]
@@ -18,14 +43,15 @@ pub struct CurrentAdmin {
     pub username: String,
     pub role: String,
     pub is_default: bool,
+    pub permissions: BTreeMap<String, bool>,
 }
 
 impl CurrentAdmin {
     pub fn is_superadmin(&self) -> bool {
         self.role == "superadmin"
     }
-    pub fn can_manage_store(&self) -> bool {
-        self.role == "superadmin" || self.role == "admin"
+    pub fn can(&self, section: &str) -> bool {
+        self.permissions.get(section).copied().unwrap_or(false)
     }
 }
 
@@ -38,14 +64,47 @@ fn allowed_with_default_password(path: &str) -> bool {
     matches!(path, "/auth/status" | "/auth/me" | "/auth/change-credentials")
 }
 
-/// Store-wide configuration & data that editors must not touch.
-fn requires_store_manager(method: &Method, path: &str) -> bool {
-    path.starts_with("/users")
-        || path.starts_with("/settings/payments")
-        || path.starts_with("/export/")
-        || path.starts_with("/import/")
-        || path.starts_with("/settings/email")
-        || (path.starts_with("/settings/system") && method != Method::GET)
+#[derive(Debug, PartialEq)]
+pub enum Access {
+    /// Any logged-in admin
+    Always,
+    /// At least one of these sections
+    AnyOf(&'static [&'static str]),
+    /// Checked field-by-field inside the handler (shared store settings)
+    Handler,
+}
+
+/// Which section(s) an admin API request needs. Unknown paths require settings (deny by default).
+pub fn required_access(method: &Method, path: &str) -> Access {
+    let starts = |p: &str| path == p || path.starts_with(&format!("{}/", p));
+    let read = method == Method::GET;
+
+    if starts("/auth") {
+        return Access::Always;
+    }
+    if path == "/settings/system" {
+        return if read { Access::Always } else { Access::Handler };
+    }
+    if starts("/dashboard") || starts("/analytics") {
+        return Access::AnyOf(&["overview"]);
+    }
+    if (starts("/products") || starts("/categories")) && read {
+        // Storefront pages pick products/categories for carousels and menus
+        return Access::AnyOf(&["products", "storefront"]);
+    }
+    if starts("/products") || starts("/variants") || starts("/parts") || starts("/categories") || starts("/coupons") || starts("/logistics") {
+        return Access::AnyOf(&["products"]);
+    }
+    if starts("/orders") {
+        return Access::AnyOf(&["orders"]);
+    }
+    if starts("/menu") || starts("/pages") {
+        return Access::AnyOf(&["storefront"]);
+    }
+    if starts("/media") {
+        return Access::AnyOf(&["products", "storefront", "settings"]);
+    }
+    Access::AnyOf(&["settings"])
 }
 
 pub async fn admin_auth_middleware(State(pool): State<PgPool>, mut req: Request<Body>, next: Next) -> Result<Response, Response> {
@@ -54,17 +113,19 @@ pub async fn admin_auth_middleware(State(pool): State<PgPool>, mut req: Request<
         .ok_or_else(|| deny(StatusCode::UNAUTHORIZED, "unauthenticated", "Please log in"))?;
 
     let admin_id = Uuid::parse_str(&claims.sub).map_err(|_| deny(StatusCode::UNAUTHORIZED, "unauthenticated", "Please log in again"))?;
-    let row = sqlx::query("SELECT id, username, role, is_default FROM admin_users WHERE id = $1")
+    let row = sqlx::query("SELECT id, username, role, is_default, permissions FROM admin_users WHERE id = $1")
         .bind(admin_id)
         .fetch_optional(&pool)
         .await
         .map_err(|_| deny(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Database unavailable"))?
         .ok_or_else(|| deny(StatusCode::UNAUTHORIZED, "unauthenticated", "This admin account no longer exists"))?;
 
+    let role: String = row.get("role");
     let admin = CurrentAdmin {
         id: row.get("id"),
         username: row.get("username"),
-        role: row.get("role"),
+        permissions: effective_permissions(&role, &row.get::<JsonValue, _>("permissions")),
+        role,
         is_default: row.get("is_default"),
     };
 
@@ -74,8 +135,14 @@ pub async fn admin_auth_middleware(State(pool): State<PgPool>, mut req: Request<
     if admin.is_default && !allowed_with_default_password(&path) {
         return Err(deny(StatusCode::FORBIDDEN, "password_change_required", "Please change the initial password before using the admin area"));
     }
-    if requires_store_manager(req.method(), &path) && !admin.can_manage_store() {
-        return Err(deny(StatusCode::FORBIDDEN, "forbidden", "Your role does not allow this action"));
+    match required_access(req.method(), &path) {
+        Access::AnyOf(sections) if !sections.iter().any(|s| admin.can(s)) => {
+            return Err(deny(StatusCode::FORBIDDEN, "forbidden", "You do not have permission for this area"));
+        }
+        Access::Handler if !admin.can("storefront") && !admin.can("settings") => {
+            return Err(deny(StatusCode::FORBIDDEN, "forbidden", "You do not have permission for this area"));
+        }
+        _ => {}
     }
 
     req.extensions_mut().insert(admin);
@@ -87,15 +154,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn editors_cannot_reach_store_configuration() {
-        assert!(requires_store_manager(&Method::GET, "/users"));
-        assert!(requires_store_manager(&Method::PUT, "/settings/payments/stripe"));
-        assert!(requires_store_manager(&Method::GET, "/export/store-data"));
-        assert!(requires_store_manager(&Method::POST, "/import/store-data"));
-        assert!(requires_store_manager(&Method::PUT, "/settings/system"));
-        assert!(!requires_store_manager(&Method::GET, "/settings/system"));
-        assert!(!requires_store_manager(&Method::GET, "/orders"));
-        assert!(!requires_store_manager(&Method::POST, "/products"));
+    fn role_defaults_match_policy() {
+        let editor = effective_permissions("editor", &json!({}));
+        assert_eq!(editor["products"], true);
+        assert_eq!(editor["orders"], true);
+        assert_eq!(editor["overview"], false);
+        assert_eq!(editor["storefront"], false);
+        assert_eq!(editor["settings"], false);
+        let admin = effective_permissions("admin", &json!({}));
+        assert!(admin["overview"] && admin["storefront"] && !admin["settings"]);
+        // Superadmins cannot be restricted
+        let sa = effective_permissions("superadmin", &json!({ "settings": false }));
+        assert!(sa.values().all(|v| *v));
+        // Stored values override defaults
+        let custom = effective_permissions("editor", &json!({ "settings": true, "orders": false }));
+        assert!(custom["settings"] && !custom["orders"]);
+    }
+
+    #[test]
+    fn api_paths_map_to_sections() {
+        assert_eq!(required_access(&Method::GET, "/users"), Access::AnyOf(&["settings"]));
+        assert_eq!(required_access(&Method::PUT, "/settings/payments/stripe"), Access::AnyOf(&["settings"]));
+        assert_eq!(required_access(&Method::GET, "/export/store-data"), Access::AnyOf(&["settings"]));
+        assert_eq!(required_access(&Method::GET, "/settings/system"), Access::Always);
+        assert_eq!(required_access(&Method::PUT, "/settings/system"), Access::Handler);
+        assert_eq!(required_access(&Method::GET, "/orders"), Access::AnyOf(&["orders"]));
+        assert_eq!(required_access(&Method::POST, "/products"), Access::AnyOf(&["products"]));
+        assert_eq!(required_access(&Method::GET, "/products"), Access::AnyOf(&["products", "storefront"]));
+        assert_eq!(required_access(&Method::PUT, "/menu/abc"), Access::AnyOf(&["storefront"]));
+        assert_eq!(required_access(&Method::GET, "/dashboard/stats"), Access::AnyOf(&["overview"]));
+        assert_eq!(required_access(&Method::GET, "/something-new"), Access::AnyOf(&["settings"]));
+        assert_eq!(required_access(&Method::GET, "/productsx"), Access::AnyOf(&["settings"]));
     }
 
     #[test]
