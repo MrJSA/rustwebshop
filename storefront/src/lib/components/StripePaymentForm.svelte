@@ -18,8 +18,8 @@
     elements = stripe.elements({ mode: 'payment', currency: 'eur', amount, paymentMethodTypes: types, appearance });
     element = elements.create('payment', {
       layout: { type: 'tabs' },
-      // Wallets and Link have their own entries in the checkout list
-      wallets: { applePay: 'never', googlePay: 'never' }
+      // Wallets and Link have their own entries in the checkout list (Link would otherwise prompt inside the card form)
+      wallets: { applePay: 'never', googlePay: 'never', link: 'never' }
     });
     element.on('ready', () => (ready = true));
     element.on('loaderror', (e) => (error = e.error?.message || 'The payment form could not be loaded.'));

@@ -413,12 +413,23 @@
     event.resolve({ emailRequired: false });
   }
 
+  // Never leave the customer with an endless spinner
+  const PAYMENT_TIMEOUT_MS = 120000;
+  function withTimeout(promise) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('The payment did not complete in time. No order was created — please try again or choose another payment method.')), PAYMENT_TIMEOUT_MS);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
   async function onWalletConfirm(event, elements) {
     isSubmitting = true;
     errorMessage = '';
     try {
-      await payWithStripe(elements, buildCheckoutRequest(), selectedMethodId);
+      await withTimeout(payWithStripe(elements, buildCheckoutRequest(), selectedMethodId));
     } catch (e) {
+      console.error('Express payment failed:', e);
       event.paymentFailed?.({ reason: 'fail' });
       showError(e.message || 'The payment was not completed.');
     }
@@ -907,7 +918,7 @@
                       name="payment-method"
                       value={m.id}
                       bind:group={selectedMethodId}
-                      on:change={() => { errorMessage = ''; paymentElementError = ''; }}
+                      on:change={() => { errorMessage = ''; paymentElementError = ''; isSubmitting = false; }}
                       class="w-4 h-4 accent-orange-600 flex-shrink-0"
                     />
                     <span class="flex-1 min-w-0">
@@ -1147,7 +1158,8 @@
                   <Loader2 size={16} class="animate-spin text-orange-500" /> Confirming your payment…
                 </div>
               {/if}
-              <div class:hidden={isSubmitting}>
+              <!-- Never hide the button while paying: its Stripe frame is needed until the payment completes -->
+              <div>
                 {#key selectedMethodId}
                   <StripeExpressButton
                     {stripe}

@@ -313,3 +313,8 @@ This log tracks architectural decisions, state checkpoints, implementation miles
 - **Implementation**: own imperative components `StripePaymentForm` / `StripeExpressButton` (create + destroy their own Elements); `GET /checkout/stripe/methods` + admin `GET /settings/payments/stripe/capabilities` (account capabilities); Amazon Pay and Link as branded buttons; `intent_types_for` returns type lists (Link → link + card), unit-tested; admin shows "active / not activated at Stripe" per method.
 - **Verification**: backend 10 unit tests, storefront/admin builds. Needs a manual check in the browser with the shop's Stripe keys.
 
+### [2026-10-06] Fix: Link prompt inside the card form; Link button stuck on "Confirming your payment…"
+- **Link in card form**: Stripe shows a Link prompt in the card form by default (managed in the Dashboard); `paymentMethodTypes: ['card']` alone does not prevent it. Fixed in code with Payment Element `wallets.link: 'never'` (documented in the Stripe.js reference; missing from the installed @stripe/stripe-js 5.10 types).
+- **Link/express hang**: the express button container was hidden (`class:hidden`) while confirming — the Stripe frame is still needed to finish Link/wallet payments, so confirmation never completed. The button now stays visible; express confirmations have a 2-minute timeout with a clear message; switching methods resets the "confirming" state.
+- **Docs consulted** (Stripe, user-provided): Amazon Pay (EUR + DE supported, redirect wallet, activate in Dashboard), Apple Pay / Google Pay web (HTTPS + registered payment method domain incl. subdomains, in test and live; Apple: start the sheet directly from the user gesture, use a timeout for confirmPayment; Google: a real card must be in the wallet even for tests).
+
