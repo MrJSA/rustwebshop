@@ -380,10 +380,7 @@
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({
-          ...settings,
-          footer_config: footerConfig
-        })
+        body: JSON.stringify({ footer_config: footerConfig })
       });
 
       if (res.ok) {

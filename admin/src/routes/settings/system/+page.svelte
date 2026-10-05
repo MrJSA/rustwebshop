@@ -55,10 +55,10 @@
   let cookieBannerEnabled = settings.cookie_banner_enabled !== undefined ? Boolean(settings.cookie_banner_enabled) : true;
   let cookieBannerTitle = settings.cookie_banner_title || 'We respect your privacy';
   let cookieBannerDescription = settings.cookie_banner_description || 'We use cookies and similar technologies to ensure our website works safely and properly, analyze usage patterns, and improve your shopping experience under GDPR regulations.';
-  let cookiePolicyUrl = settings.cookie_policy_url || '/policies/cookie-policy';
-  let cookieBannerAcceptText = settings.cookie_banner_accept_text || 'Accept All';
-  let cookieBannerDeclineText = settings.cookie_banner_decline_text || 'Decline Optional';
-  let cookieBannerPreferencesText = settings.cookie_banner_preferences_text || 'Cookie Preferences';
+  let cookiePolicyUrl = settings.cookie_banner_policy_url || '/policies/cookie-policy';
+  let cookieBannerAcceptText = settings.cookie_accept_label || 'Accept All';
+  let cookieBannerDeclineText = settings.cookie_deny_label || 'Decline Optional';
+  let cookieBannerPreferencesText = settings.cookie_preferences_label || 'Cookie Preferences';
 
   // Ensure hero_config has valid structure
   let heroConfig = settings.hero_config && typeof settings.hero_config === 'object'
@@ -198,18 +198,18 @@
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
+        // Only the storefront fields — a stale copy of other settings must never be resent
         body: JSON.stringify({
-          ...settings,
           show_store_title: showStoreTitle,
           show_store_subtitle: showStoreSubtitle,
           store_subtitle: storeSubtitle,
           cookie_banner_enabled: cookieBannerEnabled,
           cookie_banner_title: cookieBannerTitle,
           cookie_banner_description: cookieBannerDescription,
-          cookie_policy_url: cookiePolicyUrl,
-          cookie_banner_accept_text: cookieBannerAcceptText,
-          cookie_banner_decline_text: cookieBannerDeclineText,
-          cookie_banner_preferences_text: cookieBannerPreferencesText,
+          cookie_banner_policy_url: cookiePolicyUrl,
+          cookie_accept_label: cookieBannerAcceptText,
+          cookie_deny_label: cookieBannerDeclineText,
+          cookie_preferences_label: cookieBannerPreferencesText,
           hero_config: heroConfig,
           carousels_config: carouselsConfig
         })

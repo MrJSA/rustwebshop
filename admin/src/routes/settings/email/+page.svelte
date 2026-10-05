@@ -37,8 +37,8 @@
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
+        // Only the email fields — a stale copy of other settings must never be resent
         body: JSON.stringify({
-          ...settings,
           smtp_host: smtpHost,
           smtp_port: parseInt(smtpPort) || 587,
           smtp_username: smtpUsername,
