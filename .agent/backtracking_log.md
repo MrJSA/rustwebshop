@@ -318,3 +318,194 @@ This log tracks architectural decisions, state checkpoints, implementation miles
 - **Link/express hang**: the express button container was hidden (`class:hidden`) while confirming — the Stripe frame is still needed to finish Link/wallet payments, so confirmation never completed. The button now stays visible; express confirmations have a 2-minute timeout with a clear message; switching methods resets the "confirming" state.
 - **Docs consulted** (Stripe, user-provided): Amazon Pay (EUR + DE supported, redirect wallet, activate in Dashboard), Apple Pay / Google Pay web (HTTPS + registered payment method domain incl. subdomains, in test and live; Apple: start the sheet directly from the user gesture, use a timeout for confirmPayment; Google: a real card must be in the wallet even for tests).
 
+### [2026-10-06] Milestone 16: Product VAT Presets Removal & §19 Greying, Admin Debug Window Removal, Official Email Layout Overhaul, Multi-Type Email Test Dispatcher, & 1-Minute Verification Resend Cooldown
+- **Context & User Requirements**:
+  1. Admin Products: remove VAT presets ("19%", "7%", "0%"), and grey out VAT options if "§ 19 no VAT" (`kleingewerbe`) is selected in Store Settings.
+  2. Admin Sidebar: remove the environment box displaying `Mode: production` / `Debug Engine: OFF`.
+  3. Email Redesign: upgrade email layout to an official, professional design featuring a branded header with shop logo and name, structured responsive card layout, high-contrast typography, and a compliant footer containing shop details, contact info, and statutory notices.
+  4. Test Email Expansion: extend the "Send Test Email" feature under Settings (Email & Auth Policies) with a template selector allowing admins to send and preview test emails for all shop email types (`test`, `verification`, `order_created`, `payment_received`, `order_shipped`, `back_in_stock`, `password_reset`), and mandate in `rules.md` that all future store emails include a corresponding test option.
+  5. Login & Unverified Registration Resend: when an unverified customer registers or attempts to log in, provide the option to resend the activation email with an enforced 1-minute cooldown rate limit and live visual countdown timer.
+- **Architectural Implementation**:
+  - **Admin Products & Settings VAT UI** (`admin/src/routes/products/+page.svelte`, `admin/src/routes/settings/+page.svelte`):
+    - Removed quick preset buttons (`19%`, `7%`, `0%`) from both product creation and product editing modals.
+    - Added reactive greying-out styling (`opacity-40`, disabled cursor, darkened input background) to VAT labels and inputs in products when `isKleingewerbe` is active.
+    - In Store Settings, selecting `kleingewerbe` resets standard store VAT rate to 0.0% and greys out the VAT rate option.
+  - **Admin Sidebar Cleanup** (`admin/src/routes/+layout.svelte`):
+    - Removed the bottom sidebar environment box showing Mode and Debug Engine status while preserving the storefront link.
+  - **Official Email Layout Overhaul & Templates** (`backend/src/services/email.rs`):
+    - Implemented `render_email_layout(settings, preheader, title, color, body)` generating consistent, responsive HTML emails across all mail clients (Gmail, Apple Mail, Outlook).
+    - Header: resolves and renders full store logo URL (with fallback to store brand badge), store name, and a "Visit Store" link.
+    - Body: card container with subtle dark gradients, high-contrast typography, CTA buttons with gradient styling, and structured metadata tables.
+    - Footer: includes store name, company address, support/contact email, telephone, VAT ID, statutory tax exemption notice (§ 19 UStG), and copyright.
+    - Upgraded all store emails (`send_test_email`, `send_verification_email`, `send_order_created_email`, `send_payment_received_email`, `send_order_shipped_email`, `send_back_in_stock_email`, `send_password_reset_email`) to use this unified layout and return `Result<(), String>`.
+  - **Multi-Type Test Email Dispatcher** (`backend/src/models/settings.rs`, `backend/src/services/email.rs`, `backend/src/routes/admin.rs`, `admin/src/routes/settings/+page.svelte`, `admin/src/routes/settings/email/+page.svelte`):
+    - Added `email_type: Option<String>` to `TestEmailRequest`.
+    - Added `services::email::send_test_email_by_type` generating mock/sample data for all 7 email templates.
+    - Added a template selector dropdown in both Admin Settings Email tabs (`Settings -> Email & Auth Policies` and `/settings/email`).
+    - Updated `.agent/rules.md` requiring all future transactional emails to be integrated into `send_test_email_by_type` and the Admin dropdown.
+  - **Verification Email 1-Minute Cooldown & Countdown Timer** (`backend/src/services/auth.rs`, `backend/src/routes/public.rs`, `storefront/src/routes/account/login/+page.svelte`):
+    - Backend: added `auth::check_resend_allowed` and `auth::record_resend_sent` enforcing a 60-second cooldown per email address. `public_resend_verification` returns HTTP 429 with remaining seconds if called too early. `public_customer_register` records the initial dispatch timestamp.
+    - Storefront: customer login page tracks active 60s cooldown with a live countdown timer on the button (`Resend verification email in Xs`), disabled state, and `sessionStorage` persistence across page reloads.
+- **Verification**:
+  - `backend`: `cargo test` passes 11 unit tests (including new resend cooldown test).
+  - `admin`: `npm run build` succeeds cleanly (0 errors).
+  - `storefront`: `npm run build` succeeds cleanly (0 errors).
+
+### [2026-10-06] Milestone 17: Storefront Product Redirection Fix, BOM Parts Inventory Integration & Multi-Action Quick Restock
+- **Context & User Requirements**:
+  1. Storefront Product Redirection: Fix issue where clicking product cards, carousel slides, or buttons from the storefront only redirected properly for digital products and out-of-stock products, but failed for physical in-stock products.
+  2. Admin Logistics & Stock Quick Restock: Replace fixed quick restock buttons with an input field where the admin can enter a number, and then choose to:
+     - Add this number (`+ Add`)
+     - Subtract this number (`- Sub`)
+     - Set new stock to that number (`= Set`)
+  3. Admin Logistics & Stock BOM Parts Integration: In the Logistics & Stock table, show all parts from the Bill of Materials (BOM) alongside products, detailing which products and versions use each part, so admins can easily detect when a shared component is depleted and needs to be produced again to fulfill orders.
+- **Root Causes & Diagnostics**:
+  - **Storefront Redirect Failure**: In `storefront/src/routes/products/[slug]/+page.svelte`, the template referenced `store?.stock_display_template` on line 414 inside the `{:else if inStock}` block (used exclusively by physical products with positive stock). However, `store` was never declared in `<script>`. Evaluating an undeclared variable in strict JavaScript threw an unhandled runtime `ReferenceError: store is not defined`, crashing page load and client-side navigation. Digital products took `{#if isDigital}` and out-of-stock products took `{:else}`, bypassing line 414 completely.
+  - **Logistics Stock Limitations**: The inventory endpoint and stock table only queried `product_variants`. `product_parts` had no stock tracking columns, lacked part-level restocking endpoints, and provided no visibility into whether components needed for assembly/fulfillment were depleted.
+- **Architectural Implementation**:
+  - **Storefront Product Page Fix** (`storefront/src/routes/products/[slug]/+page.svelte`):
+    - Added reactive declaration `$: store = data.store || {};` and updated `storeName = store.store_name || 'Shop'`.
+    - Physical in-stock products now render and navigate seamlessly from home page hero carousels, featured buttons, and product cards.
+  - **BOM Parts Database Schema & Migration** (`backend/migrations/0017_bom_parts_stock.sql`, `backend/src/db.rs`):
+    - Added `stock_quantity INTEGER NOT NULL DEFAULT 0` and `low_stock_threshold INTEGER NOT NULL DEFAULT 5` to `product_parts`.
+    - Registered migration `0017_bom_parts_stock` in `db.rs`.
+    - Updated `ProductPart`, `CreatePartRequest`, `UpdateProductPartRequest`, backup queries, and restore handlers in `backend/src/models/product.rs` and `backend/src/routes/admin.rs`.
+  - **Logistics Inventory Backend Overhaul** (`backend/src/routes/admin.rs`):
+    - Rewrote `get_logistics_inventory` to fetch both `product_variants` and `product_parts`.
+    - Parts are grouped by SKU/ID into unified component rows (`item_type: "part"`), summarizing all products and variants that depend on them (`used_in` and `used_in_summary`), current stock, and depletion status (`Depleted - Needs Production`).
+    - Product rows calculate BOM readiness: `bom_parts_total`, `bom_parts_depleted`, and `bom_has_missing_parts`.
+    - Added `PUT /api/v1/admin/logistics/parts/:part_id/stock` supporting `adjustment` and `absolute_quantity` updates, keeping shared part SKUs synchronized across all versions.
+    - Updated `update_variant_stock` to clamp reductions to zero (`GREATEST(0, stock_quantity + $1)`).
+  - **Admin Stock UI Overhaul** (`admin/src/routes/products/+page.svelte`, `admin/src/routes/logistics/+page.svelte`):
+    - Replaced old preset buttons with a numerical input field and three dedicated actions:
+      - `+ Add`: adds custom quantity
+      - `- Sub`: subtracts custom quantity (clamped to 0)
+      - `= Set`: sets absolute quantity
+    - Added type filter tabs: `All`, `Products`, and `BOM Parts`.
+    - Added component badges, usage summaries (`Required by: ...`), and depleted alerts (`⚠️ Depleted (Needs Production)`).
+    - Finished product rows now feature live BOM readiness badges (e.g. `⚠️ 1 BOM part depleted — produce parts first` vs `✓ All BOM parts ready`).
+    - Restocking any shared part automatically updates stock across all referencing products and variants.
+- **Verification**:
+  - `backend`: `cargo check` and `cargo test` pass (11/11 tests ok).
+  - `admin`: `npm run build` succeeds cleanly (0 errors).
+  - `storefront`: `npm run build` succeeds cleanly (0 errors).
+
+### [2026-10-06] Milestone 18: Centralized BOM Parts Catalog, Warehouse Storage Locations, Expandable Stock Tree & Auto-Calculated Product Inventory
+- **Context & User Requirements**:
+  1. Centralized BOM Parts Management: Ability to create BOM parts with SKU, Name, Stock Quantity, and Storage Location (where it's stored at) in `Products -> Logistics & Stock`. Ability to edit parts there as well (SKU, Name, Storage Location, Stock, Threshold, Notes).
+  2. Centralized Parts Selection in Products: In `Products -> Products & BOM`, allow selecting existing BOM parts from a dropdown list to attach them to one or multiple products, centralizing parts stock and storage in one place while assembling products in the other.
+  3. Logistics & Stock Tree Accordion View: In `Logistics, Finished Goods & BOM Parts Inventory`, provide tab selection between `Products` and `BOM Parts`. When `Products` is selected, clicking a product row expands an accordion showing all BOM components used for that product underneath, with the ability to edit components and restock them directly there.
+  4. Auto-Calculated Product Stock from BOM Parts: The total amount of products in stock is automatically calculated from the BOM parts available for a complete product ($\min(\lfloor \text{part\_stock} / \text{qty\_required} \rfloor)$). Direct/individual editing of product stock is blocked for BOM-assembled items, allowing stock adjustments only through the underlying component parts in stock.
+- **Architectural Implementation**:
+  - **Database Migration & Schema** (`backend/migrations/0018_centralized_bom_parts.sql`, `backend/src/db.rs`):
+    - Created `bom_parts` table (`id`, `sku`, `name`, `storage_location`, `stock_quantity`, `low_stock_threshold`, `notes`, `created_at`).
+    - Added `storage_location` and `part_id` foreign key reference to `product_parts`.
+    - Seeded central components (switches, aluminum cases, PCBs, keycaps, stabilizers, hoodie fabric, deskmat textiles) and linked existing product parts.
+    - Registered migration `0018_centralized_bom_parts` in `backend/src/db.rs`.
+  - **Domain Models & Auth Permissions** (`backend/src/models/product.rs`, `backend/src/middleware/auth.rs`):
+    - Added `BomPart`, `CreateBomPartRequest`, `UpdateBomPartRequest`.
+    - Extended `ProductPart` and `CreatePartRequest` with `part_id` and `storage_location`.
+    - Registered `/bom-parts` under admin product permissions.
+  - **Stock Recalculation Engine & Admin Routes** (`backend/src/routes/admin.rs`):
+    - Implemented `recalculate_all_product_stocks(&pool)`: dynamically determines the maximum buildable complete units for every product variant based on required BOM parts ($\min(\lfloor \text{part\_stock} / \text{quantity} \rfloor)$) and updates `product_variants.stock_quantity`.
+    - Protected variant stock updates: `update_variant_stock` checks if the variant has BOM parts. If so, direct manual stock edits are rejected with HTTP 400 (`Cannot manually adjust stock for products with BOM parts. Stock is auto-calculated from component inventory.`).
+    - Updated `update_part_stock`: synchronizes both `bom_parts` and `product_parts`, then automatically invokes `recalculate_all_product_stocks`.
+    - Implemented full CRUD for centralized parts: `admin_list_bom_parts`, `admin_create_bom_part`, `admin_update_bom_part`, and `admin_delete_bom_part`.
+    - Updated `admin_add_product_part`, `admin_update_product_part`, and `admin_delete_product_part` to link with `bom_parts` and recalculate finished product buildable stock.
+    - Updated `get_logistics_inventory` to return storage locations and nested BOM component lists for each product.
+  - **Checkout Line Items Deduction** (`backend/src/services/checkout.rs`):
+    - In checkout ACID transaction, order line item deductions now also decrement `bom_parts` and `product_parts` inventory according to the product's bill of materials.
+  - **Admin UI Overhaul** (`admin/src/routes/logistics/+page.svelte`, `admin/src/routes/products/+page.svelte`):
+    - **Expandable Tree Accordion**: Clickable product rows expand to display an indented sub-table of all required BOM parts, complete with storage location badges (`MapPin`), requirement quantities per unit, available stock, buildable units, readiness badges, and dedicated quick restock controls (+, -, =).
+    - **Locked Product Restock**: Finished goods with BOM parts display a `Derived from BOM Parts` indicator and a quick toggle to restock parts underneath, preventing invalid manual stock overrides.
+    - **Centralized BOM Part Creation & Editing**: Added `+ Create BOM Part` button and modal to create parts with SKU, Name, Storage Location, Initial Stock, Low Stock Threshold, and Specs. Added `Edit BOM Component` modal to update SKU, Name, Storage Location, and Stock at any time.
+    - **Product Edit Modal (Section 3)**: Replaced free-text input with a dropdown selector of existing centralized `bomParts`, showing SKU, warehouse bin location, and available stock.
+- **Verification & Resolution**:
+  - `backend`: Foreign key violation resolved by inner-joining `products` in `0018_centralized_bom_parts.sql`. Migration 0018 executed and confirmed applied. `cargo check` and `cargo test` pass (11/11 tests ok).
+  - `admin`: SvelteKit build succeeds cleanly (0 errors).
+  - `docker`: All 5 containers (`db`, `backend`, `storefront`, `admin`, `updater`) running and healthy. Both ports 4000 (Admin) and 8080 (Storefront) return HTTP 200.
+
+### [2026-10-07] Milestone 19: SKU-Based BOM Stock Synchronization & Configurable Low-Stock Email Alerts
+- **Context & User Requirements**:
+  1. Synchronize stock quantity for parts with the same SKU: Ensure that parts sharing the same SKU (across `bom_parts` and all linked `product_parts` in different products) strictly maintain the exact same stock quantity across restocking, part editing, and checkout deduction.
+  2. Low-Stock Notification Emails: Provide a settings option to send notification emails to the admin, other users who have access to the stock section (`products` permission), or specifically selected admin accounts, whenever BOM parts drop to or below their threshold.
+- **Architectural Implementation**:
+  - **Database Migration & Triggers** (`backend/migrations/0019_part_stock_sync_and_low_stock_alerts.sql`, `backend/src/db.rs`):
+    - Reconciled existing stock discrepancies across all `product_parts` and `bom_parts` sharing the same SKU.
+    - Implemented PostgreSQL triggers `trg_sync_bom_parts_stock` and `trg_sync_product_parts_stock` with `IS DISTINCT FROM` recursion guards to propagate any stock change across all matching parts by SKU and part ID.
+    - Implemented `trg_set_initial_product_part_stock` before INSERT on `product_parts` to inherit stock from existing parts with that SKU.
+    - Added columns to `bom_parts`: `last_low_stock_alert_at TIMESTAMPTZ` and `last_alert_stock_quantity INTEGER`.
+    - Added trigger `trg_reset_bom_part_alert` to clear alert timestamps whenever stock is replenished above threshold.
+    - Added columns to `store_settings`: `low_stock_alerts_enabled BOOLEAN`, `low_stock_alert_recipients_mode VARCHAR(50)`, `low_stock_alert_custom_emails TEXT`, and `low_stock_alert_selected_user_ids JSONB`.
+    - Registered migration `0019_part_stock_sync_and_low_stock_alerts` in `backend/src/db.rs`.
+  - **Models & Settings Persistence** (`backend/src/models/settings.rs`, `backend/src/routes/admin.rs`):
+    - Added the 4 low-stock configuration fields to `StoreSettings` and `UpdateStoreSettingsRequest`.
+    - Updated `admin_update_system_settings` query and bindings to store and update low stock preferences without breaking existing partial saves.
+  - **Transactional Email Service & Alert Engine** (`backend/src/services/email.rs`):
+    - Implemented `send_part_low_stock_email` adhering to `.agent/rules.md` (branded layout with header, card styling, key metrics table, and legal footer).
+    - Registered `"low_stock_alert"` in `send_test_email_by_type` to allow admins to preview the email template.
+    - Implemented `check_and_send_low_stock_alerts(pool: &PgPool)`:
+      - Checks if alerts and SMTP are enabled.
+      - Resolves recipient list based on mode (`stock_managers`, `selected_users`, or `both`) and parses additional custom emails.
+      - Finds parts breaching threshold with cooldown/deduplication logic (fires on first breach, if stock drops further, or after 24 hours).
+      - Dispatches emails asynchronously and records alert timestamps.
+  - **Checkout Deduction & Event Hooks** (`backend/src/services/checkout.rs`, `backend/src/routes/payments.rs`, `backend/src/routes/admin.rs`):
+    - In checkout ACID transaction, deducts BOM part stock once and lets database triggers synchronize linked products, avoiding double deductions.
+    - Spawns background calls to `recalculate_all_product_stocks` and `check_and_send_low_stock_alerts` on checkout completion, quick restocking, and part editing.
+  - **Admin Settings UI** (`admin/src/routes/settings/email/+page.svelte`, `admin/src/routes/settings/email/+page.server.js`, `admin/src/routes/settings/+page.svelte`):
+    - Added `"BOM Low Stock Inventory Alert"` to the Test Email template dropdown selector.
+    - Added "📦 BOM Inventory & Low-Stock Email Alerts" configuration card with master enable toggle.
+    - Added recipient mode selector: Stock Managers (users with 'products' access), Specific Selected Users, or Both.
+    - Added interactive user selection checklist showing user badges (Role, Stock Access) with checkbox toggles.
+    - Added optional custom email addresses input for external team members without an admin login.
+    - Added "5. Low Stock Alert" card to the Automated Notifications inventory overview.
+- **Verification**:
+  - `backend`: `cargo check` and `cargo test` pass (11/11 tests ok).
+  - `admin`: SvelteKit build succeeds cleanly (0 errors).
+  - `storefront`: SvelteKit build succeeds cleanly (0 errors).
+  - `docker`: Migration 0019 applied cleanly on container restart; backend is running and healthy on port 8000 (HTTP 200).
+
+### [2026-10-08] Milestone 21: Admin User Email Address Persistence & Profile Management
+- **Context & Issue**:
+  - Administrators were unable to reliably add or update email addresses for their own and other admin accounts.
+  - Root causes identified:
+    1. Header credentials modal (`admin/src/routes/+layout.svelte`) only supported username/password and lacked an email field. Furthermore, password change was mandatory even if the user only wanted to update their email or username.
+    2. Backend credentials change endpoint (`admin_change_credentials`, `PUT /api/v1/admin/auth/change-credentials`) had no `email` in `ChangeAdminCredentialsRequest` and did not persist email changes to `admin_users`.
+    3. `admin_auth_status` (`/api/v1/admin/auth/me`) did not return `email` or `id`, preventing SvelteKit layouts and session helpers from recognizing the authenticated user's current email.
+    4. In `AdminUsersManager.svelte` (`/settings?tab=users`), self-edits could be misidentified, sending permissions payloads that triggered `403 Forbidden` ("You cannot change your own role or permissions"), while errors were masked as generic messages due to plain text parsing failure in `readError`.
+    5. In the Low-Stock Notification settings (`/settings/email` and `/settings?tab=email`), accounts displayed `(No email set on account)` with no quick method to assign an email to an account.
+- **Architectural Implementation**:
+  - **Backend Models & Auth Middleware** (`backend/src/models/admin_user.rs`, `backend/src/middleware/auth.rs`):
+    - Added `pub email: Option<String>` to `ChangeAdminCredentialsRequest`.
+    - Added `pub email: Option<String>` to `CurrentAdmin` struct and queried `email` from `admin_users` in `admin_auth_middleware`.
+  - **Backend Admin Handlers** (`backend/src/routes/admin.rs`):
+    - Updated `admin_login` and `admin_auth_status` (`/auth/me`) to return `email` and `id` in their responses.
+    - Updated `admin_change_credentials`:
+      - Allows updating `email` and/or `username` with verification of `current_password` without forcing a password change (unless still on default password).
+      - If a new password is provided, verifies `len >= 12` and different from current password, updating `password_hash` and clearing `is_default`.
+      - Returns updated `username` and `email` alongside a renewed session token.
+    - Updated `admin_update_user`:
+      - Robustly handles self-updates (`id == actor.id`): ensures role remains current, preserves existing permissions safely, and allows username/email/password updates.
+      - Returns explicit SQL and validation error strings rather than masking with generic messages.
+  - **Admin Layout Profile & Credentials Modal** (`admin/src/routes/+layout.svelte`):
+    - Added user email display and updated badge in top header.
+    - Expanded modal to "Admin Account & Profile Settings": includes Email Address field and makes password change optional (with current password verification).
+    - Robust response parsing for text and JSON error messages.
+  - **Admin Users Manager** (`admin/src/lib/components/AdminUsersManager.svelte`):
+    - Fixed `editingSelf` check using both user ID and username comparison.
+    - Updated `readError` to parse both JSON and plain-text HTTP error responses.
+    - Synchronized active session admin store upon user update.
+  - **Quick Email Assignment in Low-Stock Alert UI** (`admin/src/routes/settings/email/+page.svelte`, `admin/src/routes/settings/+page.svelte`):
+    - Added "Set Email" / "Edit Email" action button next to each account in the recipient selection list.
+    - Added interactive modal dialog to immediately update and persist any user's email via `PUT /api/v1/admin/users/:id`, reflecting changes in real-time.
+- **Verification**:
+  - `backend`: `cargo check` passes with 0 errors.
+  - `admin`: SvelteKit production build (`npm run build`) completed successfully with 0 errors.
+  - End-to-end API verification via test tokens:
+    - `GET /api/v1/admin/auth/me` returns `email` and `id`.
+    - `PUT /api/v1/admin/users/:id` updates and persists user emails with HTTP 200.
+    - Self-update with permissions payload succeeds smoothly without 403 rejection.
+  - Docker containers `rustwebshop-backend-1` and `rustwebshop-admin-1` rebuilt, recreated, and live.
+
+
+

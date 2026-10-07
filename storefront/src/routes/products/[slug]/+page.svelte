@@ -24,6 +24,7 @@
   $: product = data.product || {};
   $: variants = data.variants || [];
   $: relatedProducts = data.relatedProducts || [];
+  $: store = data.store || {};
 
   let selectedVariantIndex = 0;
   let activeImageIndex = 0;
@@ -55,7 +56,7 @@
   $: activeImageUrl = currentImages[activeImageIndex] || currentImages[0] || currentVariant.image_url || product.image_url || '';
 
   // --- SEO structured data (schema.org Product + BreadcrumbList) ---
-  $: storeName = data.store?.store_name || 'Shop';
+  $: storeName = store.store_name || 'Shop';
   $: origin = $page.url.origin;
   $: productUrl = `${origin}/products/${product.slug}`;
   $: variantPrice = (v) => v.price_override_cents || product.base_price_cents || 0;

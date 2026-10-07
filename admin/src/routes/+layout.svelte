@@ -79,10 +79,12 @@
   ];
 
   let adminUsername = 'admin';
+  let adminEmail = '';
   let isDefaultCredentials = false;
   let isChangePasswordModalOpen = false;
   let currentPassword = '';
   let newUsername = 'admin';
+  let newEmail = '';
   let newPassword = '';
   let confirmPassword = '';
   let changePasswordError = '';
@@ -114,7 +116,14 @@
   // The session is validated server-side (hooks.server.js); the token itself lives in an httpOnly cookie.
   $: if (data.admin) {
     isDefaultCredentials = Boolean(data.admin.is_default);
-    if (data.admin.username) adminUsername = data.admin.username;
+    if (data.admin.username) {
+      adminUsername = data.admin.username;
+      newUsername = data.admin.username;
+    }
+    if (data.admin.email !== undefined) {
+      adminEmail = data.admin.email || '';
+      newEmail = data.admin.email || '';
+    }
   }
   $: if (isDefaultCredentials && !isLoginPage) isChangePasswordModalOpen = true;
 
@@ -123,6 +132,7 @@
     ['admin_token', 'admin_username', 'admin_is_default'].forEach((k) => localStorage.removeItem(k));
     document.cookie = 'admin_token=; path=/; max-age=0;';
     newUsername = adminUsername;
+    newEmail = adminEmail;
   });
 
   async function handleLogout() {
@@ -130,22 +140,42 @@
     window.location.href = '/login';
   }
 
+  function openAccountModal() {
+    newUsername = adminUsername;
+    newEmail = adminEmail;
+    currentPassword = '';
+    newPassword = '';
+    confirmPassword = '';
+    changePasswordError = '';
+    changePasswordSuccess = '';
+    isChangePasswordModalOpen = true;
+  }
+
   async function handleChangeCredentials() {
     changePasswordError = '';
     changePasswordSuccess = '';
 
     if (!currentPassword) {
-      changePasswordError = 'Please enter your current password.';
+      changePasswordError = 'Please enter your current password to save account changes.';
       return;
     }
 
-    if (!newPassword || newPassword.length < 12) {
-      changePasswordError = 'New password must be at least 12 characters long.';
+    if (!newUsername.trim()) {
+      changePasswordError = 'Username cannot be empty.';
       return;
     }
 
-    if (newPassword !== confirmPassword) {
-      changePasswordError = 'New password and confirmation do not match.';
+    if (newPassword) {
+      if (newPassword.length < 12) {
+        changePasswordError = 'New password must be at least 12 characters long.';
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        changePasswordError = 'New password and confirmation do not match.';
+        return;
+      }
+    } else if (isDefaultCredentials) {
+      changePasswordError = 'Please choose a new password of at least 12 characters before continuing.';
       return;
     }
 
@@ -158,22 +188,27 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           current_password: currentPassword,
-          new_username: newUsername,
-          new_password: newPassword
+          new_username: newUsername.trim(),
+          email: newEmail.trim(),
+          ...(newPassword ? { new_password: newPassword } : {})
         })
       });
 
-      const resData = await res.json().catch(() => ({}));
+      const resText = await res.text().catch(() => '');
+      let resData = {};
+      try { resData = JSON.parse(resText); } catch { resData = { error: resText }; }
+
       if (!res.ok) {
-        changePasswordError = resData.error || resData.message || 'Failed to change credentials.';
+        changePasswordError = resData.error || resData.message || 'Failed to update credentials.';
         isSubmittingChange = false;
         return;
       }
 
       const wasDefault = isDefaultCredentials;
-      adminUsername = newUsername;
+      adminUsername = resData.username || newUsername.trim();
+      adminEmail = resData.email !== undefined ? (resData.email || '') : newEmail.trim();
       isDefaultCredentials = false;
-      changePasswordSuccess = 'Credentials updated successfully!';
+      changePasswordSuccess = resData.message || 'Account profile and credentials updated successfully!';
       setTimeout(() => {
         isChangePasswordModalOpen = false;
         changePasswordSuccess = '';
@@ -184,7 +219,7 @@
         if (wasDefault) window.location.reload();
       }, 1500);
     } catch (e) {
-      changePasswordError = 'Error updating credentials.';
+      changePasswordError = e.message || 'Error updating credentials.';
     } finally {
       isSubmittingChange = false;
     }
@@ -267,19 +302,8 @@
         {/each}
       </nav>
 
-      <!-- Bottom Environment Status -->
-      <div class="p-4 border-t border-slate-800 bg-slate-900/90 space-y-3">
-        <div class="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] space-y-1">
-          <div class="flex items-center justify-between text-slate-400">
-            <span>Mode:</span>
-            <span class="capitalize font-mono text-orange-400 font-bold">{settings.deployment_mode || 'Development'}</span>
-          </div>
-          <div class="flex items-center justify-between text-slate-400">
-            <span>Debug Engine:</span>
-            <span class="font-mono text-emerald-400 font-bold">{settings.debug_mode ? 'ON' : 'OFF'}</span>
-          </div>
-        </div>
-
+      <!-- Bottom Storefront Link -->
+      <div class="p-4 border-t border-slate-800 bg-slate-900/90">
         <a
           href="http://localhost:8080"
           target="_blank"
@@ -329,12 +353,17 @@
           <!-- User Badge & Actions -->
           <div class="flex items-center gap-2">
             <button
-              on:click={() => isChangePasswordModalOpen = true}
+              on:click={openAccountModal}
               class="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-colors"
-              title="Change Admin Password"
+              title="Account & Security Settings"
             >
               <User size={14} class="text-orange-400" />
-              <span>{adminUsername}</span>
+              <div class="flex flex-col text-left">
+                <span class="leading-tight">{adminUsername}</span>
+                {#if adminEmail}
+                  <span class="text-[10px] text-slate-400 font-mono leading-tight">{adminEmail}</span>
+                {/if}
+              </div>
               <KeyRound size={12} class="text-slate-400 ml-1" />
             </button>
 
@@ -365,16 +394,17 @@
     </div>
   </div>
 
-  <!-- Change Credentials Modal -->
+  <!-- Account & Security Settings Modal -->
   {#if isChangePasswordModalOpen}
     <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
       <div class="w-full max-w-md rounded-3xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
         <div class="flex items-center justify-between pb-3 border-b border-slate-800">
           <div class="flex items-center gap-2 text-white font-bold text-sm">
             <KeyRound size={18} class="text-orange-500" />
-            <span>Change Admin Credentials</span>
+            <span>Admin Account & Profile Settings</span>
           </div>
           <button
+            type="button"
             on:click={() => isChangePasswordModalOpen = false}
             class="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
           >
@@ -397,11 +427,14 @@
 
         <form on:submit|preventDefault={handleChangeCredentials} class="space-y-3.5 text-xs">
           <div>
-            <label class="block text-slate-300 font-semibold mb-1">Current Password</label>
+            <label class="block text-slate-300 font-semibold mb-1">
+              Current Password <span class="text-rose-400">*</span>
+            </label>
             <input
               type="password"
               bind:value={currentPassword}
-              placeholder="Your current password"
+              required
+              placeholder="Enter current password to save changes"
               class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-orange-500 font-mono"
             />
           </div>
@@ -417,26 +450,39 @@
           </div>
 
           <div>
-            <label class="block text-slate-300 font-semibold mb-1">New Password</label>
+            <label class="block text-slate-300 font-semibold mb-1">Email Address</label>
+            <input
+              type="email"
+              bind:value={newEmail}
+              placeholder="e.g. admin@yourdomain.com"
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-orange-500 font-mono"
+            />
+            <p class="text-[10px] text-slate-500 mt-1">Used for stock alerts, notifications, and system communication.</p>
+          </div>
+
+          <div class="pt-2 border-t border-slate-800/80">
+            <label class="block text-slate-300 font-semibold mb-1">
+              New Password {isDefaultCredentials ? '(Min. 12 characters required)' : '(Leave blank to keep existing password)'}
+            </label>
             <input
               type="password"
               bind:value={newPassword}
-              required
-              placeholder="Minimum 8 characters"
+              placeholder={isDefaultCredentials ? "Required: minimum 12 characters" : "Optional: min. 12 characters"}
               class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500 font-mono"
             />
           </div>
 
-          <div>
-            <label class="block text-slate-300 font-semibold mb-1">Confirm New Password</label>
-            <input
-              type="password"
-              bind:value={confirmPassword}
-              required
-              placeholder="Re-enter new password"
-              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500 font-mono"
-            />
-          </div>
+          {#if isDefaultCredentials || newPassword.length > 0}
+            <div>
+              <label class="block text-slate-300 font-semibold mb-1">Confirm New Password</label>
+              <input
+                type="password"
+                bind:value={confirmPassword}
+                placeholder="Re-enter new password"
+                class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500 font-mono"
+              />
+            </div>
+          {/if}
 
           <div class="pt-2 flex justify-end gap-2">
             <button
@@ -451,7 +497,7 @@
               disabled={isSubmittingChange}
               class="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold transition-all shadow-md shadow-orange-600/30 disabled:opacity-50"
             >
-              {isSubmittingChange ? 'Saving...' : 'Update Credentials'}
+              {isSubmittingChange ? 'Saving...' : 'Save Changes'}
             </button>
           </div>
         </form>

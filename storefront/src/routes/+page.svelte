@@ -218,7 +218,7 @@
 {#if !currentCategory && !currentSearch && heroConfig && carouselItems.length > 0}
   <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-6">
     {#if heroConfig.layout === 'carousel'}
-      <!-- Option A: Full-Width Widescreen Carousel (8BitDo style) -->
+      <!-- Option A: Full-Width Widescreen Carousel -->
       <div
         role="region"
         aria-label="Product Showcase Carousel"
@@ -294,7 +294,7 @@
       </div>
 
     {:else}
-      <!-- Option B: Split Hero (60% Carousel + 40% 4 Featured Product Buttons, 8BitMods style) -->
+      <!-- Option B: Split Hero (60% Carousel + 40% 4 Featured Product Buttons) -->
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
         <!-- Left: 60% Width Carousel Slider (7 cols on lg) -->
         <div
@@ -366,7 +366,7 @@
           {/if}
         </div>
 
-        <!-- Right: 40% Width 4 Featured Product Buttons (8BitMods Depth & Floating Product Style) -->
+        <!-- Right: 40% Width 4 Featured Product Buttons (floating product images with depth) -->
         <div class="lg:col-span-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
           {#if heroConfig.featured_buttons && heroConfig.featured_buttons.length > 0}
             {#each heroConfig.featured_buttons as btn}

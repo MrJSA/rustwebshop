@@ -41,6 +41,7 @@ pub fn effective_permissions(role: &str, stored: &JsonValue) -> BTreeMap<String,
 pub struct CurrentAdmin {
     pub id: Uuid,
     pub username: String,
+    pub email: Option<String>,
     pub role: String,
     pub is_default: bool,
     pub permissions: BTreeMap<String, bool>,
@@ -92,7 +93,7 @@ pub fn required_access(method: &Method, path: &str) -> Access {
         // Storefront pages pick products/categories for carousels and menus
         return Access::AnyOf(&["products", "storefront"]);
     }
-    if starts("/products") || starts("/variants") || starts("/parts") || starts("/categories") || starts("/coupons") || starts("/logistics") {
+    if starts("/products") || starts("/variants") || starts("/parts") || starts("/bom-parts") || starts("/categories") || starts("/coupons") || starts("/logistics") {
         return Access::AnyOf(&["products"]);
     }
     if starts("/orders") {
@@ -113,7 +114,7 @@ pub async fn admin_auth_middleware(State(pool): State<PgPool>, mut req: Request<
         .ok_or_else(|| deny(StatusCode::UNAUTHORIZED, "unauthenticated", "Please log in"))?;
 
     let admin_id = Uuid::parse_str(&claims.sub).map_err(|_| deny(StatusCode::UNAUTHORIZED, "unauthenticated", "Please log in again"))?;
-    let row = sqlx::query("SELECT id, username, role, is_default, permissions FROM admin_users WHERE id = $1")
+    let row = sqlx::query("SELECT id, username, email, role, is_default, permissions FROM admin_users WHERE id = $1")
         .bind(admin_id)
         .fetch_optional(&pool)
         .await
@@ -124,6 +125,7 @@ pub async fn admin_auth_middleware(State(pool): State<PgPool>, mut req: Request<
     let admin = CurrentAdmin {
         id: row.get("id"),
         username: row.get("username"),
+        email: row.try_get::<Option<String>, _>("email").ok().flatten(),
         permissions: effective_permissions(&role, &row.get::<JsonValue, _>("permissions")),
         role,
         is_default: row.get("is_default"),

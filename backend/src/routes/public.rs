@@ -662,7 +662,7 @@ async fn public_get_product_parts(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Product not found".to_string()))?;
 
     let parts = sqlx::query_as::<_, ProductPart>(
-        "SELECT id, product_id, variant_id, part_name, part_sku, quantity, notes, created_at FROM product_parts WHERE product_id = $1 AND COALESCE(part_sku, '') <> 'DIGITAL_FILE' ORDER BY created_at ASC"
+        "SELECT id, product_id, variant_id, NULL::uuid AS part_id, part_name, part_sku, quantity, notes, NULL::varchar AS storage_location, created_at, 0 AS stock_quantity, 0 AS low_stock_threshold FROM product_parts WHERE product_id = $1 AND COALESCE(part_sku, '') <> 'DIGITAL_FILE' ORDER BY created_at ASC"
     )
     .bind(product_id)
     .fetch_all(&pool)
@@ -713,11 +713,21 @@ async fn public_resend_verification(
     Json(payload): Json<ResendVerificationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let email = payload.email.trim().to_lowercase();
-    let generic = Json(json!({ "message": "If an unverified account exists for this email, a new verification link has been sent." }));
+
+    // 1-minute cooldown per email address
+    if let Err(remaining) = auth::check_resend_allowed(&email) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("Please wait {} seconds before requesting another verification email.", remaining),
+        ));
+    }
 
     let limiter_key = format!("verify:{}", email);
     if auth::check_login_allowed(&limiter_key).is_err() {
-        return Ok(generic);
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many requests. Please wait a few minutes before trying again.".to_string(),
+        ));
     }
     auth::record_login_failure(&limiter_key); // caps resend emails per address
 
@@ -739,7 +749,13 @@ async fn public_resend_verification(
             return Err((StatusCode::SERVICE_UNAVAILABLE, "Emails cannot be sent at the moment. Please try again later or contact the shop.".to_string()));
         }
     }
-    Ok(generic)
+    // Cooldown and answer are the same whether or not the account exists (no account probing)
+    auth::record_resend_sent(&email);
+
+    Ok(Json(json!({
+        "message": "If this address belongs to an unverified account, a new verification link is on its way. Please check your inbox and spam folder.",
+        "cooldown_seconds": 60
+    })))
 }
 
 async fn public_customer_register(
@@ -803,6 +819,8 @@ async fn public_customer_register(
         let sent = send_verification(&pool, &email, &display_name, &tok).await;
         if let Err(e) = &sent {
             tracing::error!("Verification email for a new customer could not be sent: {}", e);
+        } else {
+            auth::record_resend_sent(&email);
         }
         // No session until the email address is confirmed
         return Ok((StatusCode::CREATED, Json(json!({
@@ -932,7 +950,7 @@ async fn public_customer_reset_password(
                 let pool_clone = pool.clone();
                 tokio::spawn(async move {
                     if let Ok(settings) = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1").fetch_one(&pool_clone).await {
-                        crate::services::email::send_password_reset_email(&settings, &to, &token).await;
+                        let _ = crate::services::email::send_password_reset_email(&settings, &to, &token).await;
                     }
                 });
             }

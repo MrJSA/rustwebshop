@@ -119,6 +119,33 @@ pub fn clear_login_failures(key: &str) {
     failures().lock().unwrap().remove(key);
 }
 
+const RESEND_COOLDOWN: StdDuration = StdDuration::from_secs(60);
+static RESEND_TIMESTAMPS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+fn resend_timestamps() -> &'static Mutex<HashMap<String, Instant>> {
+    RESEND_TIMESTAMPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Enforces a 1-minute cooldown on verification email resends per address.
+/// Returns Err(seconds_remaining) if too soon.
+pub fn check_resend_allowed(email: &str) -> Result<(), u64> {
+    let mut map = resend_timestamps().lock().unwrap();
+    map.retain(|_, since| since.elapsed() < RESEND_COOLDOWN);
+    if let Some(since) = map.get(&email.to_lowercase()) {
+        let elapsed = since.elapsed();
+        if elapsed < RESEND_COOLDOWN {
+            let remaining = (RESEND_COOLDOWN - elapsed).as_secs();
+            return Err(remaining.max(1));
+        }
+    }
+    Ok(())
+}
+
+pub fn record_resend_sent(email: &str) {
+    let mut map = resend_timestamps().lock().unwrap();
+    map.insert(email.to_lowercase(), Instant::now());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +182,16 @@ mod tests {
         assert!(check_login_allowed(key).is_err());
         clear_login_failures(key);
         assert!(check_login_allowed(key).is_ok());
+    }
+
+    #[test]
+    fn resend_cooldown_enforced_for_one_minute() {
+        let email = "cooldown-test@example.com";
+        assert!(check_resend_allowed(email).is_ok());
+        record_resend_sent(email);
+        let err = check_resend_allowed(email);
+        assert!(err.is_err());
+        let remaining = err.unwrap_err();
+        assert!(remaining <= 60 && remaining >= 1);
     }
 }

@@ -417,6 +417,9 @@ impl CheckoutService {
                 .bind(line.variant_id)
                 .execute(&mut *conn)
                 .await?;
+
+            // Shared BOM parts are consumed with the product
+            crate::services::inventory::adjust_parts_for_variant(&mut *conn, line.product_id, line.variant_id, line.quantity, -1).await?;
         }
 
         if let Some((coupon_id, _)) = &priced.coupon {
@@ -689,6 +692,13 @@ impl CheckoutService {
         .bind(order_id)
         .execute(&mut *tx)
         .await?;
+        let items = sqlx::query("SELECT product_id, variant_id, quantity FROM order_items WHERE order_id = $1 AND NOT is_digital")
+            .bind(order_id)
+            .fetch_all(&mut *tx)
+            .await?;
+        for item in items {
+            crate::services::inventory::adjust_parts_for_variant(&mut *tx, item.get("product_id"), item.get("variant_id"), item.get("quantity"), 1).await?;
+        }
         if let Some(code) = order.get::<Option<String>, _>("coupon_code") {
             sqlx::query("UPDATE coupons SET used_count = GREATEST(used_count - 1, 0), updated_at = NOW() WHERE code = $1")
                 .bind(code)
@@ -700,6 +710,9 @@ impl CheckoutService {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        if let Err(e) = crate::services::inventory::recalculate_bom_stock(pool).await {
+            tracing::error!("Recalculating BOM stock after a failed payment failed: {}", e);
+        }
         Ok(Some(order.get("order_number")))
     }
 

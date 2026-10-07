@@ -30,8 +30,9 @@ pub struct AdminLoginResponse {
 #[derive(Debug, Deserialize)]
 pub struct ChangeAdminCredentialsRequest {
     pub current_password: String,
-    pub new_username: String,
-    pub new_password: String,
+    pub new_username: Option<String>,
+    pub new_password: Option<String>,
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

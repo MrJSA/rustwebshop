@@ -286,10 +286,10 @@
       <div>
         <h1 class="text-2xl font-black text-white tracking-tight flex items-center gap-2.5">
           <Sliders size={24} class="text-orange-500" />
-          Hero Showcase, 8Bit Buttons & Carousels
+          Hero Showcase, Featured Buttons & Carousels
         </h1>
         <p class="text-xs text-slate-400 mt-1">
-          Configure shop branding, logo uploads, 8BitDo/8BitMods-style hero layouts, and product carousels with product limits.
+          Configure shop branding, logo uploads, homepage hero layouts and product carousels with product limits.
         </p>
       </div>
 
@@ -383,7 +383,7 @@
       </div>
     </div>
 
-    <!-- Card 2: Homepage Hero Showcase Layout (8BitDo vs 8BitMods Style) -->
+    <!-- Card 2: Homepage Hero Showcase Layout (full-width carousel vs. split hero with featured buttons) -->
     <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-6">
       <div>
         <h2 class="text-base font-bold text-white border-b border-slate-800 pb-3 flex items-center gap-2">
@@ -411,7 +411,7 @@
             <span class="font-bold text-white text-sm">Full-Width Item Carousel</span>
           </div>
           <p class="text-xs text-slate-400 leading-relaxed">
-            Widescreen dynamic slider spanning full screen width with product slides and headlines (similar to <strong>8bitdo.com</strong>).
+            Widescreen dynamic slider spanning full screen width with product slides and headlines.
           </p>
         </label>
 
@@ -429,7 +429,7 @@
             <span class="font-bold text-white text-sm">Split Hero (60% Slider + 40% 4 Featured Buttons)</span>
           </div>
           <p class="text-xs text-slate-400 leading-relaxed">
-            60% width carousel on the left + 40% width grid of 4 product feature buttons on the right with depth and floating images (similar to <strong>8bitmods.com</strong>).
+            60% width carousel on the left + 40% width grid of 4 product feature buttons on the right with depth and floating images.
           </p>
         </label>
       </div>
@@ -519,7 +519,7 @@
             <div>
               <h3 class="text-sm font-bold text-white flex items-center gap-2">
                 <Layers size={16} class="text-orange-400" />
-                <span>8BitMods-Style 4 Featured Product Buttons</span>
+                <span>Featured Product Buttons (Split Hero)</span>
               </h3>
               <p class="text-xs text-slate-400">Configure the 4 buttons on the right with floating depth images:</p>
             </div>

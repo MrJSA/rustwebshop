@@ -1,137 +1,77 @@
-# RustCraft E-Commerce — High-Performance Rust Webshop
+# RustCraft — Rust Webshop
 
-A fast, memory-safe, and ACID-compliant webshop built with a **Rust (Axum + SQLx + PostgreSQL)** backend and modern **SvelteKit** user storefront and administrative dashboard, containerized with Docker.
+A self-hosted webshop with a **Rust** backend (Axum, SQLx, PostgreSQL) and **SvelteKit** storefront and admin dashboard, shipped as one Docker Compose stack with one-click updates.
 
-> **Installing on a server?** Follow **[INSTALL.md](INSTALL.md)** — domains/subdomains, automatic HTTPS, backups and one-click updates.
+> **Installing on a server?** Follow **[INSTALL.md](INSTALL.md)**: domains, automatic HTTPS, first login, backups and updates.
 
-### Architecture
+## Architecture
 
-| Part | Technology |
-| :--- | :--- |
-| Backend API, business logic, payments, emails | **Rust** (Axum, SQLx, PostgreSQL) |
-| Updater (releases, self-update, domain setup) | **Rust** |
-| Customer storefront & admin dashboard | **Svelte** (SvelteKit; a thin Node runtime only renders pages and forwards API calls) |
-| HTTPS proxy (optional) | Caddy |
+| Service | Technology | Purpose |
+| :--- | :--- | :--- |
+| `backend` | Rust · Axum · SQLx | REST API, checkout, payments, emails, PDF documents, migrations |
+| `storefront` | SvelteKit | Customer shop (server-rendered, forwards API calls) |
+| `admin` | SvelteKit | Admin dashboard |
+| `db` | PostgreSQL 16 | Data (internal network only) |
+| `updater` | Rust | Checks release tags, backs up the database, rebuilds the stack |
+| `proxy` (optional) | Caddy | Automatic HTTPS for the shop and admin domains |
 
----
-
-## 🚀 Quick Start (local)
-
-Start the entire stack using Docker Compose:
+## Local development
 
 ```bash
 docker compose up -d --build
+docker compose logs backend | grep "Initial admin"   # one-time admin password
 ```
 
-### 🌐 Access URLs & Ports
+| | URL |
+| :--- | :--- |
+| Storefront | http://localhost:8080 |
+| Admin dashboard | http://localhost:4000 (user `admin`) |
+| Backend API | http://localhost:8081 (this machine only) |
 
-| Service | Host URL | Description |
-| :--- | :--- | :--- |
-| **Customer Storefront** | [http://localhost:8080](http://localhost:8080) | Customer-facing shop, product showcase, shopping cart, and checkout. |
-| **Admin Dashboard** | [http://localhost:4000](http://localhost:4000) | Management back-office for inventory, orders, media, categories, and settings. |
-| **Backend REST API** | [http://localhost:8081](http://localhost:8081) | Rust Axum API, reachable from this machine only (container port `8000`). |
-| **PostgreSQL Database** | internal only | Not published; reachable by the backend over the Docker network. |
+Database migrations run automatically when the backend starts.
 
----
+## Features
 
-## 🔐 Initial Admin Login
+### Catalogue & inventory
+- Physical and digital products with variants, per-variant images, prices and stock.
+- Unlimited category nesting.
+- **Bill of materials:** parts are shared by SKU. Every product that uses the same SKU shows the same part name, storage location and stock. A product's stock is calculated from its parts (how many units can be built), and sales and cancelled payments update part stock automatically.
+- **Logistics & Stock:** one list of products and parts with storage locations, stock adjustments and low-stock filters.
+- Low-stock email alerts for parts, sent to stock managers, selected admins or extra addresses.
+- Back-in-stock waitlist: customers are emailed as soon as a sold-out variant is available again.
+- Digital products with multiple files or external links, downloadable from the order confirmation and the customer account.
 
-There is no built-in default password. On the very first start the backend creates the user `admin` with
+### Checkout & payments
+- **Stripe:** cards, Apple Pay, Google Pay, Link, Klarna, SEPA, iDEAL and more, each listed separately. Only methods active in your Stripe account are offered.
+- **PayPal.**
+- Coupons (percentage, fixed amount, free shipping) with limits and expiry dates.
+- Shipping providers, zones and weight-based rates with tracking links. Orders with only digital items skip shipping.
+- Optional: checkout only for registered customers, and mandatory email verification.
 
-- the password from the `ADMIN_INITIAL_PASSWORD` environment variable (min. 12 characters), **or**
-- a random password printed once in the backend log: `docker compose logs backend | grep "Initial admin"`
+### Orders & documents
+- Order management with status workflow and tracking numbers.
+- PDF invoices and packing slips.
+- Customer accounts with order history, status tracker and downloads.
 
-Open the Admin Dashboard at [http://localhost:4000](http://localhost:4000), log in, and you will be required to choose your own password (min. 12 characters) before the admin area unlocks.
+### Storefront
+- Choose between two homepage hero layouts: a full-width carousel, or a split hero with four featured product buttons.
+- Product carousels (featured, new arrivals, best sellers, in stock) with auto-rotation.
+- Custom logo, store title and subtitle, header and footer menus, and Markdown content pages.
+- Configurable stock message, e.g. `In stock ({stock} available)`.
 
-Admin roles: `superadmin` (everything), `admin` (everything except granting superadmin), `editor` (catalogue, orders and content — no users, payments, email, system settings or import/export).
+### Emails
+- Sent through any SMTP server.
+- Order confirmation, payment received, shipment, back-in-stock, account verification, password reset and low-stock alerts.
+- All emails share one branded layout. You can send a test of each template from the admin.
 
----
+### German / EU law
+- "Zahlungspflichtig bestellen" order button (§ 312j BGB) and a waiver checkbox for the right of withdrawal on digital goods (§ 356 BGB).
+- Tax modes: small business (§ 19 UStG), VAT included (B2C) or VAT excluded (B2B). The tax notice appears on checkout, emails and invoices.
+- Sequential order numbers with an optional prefix and date code.
+- Templates for legal notice, terms, withdrawal policy and privacy policy. Granular cookie consent banner.
 
-## 🛠 Features & Architecture
-
-### 1. Email Addon & SMTP Notification Engine
-- Connect your shop to any SMTP mail server (SendGrid, Mailgun, AWS SES, Gmail, Postmark, etc.) under **Settings &rarr; Email & Auth Policies**.
-- Automatic customer notifications:
-  - **Order Confirmation**: Dispatched immediately upon order placement with itemized breakdown.
-  - **Payment Confirmation Receipt**: Dispatched once Stripe, PayPal, or simulated sandbox marks order as authorized or paid.
-  - **Dispatched Shipment Notification**: Triggered when marking an order as *Shipped*, including carrier tracking link (DHL, ParcelsApp, etc.).
-  - **Back-in-Stock Notification**: Dispatched to waitlist subscribers the moment an out-of-stock product's inventory is replenished.
-  - **Account Verification Email**: Sent to newly registered customers with an activation link.
-- Integrated **"Send Test Email"** button in admin settings for instantaneous connection testing.
-
-### 2. Customer Registration & Checkout Policies
-- **Require Registered Customers for Checkout**: Configurable toggle in admin settings. When enabled, only customers who have registered an account can complete a purchase.
-- **Mandatory Email Verification**: Configurable toggle in admin settings requiring newly registered users to verify their email address before logging in or completing checkouts.
-
-### 3. Arbitrary Depth Category Hierarchy
-- Support for unlimited category nesting: `Category` &rarr; `Subcategory` &rarr; `Sub-Subcategory` &rarr; `...`.
-- Recursive tree navigation view with inline collapsible branches, add-child actions at any level, and a hierarchical parent category selector dropdown.
-
-### 4. Multiple Navigation Menus & Page Selector
-- Separate customizable navigation menus for:
-  - **Header Menu**: Centered or left-aligned navigation bar.
-  - **Footer Menu**: Customer service and policy links.
-- **Predefined Target Pages Overview**: View all available core store routes, product categories, and policy CMS markdown pages.
-- **Quick Preset Dropdown**: Select any page to automatically populate link title and URL.
-
-### 5. Media Library & Automatic WebP Compression
-- Dedicated **Media Library** tab in the admin console.
-- Persistent image storage across container restarts via the `uploads_data` Docker volume.
-- Automatic image compression to high-efficiency **WebP** on upload.
-- Integrated modal image picker for shop logos, hero banners, product images, and featured buttons.
-
-### 6. Storefront Hero Showcase & Auto-Rotating Looping Carousels
-- **8BitDo Full-Width Carousel**: Widescreen slider showcasing selected highlight products.
-- **8BitMods 4 Featured Buttons**: Split layout with 60% slider and 40% grid of 4 product buttons featuring floating transparent images with depth layering, customizable subtitles, toggleable price badges, and custom button background colors.
-- **5 Products Per Row Dynamic Carousels**:
-  - Automatically centers products if &le; 5 items.
-  - Automatically turns into a smooth horizontal scrollable carousel with left/right scroll arrows if &gt; 5 items.
-  - **Endless Looping**: Seamlessly restarts from the beginning when reaching the end of the item row.
-  - **Auto-Rotation**: Smoothly scrolls every 7 seconds, automatically pausing when the cursor hovers over the carousel.
-  - Configurable sections: Featured Products, New Arrivals (configurable days threshold), Best Sellers (configurable limit), and In-Stock Product Catalog.
-
-### 7. Brand Identity & Header Transparency
-- Customizable subtitle (replace default `"Rust Powered • ACID Fast"` or toggle off/on).
-- Toggle shop title text off to display an enlarged logo reaching into the header with a centered navigation menu.
-- Glassmorphism navigation bar with frosted translucent backdrop blur.
-- **Custom Physical Stock Message Template**: Configure custom live stock text in admin settings (e.g. `In Stock ({stock} units available in central warehouse)`). Live inventory dynamically replaces the `{stock}` placeholder on storefront product pages.
-
-### 8. Back-in-Stock Notifications
-- Physical products with 0 stock display an out-of-stock badge and an automated waitlist email subscription input.
-- Replenishing variant inventory in the admin dashboard triggers automatic emails to waitlisted customers and clears the list.
-
-### 9. Multi-Provider Checkout & Invoicing
-- Support for **Stripe**, **PayPal**, Apple Pay, Google Pay, and Amazon Pay.
-- Automated generation of tax-compliant **PDF Invoices** and warehouse **Packing Slips** with live in-browser preview and direct PDF download.
-
-### 10. EU & German E-Commerce Law Compliance
-- **Button-Lösung (§ 312j Abs. 3 BGB)**: Checkout submission button strictly states *"Order with Obligation to Pay"* (*Zahlungspflichtig bestellen*).
-- **Small Business Regulation (§ 19 UStG / Kleingewerbe)**:
-  - Toggle between § 19 UStG exempt, B2C included VAT, or B2B excluded VAT.
-  - Default statutory tax notice in English: *"According to § 19 UStG, no value-added tax is charged (small business regulation)."*
-  - In § 19 UStG mode, manual product VAT inputs are automatically locked to 0% to prevent unlawful VAT charging.
-  - Disclosed automatically on checkout, order confirmations, and PDF invoices (§ 14 UStG).
-- **Digital Goods Right of Withdrawal Waiver (§ 356 Abs. 5 BGB)**:
-  - Mandatory checkout consent checkbox for immediate execution of digital contracts, acknowledging the statutory loss of the right of withdrawal upon instant download delivery.
-- **GoBD-Compliant Sequential Order Numbers**:
-  - Ascending sequential counter starting at 10000.
-  - Configurable alphanumeric brand prefix (up to 7 characters, e.g. `ORD-10001`) and daily date codes (`YYYYMMDD`).
-- **Statutory Legal CMS Pages & Cookie Consent**:
-  - Pre-installed Legal Notice (*Impressum* pursuant to § 5 DDG), General Terms & Conditions (*AGB*), Right of Revocation (*Widerrufsbelehrung*), and Privacy Policy (*DSGVO*).
-  - TTDSG § 25 compliant granular Cookie Banner with preferences management.
-
-### 11. Digital Products Architecture & Multi-File Downloads
-- **Physical vs. Digital Delivery Toggle**: Switch products between physical goods and digital downloads with a single click.
-- **Zero-Cost Digital Shipping**: Orders containing exclusively digital items automatically waive shipping fees (`0.00 €`), disable physical carrier selection, and bill only the digital product.
-- **Virtual Inventory**: Physical warehouse stock tracking is disabled for digital products, reflecting unlimited virtual stock (`∞`).
-- **Multi-File Assets Manager**: Upload multiple download files (firmware, manuals, ZIP archives, 3D STL models) or assign external URLs per product.
-- **Digital Bill of Materials (BOM)**: Attach digital asset files directly within the product BOM alongside physical parts, tagged with `⚡ DIGITAL FILE` badges.
-- **Instant & Account Downloads**: Instant download buttons on order confirmation and persistent downloadable access in the customer account drawer.
-
-### 12. Customer Account Orders Detailed View (`/account/orders`)
-- Customers can click any completed order card to open a full slide-over drawer:
-  - 4-step fulfillment status tracker (*Order Placed* &rarr; *Processing* &rarr; *Shipped* &rarr; *Delivered*).
-  - Itemized product list with variant names, SKUs, quantities, and line item prices.
-  - One-click digital download buttons for purchased digital files.
-  - Shipping address and financial summary breakdown.
-
+### Administration
+- Roles: `superadmin`, `admin` and `editor`, with per-section permissions. Each account can have an email address, used for alerts.
+- Export and import of store data as JSON: settings, catalogue incl. parts and stock, pages, menus, shipping, coupons and payment settings. The import also works on a different installation. Passwords and API keys are never exported.
+- Media library with download of all files as ZIP. Images are converted to WebP on upload.
+- Updates from the admin with an automatic database backup (see [INSTALL.md](INSTALL.md#11-updates)).

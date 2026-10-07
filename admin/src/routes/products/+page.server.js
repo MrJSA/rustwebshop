@@ -62,7 +62,18 @@ export async function load({ fetch }) {
     console.error('Failed to load coupons in admin products:', e);
   }
 
-  return { products, categories, featuredProductIds, inventory, storeSettings, coupons };
+  let bomParts = [];
+
+  try {
+    const bomRes = await fetch(`${backendUrl}/api/v1/admin/bom-parts`, { headers });
+    if (bomRes.ok) {
+      bomParts = await bomRes.json();
+    }
+  } catch (e) {
+    console.error('Failed to load BOM parts in admin products:', e);
+  }
+
+  return { products, categories, featuredProductIds, inventory, storeSettings, coupons, bomParts };
 }
 
 

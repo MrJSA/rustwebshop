@@ -1,12 +1,12 @@
 use crate::models::{
-    AdminLoginRequest, AdminLoginResponse, AdminUser, Category, CategoryLeaderboardItem, ChangeAdminCredentialsRequest,
-    Claims, Coupon, CreateAdminUserRequest, CreateCategoryRequest, CreateCouponRequest, CreateNavigationItemRequest,
+    AdminLoginRequest, BomPart, Category, CategoryLeaderboardItem, ChangeAdminCredentialsRequest,
+    Coupon, CreateAdminUserRequest, CreateBomPartRequest, CreateCategoryRequest, CreateCouponRequest, CreateNavigationItemRequest,
     CreatePartRequest, CreateProductRequest, CreateProviderRequest, CreateShippingRateRequest,
     CreateShippingZoneRequest, CreateVariantRequest, DashboardStats, MediaItem, NavigationItem, Order, OrderDetails,
     OrderItem, PageContent, Product, ProductLeaderboardItem, ProductPart, ProductVariant,
     ProductWithVariants, PurchaseAnalysisDayPoint, PurchaseAnalysisResponse, PurchaseAnalysisSummary,
     ReorderMenuRequest, SalesDataPoint, ShippingProvider, ShippingProviderWithZones, ShippingRate, ShippingZone,
-    ShippingZoneWithRates, StoreSettings, TestEmailRequest, UpdateAdminUserRequest, UpdateCategoryRequest,
+    ShippingZoneWithRates, StoreSettings, TestEmailRequest, UpdateAdminUserRequest, UpdateBomPartRequest, UpdateCategoryRequest,
     UpdateCouponRequest, UpdateNavigationItemRequest, UpdateOrderStatusRequest, UpdatePageRequest,
     UpdatePaymentConfigRequest, UpdateProductRequest, UpdateProviderRequest, UpdateShippingRateRequest,
     UpdateShippingZoneRequest, UpdateStoreSettingsRequest, UpdateVariantRequest,
@@ -51,6 +51,9 @@ pub fn admin_router(pool: PgPool) -> Router<PgPool> {
         .route("/products/:id/parts/:part_id", delete(admin_delete_product_part))
         .route("/parts/:part_id", put(admin_update_product_part))
         .route("/variants/:id", put(admin_update_variant).delete(admin_delete_variant))
+        // Centralized BOM Parts Catalog
+        .route("/bom-parts", get(admin_list_bom_parts).post(admin_create_bom_part))
+        .route("/bom-parts/:id", put(admin_update_bom_part).delete(admin_delete_bom_part))
         // Categories Hierarchy Management
         .route("/categories", get(admin_list_categories).post(admin_create_category))
         .route("/categories/:id", put(admin_update_category).delete(admin_delete_category))
@@ -60,6 +63,7 @@ pub fn admin_router(pool: PgPool) -> Router<PgPool> {
         // Logistics & Inventory Management
         .route("/logistics/inventory", get(get_logistics_inventory))
         .route("/logistics/inventory/:variant_id/stock", put(update_variant_stock))
+        .route("/logistics/parts/:part_id/stock", put(update_part_stock))
         // Order Management
         .route("/orders", get(admin_list_orders))
         .route("/orders/:id", get(admin_get_order))
@@ -124,7 +128,7 @@ async fn admin_login(
     let limiter_key = format!("admin:{}", username.to_lowercase());
     auth::check_login_allowed(&limiter_key).map_err(|m| (StatusCode::TOO_MANY_REQUESTS, m))?;
 
-    let admin = sqlx::query("SELECT id, username, password_hash, is_default, role FROM admin_users WHERE username = $1")
+    let admin = sqlx::query("SELECT id, username, email, password_hash, is_default, role FROM admin_users WHERE username = $1")
         .bind(username)
         .fetch_optional(&pool)
         .await
@@ -145,7 +149,9 @@ async fn admin_login(
     let id: Uuid = a.get("id");
     Ok(Json(json!({
         "token": admin_session_token(id)?,
+        "id": id,
         "username": a.get::<String, _>("username"),
+        "email": a.try_get::<Option<String>, _>("email").ok().flatten(),
         "role": a.get::<String, _>("role"),
         "is_default": a.get::<bool, _>("is_default"),
     })))
@@ -154,25 +160,40 @@ async fn admin_login(
 async fn admin_auth_status(Extension(admin): Extension<CurrentAdmin>) -> impl IntoResponse {
     Json(json!({
         "authenticated": true,
+        "id": admin.id,
         "username": admin.username,
+        "email": admin.email,
         "role": admin.role,
         "is_default": admin.is_default,
         "permissions": admin.permissions
     }))
 }
 
-/// Changes the username/password of the logged-in admin and returns a fresh session token.
+/// `None` keeps the current address, an empty string removes it; anything else must look like an email.
+fn admin_email_update(input: Option<&str>, current: Option<String>) -> Result<Option<String>, (StatusCode, String)> {
+    let Some(raw) = input else { return Ok(current) };
+    let email = raw.trim();
+    if email.is_empty() {
+        return Ok(None);
+    }
+    let valid = email.len() <= 255
+        && !email.contains(char::is_whitespace)
+        && email.split_once('@').is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.'));
+    if !valid {
+        return Err((StatusCode::BAD_REQUEST, "Please enter a valid email address".to_string()));
+    }
+    Ok(Some(email.to_string()))
+}
+
+/// Changes the username/password/email of the logged-in admin and returns a fresh session token.
 async fn admin_change_credentials(
     State(pool): State<PgPool>,
     Extension(admin): Extension<CurrentAdmin>,
     Json(payload): Json<ChangeAdminCredentialsRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let new_username = payload.new_username.trim();
-    if new_username.is_empty() || payload.new_password.len() < 12 {
-        return Err((StatusCode::BAD_REQUEST, "Username must not be empty and the password must be at least 12 characters".to_string()));
-    }
-    if payload.new_password == payload.current_password {
-        return Err((StatusCode::BAD_REQUEST, "The new password must differ from the current one".to_string()));
+    let current_password = payload.current_password.trim();
+    if current_password.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Current password is required to save account changes".to_string()));
     }
 
     let hash: String = sqlx::query_scalar("SELECT password_hash FROM admin_users WHERE id = $1")
@@ -180,24 +201,64 @@ async fn admin_change_credentials(
         .fetch_one(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if !bcrypt::verify(&payload.current_password, &hash).unwrap_or(false) {
+    if !bcrypt::verify(current_password, &hash).unwrap_or(false) {
         return Err((StatusCode::UNAUTHORIZED, "Current password is incorrect".to_string()));
     }
 
-    let new_hash = bcrypt::hash(&payload.new_password, 12).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    sqlx::query("UPDATE admin_users SET username = $1, password_hash = $2, is_default = FALSE, updated_at = NOW() WHERE id = $3")
-        .bind(new_username)
-        .bind(new_hash)
-        .bind(admin.id)
-        .execute(&pool)
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, if e.to_string().contains("unique") { "This username is already taken".to_string() } else { e.to_string() }))?;
+    let new_username = payload
+        .new_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| admin.username.clone());
+
+    let new_email = admin_email_update(payload.email.as_deref(), admin.email.clone())?;
+
+    let new_password = payload
+        .new_password
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+
+    let mut updated_hash = hash;
+    let mut is_default = admin.is_default;
+
+    if let Some(np) = new_password {
+        if np.len() < 12 {
+            return Err((StatusCode::BAD_REQUEST, "New password must be at least 12 characters long".to_string()));
+        }
+        if np == current_password {
+            return Err((StatusCode::BAD_REQUEST, "The new password must differ from the current one".to_string()));
+        }
+        updated_hash = bcrypt::hash(np, 12).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        is_default = false;
+    } else if admin.is_default {
+        return Err((StatusCode::BAD_REQUEST, "Please choose a new password of at least 12 characters before continuing".to_string()));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE admin_users
+        SET username = $1, email = $2, password_hash = $3, is_default = $4, updated_at = NOW()
+        WHERE id = $5
+        "#
+    )
+    .bind(&new_username)
+    .bind(&new_email)
+    .bind(&updated_hash)
+    .bind(is_default)
+    .bind(admin.id)
+    .execute(&pool)
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, if e.to_string().contains("unique") { "This username is already taken".to_string() } else { e.to_string() }))?;
 
     Ok(Json(json!({
         "success": true,
-        "message": "Admin credentials successfully updated!",
+        "message": "Admin credentials and profile successfully updated!",
         "token": admin_session_token(admin.id)?,
-        "username": new_username
+        "username": new_username,
+        "email": new_email
     })))
 }
 
@@ -755,7 +816,11 @@ async fn get_logistics_inventory(
     State(pool): State<PgPool>,
     Query(filter): Query<InventoryFilter>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let rows = sqlx::query(
+    // 0. Synchronize finished product stocks with component parts inventory
+    let _ = crate::services::inventory::recalculate_bom_stock(&pool).await;
+
+    // 1. Fetch all product variants
+    let variant_rows = sqlx::query(
         r#"
         SELECT 
             pv.id as variant_id,
@@ -779,8 +844,106 @@ async fn get_logistics_inventory(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // 2. Fetch all centralized BOM parts
+    let bom_part_rows = sqlx::query_as::<_, BomPart>(
+        "SELECT id, sku, name, storage_location, stock_quantity, low_stock_threshold, notes, created_at FROM bom_parts ORDER BY sku ASC"
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // 3. Fetch product parts with joins to bom_parts for rich component details
+    let part_rows = sqlx::query(
+        r#"
+        SELECT 
+            pp.id as product_part_id,
+            pp.product_id,
+            pp.variant_id,
+            pp.part_id,
+            COALESCE(bp.name, pp.part_name) as part_name,
+            COALESCE(bp.sku, pp.part_sku, '') as part_sku,
+            pp.quantity as quantity_required,
+            COALESCE(NULLIF(pp.notes, ''), bp.notes) as notes,
+            COALESCE(bp.storage_location, pp.storage_location, 'Warehouse Main, Bin 01') as storage_location,
+            COALESCE(bp.stock_quantity, pp.stock_quantity, 0) as stock_quantity,
+            COALESCE(bp.low_stock_threshold, pp.low_stock_threshold, 5) as low_stock_threshold,
+            p.title as product_title,
+            COALESCE(pv.title, 'All Variants') as variant_title
+        FROM product_parts pp
+        JOIN products p ON p.id = pp.product_id
+        LEFT JOIN product_variants pv ON pv.id = pp.variant_id
+        LEFT JOIN bom_parts bp ON bp.id = pp.part_id
+        WHERE COALESCE(pp.part_sku, '') <> 'DIGITAL_FILE'
+        ORDER BY pp.created_at ASC
+        "#
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut variant_parts: std::collections::HashMap<Uuid, Vec<serde_json::Value>> = std::collections::HashMap::new();
+    let mut universal_parts: std::collections::HashMap<Uuid, Vec<serde_json::Value>> = std::collections::HashMap::new();
+    let mut parts_usage_map: std::collections::HashMap<Uuid, Vec<serde_json::Value>> = std::collections::HashMap::new();
+    let mut parts_usage_by_sku: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+
+    for pr in &part_rows {
+        let product_part_id: Uuid = pr.get("product_part_id");
+        let product_id: Uuid = pr.get("product_id");
+        let variant_id: Option<Uuid> = pr.get("variant_id");
+        let part_id: Option<Uuid> = pr.get("part_id");
+        let part_name: String = pr.get("part_name");
+        let part_sku: String = pr.get("part_sku");
+        let quantity_required: i32 = pr.get("quantity_required");
+        let notes: Option<String> = pr.get("notes");
+        let storage_location: String = pr.get("storage_location");
+        let stock_quantity: i32 = pr.get("stock_quantity");
+        let low_stock_threshold: i32 = pr.get("low_stock_threshold");
+        let product_title: String = pr.get("product_title");
+        let variant_title: String = pr.get("variant_title");
+
+        let is_depleted = stock_quantity < quantity_required;
+        let buildable_units = if quantity_required > 0 { stock_quantity.max(0) / quantity_required } else { 0 };
+
+        let part_val = json!({
+            "product_part_id": product_part_id,
+            "part_id": part_id.unwrap_or(product_part_id),
+            "part_name": part_name,
+            "part_sku": part_sku,
+            "quantity_required": quantity_required,
+            "stock_quantity": stock_quantity,
+            "low_stock_threshold": low_stock_threshold,
+            "storage_location": storage_location,
+            "notes": notes,
+            "is_depleted": is_depleted,
+            "buildable_units": buildable_units
+        });
+
+        if let Some(vid) = variant_id {
+            variant_parts.entry(vid).or_default().push(part_val);
+        } else {
+            universal_parts.entry(product_id).or_default().push(part_val);
+        }
+
+        let usage_entry = json!({
+            "product_id": product_id,
+            "product_title": product_title,
+            "variant_id": variant_id,
+            "variant_title": variant_title,
+            "quantity_required": quantity_required
+        });
+
+        if let Some(pid) = part_id {
+            parts_usage_map.entry(pid).or_default().push(usage_entry.clone());
+        }
+        if !part_sku.is_empty() {
+            parts_usage_by_sku.entry(part_sku).or_default().push(usage_entry);
+        }
+    }
+
     let mut inventory = Vec::new();
-    for r in rows {
+
+    // 1. Build Product items
+    for r in variant_rows {
         let variant_id: Uuid = r.get("variant_id");
         let product_id: Uuid = r.get("product_id");
         let sku: String = r.get("sku");
@@ -794,10 +957,23 @@ async fn get_logistics_inventory(
         let low_stock_threshold: i32 = r.get("low_stock_threshold");
         let attributes: serde_json::Value = r.get("attributes");
 
+        let mut bom_list = Vec::new();
+        if let Some(u_parts) = universal_parts.get(&product_id) {
+            bom_list.extend(u_parts.clone());
+        }
+        if let Some(v_parts) = variant_parts.get(&variant_id) {
+            bom_list.extend(v_parts.clone());
+        }
+
+        let has_bom_parts = !bom_list.is_empty();
+        let bom_parts_total = bom_list.len();
+        let bom_parts_depleted = bom_list.iter().filter(|b| b["is_depleted"] == true).count();
+        let bom_has_missing_parts = bom_parts_depleted > 0;
+
         let is_low_stock = product_type == "physical" && stock_quantity <= low_stock_threshold;
         let is_out_of_stock = product_type == "physical" && stock_quantity <= 0;
 
-        if filter.low_stock_only == Some(true) && !is_low_stock {
+        if filter.low_stock_only == Some(true) && !is_low_stock && !is_out_of_stock && !bom_has_missing_parts {
             continue;
         }
 
@@ -812,6 +988,7 @@ async fn get_logistics_inventory(
         }
 
         inventory.push(json!({
+            "item_type": "product",
             "variant_id": variant_id,
             "product_id": product_id,
             "sku": sku,
@@ -824,7 +1001,76 @@ async fn get_logistics_inventory(
             "low_stock_threshold": low_stock_threshold,
             "is_low_stock": is_low_stock,
             "is_out_of_stock": is_out_of_stock,
-            "attributes": attributes
+            "attributes": attributes,
+            "has_bom_parts": has_bom_parts,
+            "bom_parts_total": bom_parts_total,
+            "bom_parts_depleted": bom_parts_depleted,
+            "bom_has_missing_parts": bom_has_missing_parts,
+            "bom_parts": bom_list
+        }));
+    }
+
+    // 2. Build BOM Part items from bom_part_rows
+    for bp in bom_part_rows {
+        let is_low_stock = bp.stock_quantity <= bp.low_stock_threshold;
+        let is_out_of_stock = bp.stock_quantity <= 0;
+
+        if filter.low_stock_only == Some(true) && !is_low_stock && !is_out_of_stock {
+            continue;
+        }
+
+        let usages = parts_usage_map.get(&bp.id)
+            .or_else(|| parts_usage_by_sku.get(&bp.sku))
+            .cloned()
+            .unwrap_or_default();
+
+        let used_in_labels: Vec<String> = usages.iter().map(|u| {
+            let p_title = u["product_title"].as_str().unwrap_or("");
+            let v_title = u["variant_title"].as_str().unwrap_or("");
+            if v_title == "All Variants" || v_title.is_empty() {
+                format!("{} (All Variants)", p_title)
+            } else {
+                format!("{} ({})", p_title, v_title)
+            }
+        }).collect();
+        let used_in_summary = if used_in_labels.is_empty() {
+            "Standalone / Unassigned".to_string()
+        } else {
+            used_in_labels.join(", ")
+        };
+
+        let storage_location = bp.storage_location.unwrap_or_else(|| "Warehouse Main, Bin 01".to_string());
+
+        if let Some(ref s) = filter.search {
+            let lower = s.to_lowercase();
+            if !bp.sku.to_lowercase().contains(&lower)
+                && !bp.name.to_lowercase().contains(&lower)
+                && !storage_location.to_lowercase().contains(&lower)
+                && !used_in_summary.to_lowercase().contains(&lower)
+            {
+                continue;
+            }
+        }
+
+        inventory.push(json!({
+            "item_type": "part",
+            "part_id": bp.id,
+            "sku": bp.sku,
+            "product_title": bp.name.clone(),
+            "variant_title": format!("Used in: {}", used_in_summary),
+            "part_name": bp.name,
+            "part_sku": bp.sku,
+            "storage_location": storage_location,
+            "category": "BOM Component",
+            "product_type": "part",
+            "unit_price_cents": 0,
+            "stock_quantity": bp.stock_quantity,
+            "low_stock_threshold": bp.low_stock_threshold,
+            "is_low_stock": is_low_stock,
+            "is_out_of_stock": is_out_of_stock,
+            "used_in": usages,
+            "used_in_summary": used_in_summary,
+            "notes": bp.notes
         }));
     }
 
@@ -842,18 +1088,41 @@ async fn update_variant_stock(
     Path(variant_id): Path<Uuid>,
     Json(payload): Json<StockUpdatePayload>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Check if variant has physical BOM parts - if so, individual stock edit is restricted!
+    let has_bom: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM product_parts pp
+        JOIN product_variants pv ON pv.id = $1
+        WHERE (pp.variant_id = pv.id OR (pp.product_id = pv.product_id AND pp.variant_id IS NULL))
+          AND COALESCE(pp.part_sku, '') <> 'DIGITAL_FILE'
+        "#
+    )
+    .bind(variant_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if has_bom.0 > 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Stock for this product is derived automatically from its BOM component parts. Please adjust component parts stock in Logistics & Stock.".to_string(),
+        ));
+    }
+
     if let Some(abs_qty) = payload.absolute_quantity {
+        let abs = abs_qty.max(0);
         sqlx::query(
             "UPDATE product_variants SET stock_quantity = $1, updated_at = NOW() WHERE id = $2"
         )
-        .bind(abs_qty)
+        .bind(abs)
         .bind(variant_id)
         .execute(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     } else if let Some(adj) = payload.adjustment {
         sqlx::query(
-            "UPDATE product_variants SET stock_quantity = stock_quantity + $1, updated_at = NOW() WHERE id = $2"
+            "UPDATE product_variants SET stock_quantity = GREATEST(0, stock_quantity + $1), updated_at = NOW() WHERE id = $2"
         )
         .bind(adj)
         .bind(variant_id)
@@ -862,57 +1131,60 @@ async fn update_variant_stock(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
-    // Check if stock is now positive, and notify subscribers
-    let info_opt: Option<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT p.id, p.title, v.stock_quantity FROM product_variants v JOIN products p ON p.id = v.product_id WHERE v.id = $1"
-    )
-    .bind(variant_id)
-    .fetch_optional(&pool)
-    .await
-    .unwrap_or(None);
-
-    if let Some((product_id, title, stock)) = info_opt {
-        if stock > 0 {
-            let pool_clone = pool.clone();
-            tokio::spawn(async move {
-                let emails: Vec<String> = sqlx::query_scalar(
-                    "SELECT email FROM stock_notifications WHERE product_id = $1 OR variant_id = $2"
-                )
-                .bind(product_id)
-                .bind(variant_id)
-                .fetch_all(&pool_clone)
-                .await
-                .unwrap_or_default();
-
-                if !emails.is_empty() {
-                    let settings = sqlx::query_as::<_, StoreSettings>(
-                        "SELECT * FROM store_settings WHERE id = 1"
-                    )
-                    .fetch_one(&pool_clone)
-                    .await;
-
-                    if let Ok(st) = settings {
-                        for email in emails {
-                            crate::services::email::send_back_in_stock_email(
-                                &st,
-                                &email,
-                                &title,
-                                "http://localhost:8080/products",
-                            ).await;
-                        }
-                    }
-
-                    let _ = sqlx::query("DELETE FROM stock_notifications WHERE product_id = $1 OR variant_id = $2")
-                        .bind(product_id)
-                        .bind(variant_id)
-                        .execute(&pool_clone)
-                        .await;
-                }
-            });
-        }
+    let stock: Option<i32> = sqlx::query_scalar("SELECT stock_quantity FROM product_variants WHERE id = $1")
+        .bind(variant_id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap_or(None);
+    if stock.unwrap_or(0) > 0 {
+        crate::services::inventory::notify_back_in_stock(&pool, variant_id);
     }
 
     Ok(Json(json!({ "success": true })))
+}
+
+/// Sets the stock of a shared part. Accepts a shared part id or the id of a product BOM line.
+async fn update_part_stock(
+    State(pool): State<PgPool>,
+    Path(part_id): Path<Uuid>,
+    Json(payload): Json<StockUpdatePayload>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let shared: Option<(Uuid, i32)> = sqlx::query_as(
+        "SELECT id, stock_quantity FROM bom_parts WHERE id = $1 OR id = (SELECT part_id FROM product_parts WHERE id = $1) LIMIT 1",
+    )
+    .bind(part_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(db_err)?;
+    let (shared_id, current_stock) = shared.ok_or_else(|| (StatusCode::NOT_FOUND, "Part not found".to_string()))?;
+
+    let new_stock = match (payload.absolute_quantity, payload.adjustment) {
+        (Some(abs), _) => abs.max(0),
+        (None, Some(adj)) => (current_stock + adj).max(0),
+        (None, None) => current_stock,
+    };
+
+    // Triggers copy the value to every product BOM line using this part
+    sqlx::query("UPDATE bom_parts SET stock_quantity = $1 WHERE id = $2")
+        .bind(new_stock)
+        .bind(shared_id)
+        .execute(&pool)
+        .await
+        .map_err(db_err)?;
+
+    let _ = crate::services::inventory::recalculate_bom_stock(&pool).await;
+
+    let alert_pool = pool.clone();
+    tokio::spawn(async move {
+        crate::services::email::check_and_send_low_stock_alerts(&alert_pool).await;
+    });
+
+    Ok(Json(json!({
+        "success": true,
+        "part_id": shared_id,
+        "stock_quantity": new_stock
+    })))
 }
 
 // 5. Orders Management
@@ -1036,7 +1308,7 @@ async fn admin_update_order_status(
                 .await;
 
                 if let Ok(st) = settings {
-                    crate::services::email::send_order_shipped_email(&st, &cust_email, &order_num, &track_num).await;
+                    let _ = crate::services::email::send_order_shipped_email(&st, &cust_email, &order_num, &track_num).await;
                 }
             }
         });
@@ -1509,6 +1781,10 @@ async fn admin_update_system_settings(
             order_prefix = COALESCE($43, order_prefix),
             order_date_enabled = COALESCE($44, order_date_enabled),
             stock_display_template = COALESCE($45, stock_display_template),
+            low_stock_alerts_enabled = COALESCE($46, low_stock_alerts_enabled),
+            low_stock_alert_recipients_mode = COALESCE($47, low_stock_alert_recipients_mode),
+            low_stock_alert_custom_emails = COALESCE($48, low_stock_alert_custom_emails),
+            low_stock_alert_selected_user_ids = COALESCE($49, low_stock_alert_selected_user_ids),
             updated_at = NOW()
         WHERE id = 1
         "#
@@ -1558,6 +1834,10 @@ async fn admin_update_system_settings(
     .bind(payload.order_prefix)
     .bind(payload.order_date_enabled)
     .bind(payload.stock_display_template)
+    .bind(payload.low_stock_alerts_enabled)
+    .bind(payload.low_stock_alert_recipients_mode)
+    .bind(payload.low_stock_alert_custom_emails)
+    .bind(payload.low_stock_alert_selected_user_ids)
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1589,7 +1869,7 @@ async fn admin_test_email(
         settings.smtp_enabled = true;
     }
 
-    crate::services::email::send_test_email(&settings, &payload.recipient_email)
+    crate::services::email::send_test_email_by_type(&settings, &payload.recipient_email, payload.email_type.as_deref())
         .await
         .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
 
@@ -1723,7 +2003,25 @@ async fn admin_get_product_parts(
     Path(product_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let parts = sqlx::query_as::<_, ProductPart>(
-        "SELECT id, product_id, variant_id, part_name, part_sku, quantity, notes, created_at FROM product_parts WHERE product_id = $1 ORDER BY created_at ASC"
+        r#"
+        SELECT 
+            pp.id,
+            pp.product_id,
+            pp.variant_id,
+            pp.part_id,
+            COALESCE(bp.name, pp.part_name) as part_name,
+            COALESCE(bp.sku, pp.part_sku) as part_sku,
+            pp.quantity,
+            COALESCE(NULLIF(pp.notes, ''), bp.notes) as notes,
+            COALESCE(bp.storage_location, pp.storage_location) as storage_location,
+            pp.created_at,
+            COALESCE(bp.stock_quantity, pp.stock_quantity, 0) as stock_quantity,
+            COALESCE(bp.low_stock_threshold, pp.low_stock_threshold, 5) as low_stock_threshold
+        FROM product_parts pp
+        LEFT JOIN bom_parts bp ON bp.id = pp.part_id
+        WHERE pp.product_id = $1 
+        ORDER BY pp.created_at ASC
+        "#
     )
     .bind(product_id)
     .fetch_all(&pool)
@@ -1733,55 +2031,220 @@ async fn admin_get_product_parts(
     Ok(Json(parts))
 }
 
+const BOM_PART_COLUMNS: &str = "id, sku, name, storage_location, stock_quantity, low_stock_threshold, notes, created_at";
+const DEFAULT_STORAGE_LOCATION: &str = "Warehouse Main, Bin 01";
+
+fn clean(value: Option<&str>) -> Option<String> {
+    value.map(str::trim).filter(|v| !v.is_empty()).map(str::to_string)
+}
+
+fn bom_part_error(e: sqlx::Error) -> (StatusCode, String) {
+    match &e {
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            (StatusCode::CONFLICT, "Another part already uses this SKU".to_string())
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// Finds the shared part a BOM line should use: the SKU wins, then an explicit part id; an unknown
+/// SKU (or no SKU at all) creates a new shared part. Every product using the same SKU therefore
+/// shares one name, storage location and stock.
+async fn resolve_shared_part(
+    pool: &PgPool,
+    part_id: Option<Uuid>,
+    sku: Option<&str>,
+    name: Option<&str>,
+    storage_location: Option<&str>,
+) -> Result<(BomPart, bool), (StatusCode, String)> {
+    let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let sku = clean(sku).map(|s| s.to_uppercase());
+
+    if let Some(ref sku) = sku {
+        let found = sqlx::query_as::<_, BomPart>(&format!("SELECT {} FROM bom_parts WHERE UPPER(sku) = $1 LIMIT 1", BOM_PART_COLUMNS))
+            .bind(sku)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+        if let Some(bp) = found {
+            return Ok((bp, false));
+        }
+    } else if let Some(id) = part_id {
+        let found = sqlx::query_as::<_, BomPart>(&format!("SELECT {} FROM bom_parts WHERE id = $1", BOM_PART_COLUMNS))
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+        return found.map(|bp| (bp, false)).ok_or_else(|| (StatusCode::NOT_FOUND, "BOM part not found".to_string()));
+    }
+
+    let name = clean(name).ok_or_else(|| (StatusCode::BAD_REQUEST, "Part name is required for a new part".to_string()))?;
+    let id = Uuid::new_v4();
+    let sku = sku.unwrap_or_else(|| format!("PRT-{}", id.simple().to_string()[..8].to_uppercase()));
+    let location = clean(storage_location).unwrap_or_else(|| DEFAULT_STORAGE_LOCATION.to_string());
+    let created = sqlx::query_as::<_, BomPart>(&format!(
+        "INSERT INTO bom_parts (id, sku, name, storage_location) VALUES ($1, $2, $3, $4) RETURNING {}",
+        BOM_PART_COLUMNS
+    ))
+    .bind(id)
+    .bind(&sku)
+    .bind(&name)
+    .bind(&location)
+    .fetch_one(pool)
+    .await
+    .map_err(bom_part_error)?;
+    Ok((created, true))
+}
+
+/// Copies the shared values of a part into every product BOM line that uses it.
+async fn sync_part_to_products(pool: &PgPool, bp: &BomPart) -> Result<(), (StatusCode, String)> {
+    sqlx::query(
+        r#"
+        UPDATE product_parts
+        SET part_name = $1, part_sku = $2, storage_location = $3, stock_quantity = $4, low_stock_threshold = $5
+        WHERE part_id = $6
+        "#,
+    )
+    .bind(&bp.name)
+    .bind(&bp.sku)
+    .bind(&bp.storage_location)
+    .bind(bp.stock_quantity)
+    .bind(bp.low_stock_threshold)
+    .bind(bp.id)
+    .execute(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(())
+}
+
 async fn admin_add_product_part(
     State(pool): State<PgPool>,
     Path(product_id): Path<Uuid>,
     Json(payload): Json<CreatePartRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let part_id = Uuid::new_v4();
+    let id = Uuid::new_v4();
+    let is_digital = payload.part_sku.as_deref() == Some("DIGITAL_FILE");
+
+    // Physical parts always point to a shared part; selecting an existing one keeps its data unchanged
+    let shared = if is_digital {
+        None
+    } else {
+        let sku = if payload.part_id.is_some() { None } else { payload.part_sku.as_deref() };
+        let (bp, _) = resolve_shared_part(&pool, payload.part_id, sku, payload.part_name.as_deref(), payload.storage_location.as_deref()).await?;
+        Some(bp)
+    };
+
+    let part_name = match &shared {
+        Some(bp) => bp.name.clone(),
+        None => clean(payload.part_name.as_deref()).unwrap_or_else(|| "Digital file".to_string()),
+    };
     sqlx::query(
-        "INSERT INTO product_parts (id, product_id, variant_id, part_name, part_sku, quantity, notes) VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        "INSERT INTO product_parts (id, product_id, variant_id, part_id, part_name, part_sku, quantity, notes, storage_location, stock_quantity, low_stock_threshold) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
     )
-    .bind(part_id)
+    .bind(id)
     .bind(product_id)
     .bind(payload.variant_id)
-    .bind(&payload.part_name)
-    .bind(&payload.part_sku)
-    .bind(payload.quantity)
-    .bind(&payload.notes)
+    .bind(shared.as_ref().map(|bp| bp.id))
+    .bind(&part_name)
+    .bind(shared.as_ref().map(|bp| bp.sku.clone()).or(payload.part_sku.clone()))
+    .bind(payload.quantity.max(1))
+    .bind(clean(payload.notes.as_deref()))
+    .bind(shared.as_ref().and_then(|bp| bp.storage_location.clone()))
+    .bind(shared.as_ref().map(|bp| bp.stock_quantity).unwrap_or(0))
+    .bind(shared.as_ref().map(|bp| bp.low_stock_threshold).unwrap_or(0))
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok((StatusCode::CREATED, Json(json!({ "id": part_id }))))
+    let _ = crate::services::inventory::recalculate_bom_stock(&pool).await;
+
+    Ok((StatusCode::CREATED, Json(json!({ "id": id, "part_id": shared.map(|bp| bp.id) }))))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateProductPartRequest {
     pub variant_id: Option<Uuid>,
+    pub part_id: Option<Uuid>,
     pub part_name: String,
     pub part_sku: Option<String>,
     pub quantity: i32,
     pub notes: Option<String>,
+    pub storage_location: Option<String>,
 }
 
+/// Updates one BOM line. Name and storage location belong to the shared part and change for every
+/// product using it; entering a different SKU switches the line to that part (created if new).
+/// Stock is never touched here — it is managed per shared part in Logistics.
 async fn admin_update_product_part(
     State(pool): State<PgPool>,
-    Path(part_id): Path<Uuid>,
+    Path(line_id): Path<Uuid>,
     Json(payload): Json<UpdateProductPartRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_part: Option<Option<Uuid>> = sqlx::query_scalar("SELECT part_id FROM product_parts WHERE id = $1")
+        .bind(line_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let current_part = current_part.ok_or_else(|| (StatusCode::NOT_FOUND, "BOM line not found".to_string()))?;
+    let is_digital = payload.part_sku.as_deref() == Some("DIGITAL_FILE");
+
+    let shared = if is_digital {
+        None
+    } else {
+        let part_id = payload.part_id.or(current_part);
+        let (mut bp, created) = resolve_shared_part(&pool, part_id, payload.part_sku.as_deref(), Some(&payload.part_name), payload.storage_location.as_deref()).await?;
+        // Edits of the part's own data apply to the shared part (not when switching to another existing one)
+        if !created && Some(bp.id) == current_part {
+            let name = clean(Some(&payload.part_name)).unwrap_or(bp.name.clone());
+            let location = clean(payload.storage_location.as_deref()).or(bp.storage_location.clone());
+            if name != bp.name || location != bp.storage_location {
+                sqlx::query("UPDATE bom_parts SET name = $1, storage_location = $2 WHERE id = $3")
+                    .bind(&name)
+                    .bind(&location)
+                    .bind(bp.id)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                bp.name = name;
+                bp.storage_location = location;
+                sync_part_to_products(&pool, &bp).await?;
+            }
+        }
+        Some(bp)
+    };
+
+    let part_name = match &shared {
+        Some(bp) => bp.name.clone(),
+        None => clean(Some(&payload.part_name)).unwrap_or_else(|| "Digital file".to_string()),
+    };
     sqlx::query(
-        "UPDATE product_parts SET variant_id = $1, part_name = $2, part_sku = $3, quantity = $4, notes = $5 WHERE id = $6"
+        r#"
+        UPDATE product_parts
+        SET variant_id = $1, part_id = $2, part_name = $3, part_sku = $4, quantity = $5, notes = $6,
+            storage_location = $7, stock_quantity = $8, low_stock_threshold = $9
+        WHERE id = $10
+        "#
     )
     .bind(payload.variant_id)
-    .bind(&payload.part_name)
-    .bind(&payload.part_sku)
-    .bind(payload.quantity)
-    .bind(&payload.notes)
-    .bind(part_id)
+    .bind(shared.as_ref().map(|bp| bp.id))
+    .bind(&part_name)
+    .bind(shared.as_ref().map(|bp| bp.sku.clone()).or(payload.part_sku.clone()))
+    .bind(payload.quantity.max(1))
+    .bind(clean(payload.notes.as_deref()))
+    .bind(shared.as_ref().and_then(|bp| bp.storage_location.clone()))
+    .bind(shared.as_ref().map(|bp| bp.stock_quantity).unwrap_or(0))
+    .bind(shared.as_ref().map(|bp| bp.low_stock_threshold).unwrap_or(0))
+    .bind(line_id)
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let _ = crate::services::inventory::recalculate_bom_stock(&pool).await;
+
+    let alert_pool = pool.clone();
+    tokio::spawn(async move {
+        crate::services::email::check_and_send_low_stock_alerts(&alert_pool).await;
+    });
 
     Ok(Json(json!({ "success": true })))
 }
@@ -1791,6 +2254,219 @@ async fn admin_delete_product_part(
     Path((_product_id, part_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     sqlx::query("DELETE FROM product_parts WHERE id = $1")
+        .bind(part_id)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Auto-recalculate buildable product stock
+    let _ = crate::services::inventory::recalculate_bom_stock(&pool).await;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+// 10b. Centralized BOM Parts Catalog Management
+async fn admin_list_bom_parts(
+    State(pool): State<PgPool>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let parts = sqlx::query_as::<_, BomPart>(
+        "SELECT id, sku, name, storage_location, stock_quantity, low_stock_threshold, notes, created_at FROM bom_parts ORDER BY sku ASC"
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let usage_rows = sqlx::query(
+        r#"
+        SELECT 
+            pp.part_id as bom_part_id,
+            pp.product_id,
+            p.title as product_title,
+            pp.variant_id,
+            COALESCE(pv.title, 'All Variants') as variant_title,
+            pp.quantity as quantity_required
+        FROM product_parts pp
+        JOIN products p ON p.id = pp.product_id
+        LEFT JOIN product_variants pv ON pv.id = pp.variant_id
+        WHERE pp.part_id IS NOT NULL
+        "#
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut usage_map: std::collections::HashMap<Uuid, Vec<serde_json::Value>> = std::collections::HashMap::new();
+    for row in usage_rows {
+        if let Ok(bpid) = row.try_get::<Uuid, _>("bom_part_id") {
+            let pid: Uuid = row.get("product_id");
+            let ptitle: String = row.get("product_title");
+            let vid: Option<Uuid> = row.get("variant_id");
+            let vtitle: String = row.get("variant_title");
+            let qreq: i32 = row.get("quantity_required");
+
+            usage_map.entry(bpid).or_default().push(json!({
+                "product_id": pid,
+                "product_title": ptitle,
+                "variant_id": vid,
+                "variant_title": vtitle,
+                "quantity_required": qreq
+            }));
+        }
+    }
+
+    let mut result = Vec::new();
+    for p in parts {
+        let usages = usage_map.get(&p.id).cloned().unwrap_or_default();
+        let used_in_labels: Vec<String> = usages.iter().map(|u| {
+            let pt = u["product_title"].as_str().unwrap_or("");
+            let vt = u["variant_title"].as_str().unwrap_or("");
+            if vt == "All Variants" || vt.is_empty() {
+                format!("{} (All Variants)", pt)
+            } else {
+                format!("{} ({})", pt, vt)
+            }
+        }).collect();
+        let used_in_summary = if used_in_labels.is_empty() {
+            "Standalone / Unassigned".to_string()
+        } else {
+            used_in_labels.join(", ")
+        };
+
+        result.push(json!({
+            "id": p.id,
+            "sku": p.sku,
+            "name": p.name,
+            "storage_location": p.storage_location.unwrap_or_else(|| "Warehouse Main, Bin 01".to_string()),
+            "stock_quantity": p.stock_quantity,
+            "low_stock_threshold": p.low_stock_threshold,
+            "notes": p.notes,
+            "created_at": p.created_at,
+            "used_in": usages,
+            "used_in_summary": used_in_summary
+        }));
+    }
+
+    Ok(Json(result))
+}
+
+async fn admin_create_bom_part(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CreateBomPartRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let sku = payload.sku.trim().to_uppercase();
+    if sku.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Part SKU is required".to_string()));
+    }
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Part Name is required".to_string()));
+    }
+    let existing: Option<String> = sqlx::query_scalar("SELECT sku FROM bom_parts WHERE UPPER(sku) = $1")
+        .bind(&sku)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(existing) = existing {
+        return Err((StatusCode::CONFLICT, format!("A part with SKU {} already exists", existing)));
+    }
+
+    let part = sqlx::query_as::<_, BomPart>(&format!(
+        r#"
+        INSERT INTO bom_parts (id, sku, name, storage_location, stock_quantity, low_stock_threshold, notes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING {}
+        "#,
+        BOM_PART_COLUMNS
+    ))
+    .bind(Uuid::new_v4())
+    .bind(&sku)
+    .bind(&name)
+    .bind(clean(payload.storage_location.as_deref()).unwrap_or_else(|| DEFAULT_STORAGE_LOCATION.to_string()))
+    .bind(payload.stock_quantity.unwrap_or(0).max(0))
+    .bind(payload.low_stock_threshold.unwrap_or(5).max(0))
+    .bind(clean(payload.notes.as_deref()))
+    .fetch_one(&pool)
+    .await
+    .map_err(bom_part_error)?;
+
+    Ok((StatusCode::CREATED, Json(part)))
+}
+
+/// Updates a shared part; every product using it sees the change immediately.
+async fn admin_update_bom_part(
+    State(pool): State<PgPool>,
+    Path(part_id): Path<Uuid>,
+    Json(payload): Json<UpdateBomPartRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current = sqlx::query_as::<_, BomPart>(&format!("SELECT {} FROM bom_parts WHERE id = $1", BOM_PART_COLUMNS))
+        .bind(part_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "BOM Part not found".to_string()))?;
+
+    let sku = clean(payload.sku.as_deref()).map(|s| s.to_uppercase()).unwrap_or(current.sku);
+    let name = clean(payload.name.as_deref()).unwrap_or(current.name);
+    let storage_location = match payload.storage_location {
+        Some(loc) => clean(Some(&loc)),
+        None => current.storage_location,
+    };
+    let notes = match payload.notes {
+        Some(n) => clean(Some(&n)),
+        None => current.notes,
+    };
+
+    let updated = sqlx::query_as::<_, BomPart>(&format!(
+        r#"
+        UPDATE bom_parts
+        SET sku = $1, name = $2, storage_location = $3, stock_quantity = $4, low_stock_threshold = $5, notes = $6
+        WHERE id = $7
+        RETURNING {}
+        "#,
+        BOM_PART_COLUMNS
+    ))
+    .bind(&sku)
+    .bind(&name)
+    .bind(&storage_location)
+    .bind(payload.stock_quantity.unwrap_or(current.stock_quantity).max(0))
+    .bind(payload.low_stock_threshold.unwrap_or(current.low_stock_threshold).max(0))
+    .bind(&notes)
+    .bind(part_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(bom_part_error)?;
+
+    sync_part_to_products(&pool, &updated).await?;
+    let _ = crate::services::inventory::recalculate_bom_stock(&pool).await;
+
+    let alert_pool = pool.clone();
+    tokio::spawn(async move {
+        crate::services::email::check_and_send_low_stock_alerts(&alert_pool).await;
+    });
+
+    Ok(Json(json!({ "success": true, "id": part_id })))
+}
+
+/// Deletes a shared part that no product uses any more.
+async fn admin_delete_bom_part(
+    State(pool): State<PgPool>,
+    Path(part_id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let used_by: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT p.title FROM product_parts pp JOIN products p ON p.id = pp.product_id WHERE pp.part_id = $1 ORDER BY p.title",
+    )
+    .bind(part_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !used_by.is_empty() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("This part is still used by: {}. Remove it from these products first.", used_by.join(", ")),
+        ));
+    }
+
+    sqlx::query("DELETE FROM bom_parts WHERE id = $1")
         .bind(part_id)
         .execute(&pool)
         .await
@@ -2563,12 +3239,13 @@ async fn admin_get_purchase_analysis(
 
 // 16. Store Data & Media Library Export / Import
 //
-// The export is a complete, self-describing JSON backup of catalogue, CMS, navigation, shipping and
-// coupons (no orders, customers or secrets). Import deserialises into the very same model structs,
+// The export is a complete, self-describing JSON backup of store settings, catalogue (incl. shared BOM
+// parts and their stock), CMS, navigation, shipping, coupons and non-secret payment settings (no orders,
+// customers, admin accounts or secrets). Import deserialises into the very same model structs,
 // runs in one transaction and aborts with a precise message on the first problem — nothing is
 // half-imported.
 
-const BACKUP_VERSION: &str = "1.1";
+const BACKUP_VERSION: &str = "1.2";
 
 #[derive(Debug, Deserialize, Default)]
 struct BackupShipping {
@@ -2591,6 +3268,8 @@ struct StoreBackup {
     #[serde(default)]
     product_variants: Vec<ProductVariant>,
     #[serde(default)]
+    bom_parts: Vec<BomPart>,
+    #[serde(default)]
     product_parts: Vec<ProductPart>,
     #[serde(default)]
     pages: Vec<PageContent>,
@@ -2600,6 +3279,8 @@ struct StoreBackup {
     coupons: Vec<Coupon>,
     #[serde(default)]
     shipping: BackupShipping,
+    #[serde(default)]
+    payment_providers: Vec<serde_json::Value>,
 }
 
 fn import_error(what: String, e: sqlx::Error) -> (StatusCode, String) {
@@ -2627,7 +3308,7 @@ async fn admin_export_store_data(
         .fetch_all(&pool).await.map_err(db_err)?;
     let variants = sqlx::query_as::<_, ProductVariant>("SELECT * FROM product_variants ORDER BY created_at ASC")
         .fetch_all(&pool).await.map_err(db_err)?;
-    let parts = sqlx::query_as::<_, ProductPart>("SELECT id, product_id, variant_id, part_name, part_sku, quantity, notes, created_at FROM product_parts ORDER BY created_at ASC")
+    let parts = sqlx::query_as::<_, ProductPart>("SELECT * FROM product_parts ORDER BY created_at ASC")
         .fetch_all(&pool).await.map_err(db_err)?;
     let categories = sqlx::query_as::<_, Category>("SELECT * FROM categories ORDER BY display_order ASC, name ASC")
         .fetch_all(&pool).await.map_err(db_err)?;
@@ -2644,6 +3325,24 @@ async fn admin_export_store_data(
     let shipping_rates = sqlx::query_as::<_, ShippingRate>("SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days FROM shipping_rates ORDER BY price_cents ASC")
         .fetch_all(&pool).await.map_err(db_err)?;
 
+    let bom_parts = sqlx::query_as::<_, BomPart>(&format!("SELECT {} FROM bom_parts ORDER BY sku ASC", BOM_PART_COLUMNS))
+        .fetch_all(&pool).await.map_err(db_err)?;
+    // Secret and webhook keys are never exported
+    let payment_providers: Vec<serde_json::Value> = sqlx::query(
+        "SELECT provider, display_name, is_enabled, is_sandbox, public_client_id, config_data FROM payment_configs ORDER BY provider ASC",
+    )
+    .fetch_all(&pool).await.map_err(db_err)?
+    .into_iter()
+    .map(|r| json!({
+        "provider": r.get::<String, _>("provider"),
+        "display_name": r.get::<String, _>("display_name"),
+        "is_enabled": r.get::<bool, _>("is_enabled"),
+        "is_sandbox": r.get::<bool, _>("is_sandbox"),
+        "public_client_id": r.get::<String, _>("public_client_id"),
+        "config_data": r.get::<serde_json::Value, _>("config_data"),
+    }))
+    .collect();
+
     let export_payload = json!({
         "version": BACKUP_VERSION,
         "exported_at": Utc::now().to_rfc3339(),
@@ -2651,6 +3350,7 @@ async fn admin_export_store_data(
         "categories": categories,
         "products": products,
         "product_variants": variants,
+        "bom_parts": bom_parts,
         "product_parts": parts,
         "pages": pages,
         "navigation_menu": menu_items,
@@ -2659,7 +3359,8 @@ async fn admin_export_store_data(
             "providers": shipping_providers,
             "zones": shipping_zones,
             "rates": shipping_rates,
-        }
+        },
+        "payment_providers": payment_providers
     });
 
     let filename = format!("store-export-{}.json", Utc::now().format("%Y%m%d-%H%M%S"));
@@ -2742,9 +3443,13 @@ async fn admin_import_store_data(
 
     let mut tx = pool.begin().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // 1. Store settings (identity, legal texts, layout). SMTP credentials and payment keys are never part of a backup.
+    // 1. Store settings. Secrets (SMTP password, payment keys) are never part of a backup, so SMTP and
+    //    payment providers are only switched on where the target installation already has them.
+    //    Deployment mode and debug flag belong to the installation and are not imported.
     if let Some(s) = backup.store_settings.as_ref().filter(|s| s.is_object()) {
         let str_field = |k: &str| s.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        let bool_field = |k: &str| s.get(k).and_then(|v| v.as_bool());
+        let json_field = |k: &str| s.get(k).filter(|v| !v.is_null()).cloned();
         sqlx::query(
             r#"
             UPDATE store_settings
@@ -2768,6 +3473,33 @@ async fn admin_import_store_data(
                 carousels_config = COALESCE($17, carousels_config),
                 logo_url = COALESCE($18, logo_url),
                 stock_display_template = COALESCE($19, stock_display_template),
+                currency = COALESCE($20, currency),
+                currency_symbol = COALESCE($21, currency_symbol),
+                show_store_title = COALESCE($22, show_store_title),
+                show_store_subtitle = COALESCE($23, show_store_subtitle),
+                cookie_banner_enabled = COALESCE($24, cookie_banner_enabled),
+                cookie_banner_title = COALESCE($25, cookie_banner_title),
+                cookie_banner_description = COALESCE($26, cookie_banner_description),
+                cookie_banner_policy_url = COALESCE($27, cookie_banner_policy_url),
+                cookie_accept_label = COALESCE($28, cookie_accept_label),
+                cookie_deny_label = COALESCE($29, cookie_deny_label),
+                cookie_preferences_label = COALESCE($30, cookie_preferences_label),
+                require_registered_checkout = COALESCE($31, require_registered_checkout),
+                require_email_verification = COALESCE($32, require_email_verification),
+                order_prefix_enabled = COALESCE($33, order_prefix_enabled),
+                order_prefix = COALESCE($34, order_prefix),
+                order_date_enabled = COALESCE($35, order_date_enabled),
+                smtp_host = COALESCE($36, smtp_host),
+                smtp_port = COALESCE($37, smtp_port),
+                smtp_username = COALESCE($38, smtp_username),
+                smtp_encryption = COALESCE($39, smtp_encryption),
+                smtp_from_email = COALESCE($40, smtp_from_email),
+                smtp_from_name = COALESCE($41, smtp_from_name),
+                smtp_enabled = CASE WHEN smtp_password <> '' THEN COALESCE($42, smtp_enabled) ELSE smtp_enabled END,
+                low_stock_alerts_enabled = COALESCE($43, low_stock_alerts_enabled),
+                low_stock_alert_recipients_mode = COALESCE($44, low_stock_alert_recipients_mode),
+                low_stock_alert_custom_emails = COALESCE($45, low_stock_alert_custom_emails),
+                low_stock_alert_selected_user_ids = COALESCE($46, low_stock_alert_selected_user_ids),
                 updated_at = NOW()
             WHERE id = 1
             "#
@@ -2786,44 +3518,108 @@ async fn admin_import_store_data(
         .bind(str_field("commercial_register"))
         .bind(str_field("odr_url"))
         .bind(str_field("dispute_resolution_notice"))
-        .bind(s.get("footer_config").filter(|v| !v.is_null()))
-        .bind(s.get("hero_config").filter(|v| !v.is_null()))
-        .bind(s.get("carousels_config").filter(|v| !v.is_null()))
+        .bind(json_field("footer_config"))
+        .bind(json_field("hero_config"))
+        .bind(json_field("carousels_config"))
         .bind(str_field("logo_url"))
         .bind(str_field("stock_display_template"))
+        .bind(str_field("currency"))
+        .bind(str_field("currency_symbol"))
+        .bind(bool_field("show_store_title"))
+        .bind(bool_field("show_store_subtitle"))
+        .bind(bool_field("cookie_banner_enabled"))
+        .bind(str_field("cookie_banner_title"))
+        .bind(str_field("cookie_banner_description"))
+        .bind(str_field("cookie_banner_policy_url"))
+        .bind(str_field("cookie_accept_label"))
+        .bind(str_field("cookie_deny_label"))
+        .bind(str_field("cookie_preferences_label"))
+        .bind(bool_field("require_registered_checkout"))
+        .bind(bool_field("require_email_verification"))
+        .bind(bool_field("order_prefix_enabled"))
+        .bind(str_field("order_prefix"))
+        .bind(bool_field("order_date_enabled"))
+        .bind(str_field("smtp_host"))
+        .bind(s.get("smtp_port").and_then(|v| v.as_i64()).and_then(|v| i32::try_from(v).ok()))
+        .bind(str_field("smtp_username"))
+        .bind(str_field("smtp_encryption"))
+        .bind(str_field("smtp_from_email"))
+        .bind(str_field("smtp_from_name"))
+        .bind(bool_field("smtp_enabled"))
+        .bind(bool_field("low_stock_alerts_enabled"))
+        .bind(str_field("low_stock_alert_recipients_mode"))
+        .bind(str_field("low_stock_alert_custom_emails"))
+        .bind(json_field("low_stock_alert_selected_user_ids"))
         .execute(&mut *tx)
         .await
         .map_err(|e| import_error("store settings".to_string(), e))?;
     }
 
-    // 2. Categories — inserted flat first, parents linked afterwards (order in the file does not matter)
-    for c in &backup.categories {
+    // Payment providers: display name, sandbox flag, publishable key and method selection
+    for p in &backup.payment_providers {
+        let Some(provider) = p.get("provider").and_then(|v| v.as_str()) else { continue };
         sqlx::query(
             r#"
+            UPDATE payment_configs
+            SET display_name = COALESCE($1, display_name),
+                is_sandbox = COALESCE($2, is_sandbox),
+                public_client_id = COALESCE($3, public_client_id),
+                config_data = COALESCE($4, config_data),
+                is_enabled = CASE WHEN secret_key <> '' THEN COALESCE($5, is_enabled) ELSE is_enabled END,
+                updated_at = NOW()
+            WHERE provider = $6
+            "#
+        )
+        .bind(p.get("display_name").and_then(|v| v.as_str()))
+        .bind(p.get("is_sandbox").and_then(|v| v.as_bool()))
+        .bind(p.get("public_client_id").and_then(|v| v.as_str()))
+        .bind(p.get("config_data").filter(|v| !v.is_null()))
+        .bind(p.get("is_enabled").and_then(|v| v.as_bool()))
+        .bind(provider)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| import_error(format!("payment provider '{}'", provider), e))?;
+    }
+
+
+    // Rows are matched by their natural key (slug, SKU, code) so a backup also imports into a different
+    // installation whose own rows have other ids; references are remapped to the target's ids.
+    use std::collections::{HashMap, HashSet};
+    let mapped = |map: &HashMap<Uuid, Uuid>, id: Uuid| map.get(&id).copied().unwrap_or(id);
+
+    // 2. Categories (by slug) — inserted flat first, parents linked afterwards
+    let mut category_ids: HashMap<Uuid, Uuid> = HashMap::new();
+    for c in &backup.categories {
+        let id: Uuid = sqlx::query_scalar(
+            r#"
             INSERT INTO categories (id, name, slug, description, image_url, parent_id, display_order)
-            VALUES ($1, $2, $3, $4, $5, NULL, $6)
+            VALUES (COALESCE((SELECT id FROM categories WHERE slug = $3), $1), $2, $3, $4, $5, NULL, $6)
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name, slug = EXCLUDED.slug, description = EXCLUDED.description,
                 image_url = EXCLUDED.image_url, display_order = EXCLUDED.display_order
+            RETURNING id
             "#
         )
         .bind(c.id).bind(&c.name).bind(&c.slug).bind(&c.description).bind(&c.image_url).bind(c.display_order)
-        .execute(&mut *tx).await
+        .fetch_one(&mut *tx).await
         .map_err(|e| import_error(format!("category '{}'", c.name), e))?;
+        category_ids.insert(c.id, id);
     }
     for c in &backup.categories {
         sqlx::query("UPDATE categories SET parent_id = $1 WHERE id = $2")
-            .bind(c.parent_id).bind(c.id)
+            .bind(c.parent_id.map(|p| mapped(&category_ids, p)))
+            .bind(mapped(&category_ids, c.id))
             .execute(&mut *tx).await
             .map_err(|e| import_error(format!("parent of category '{}'", c.name), e))?;
     }
 
-    // 3. Products, variants and BOM parts
+    // 3. Products (by slug), variants (by SKU), shared parts (by SKU) and BOM lines
+    let mut product_ids: HashMap<Uuid, Uuid> = HashMap::new();
     for p in &backup.products {
-        sqlx::query(
+        let id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO products (id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            VALUES (COALESCE((SELECT id FROM products WHERE slug = $3), $1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             ON CONFLICT (id) DO UPDATE SET
                 title = EXCLUDED.title, slug = EXCLUDED.slug, description = EXCLUDED.description,
                 product_type = EXCLUDED.product_type, category = EXCLUDED.category, subcategory = EXCLUDED.subcategory,
@@ -2833,6 +3629,7 @@ async fn admin_import_store_data(
                 long_description = EXCLUDED.long_description, images = EXCLUDED.images,
                 has_multiple_variants = EXCLUDED.has_multiple_variants, tax_rate_percent = EXCLUDED.tax_rate_percent,
                 updated_at = NOW()
+            RETURNING id
             "#
         )
         .bind(p.id).bind(&p.title).bind(&p.slug).bind(&p.description).bind(&p.product_type)
@@ -2840,43 +3637,86 @@ async fn admin_import_store_data(
         .bind(&p.image_url).bind(p.is_active).bind(&p.subtitle).bind(&p.variant_selector_label)
         .bind(&p.short_description).bind(&p.long_description).bind(&p.images).bind(p.has_multiple_variants)
         .bind(p.tax_rate_percent)
-        .execute(&mut *tx).await
+        .fetch_one(&mut *tx).await
         .map_err(|e| import_error(format!("product '{}' (slug '{}')", p.title, p.slug), e))?;
+        product_ids.insert(p.id, id);
     }
 
+    let mut variant_ids: HashMap<Uuid, Uuid> = HashMap::new();
     for v in &backup.product_variants {
-        sqlx::query(
+        let id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO product_variants (id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, images)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES (COALESCE((SELECT id FROM product_variants WHERE sku = $3), $1), $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (id) DO UPDATE SET
                 product_id = EXCLUDED.product_id, sku = EXCLUDED.sku, title = EXCLUDED.title,
                 price_override_cents = EXCLUDED.price_override_cents, attributes = EXCLUDED.attributes,
                 stock_quantity = EXCLUDED.stock_quantity, low_stock_threshold = EXCLUDED.low_stock_threshold,
                 image_url = EXCLUDED.image_url, images = EXCLUDED.images, updated_at = NOW()
+            RETURNING id
             "#
         )
-        .bind(v.id).bind(v.product_id).bind(&v.sku).bind(&v.title).bind(v.price_override_cents)
+        .bind(v.id).bind(mapped(&product_ids, v.product_id)).bind(&v.sku).bind(&v.title).bind(v.price_override_cents)
         .bind(&v.attributes).bind(v.stock_quantity).bind(v.low_stock_threshold).bind(&v.image_url).bind(&v.images)
-        .execute(&mut *tx).await
+        .fetch_one(&mut *tx).await
         .map_err(|e| import_error(format!("variant '{}' (SKU '{}')", v.title, v.sku), e))?;
+        variant_ids.insert(v.id, id);
     }
 
+    let mut shared_part_ids: HashMap<Uuid, Uuid> = HashMap::new();
+    for bp in &backup.bom_parts {
+        let id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO bom_parts (id, sku, name, storage_location, stock_quantity, low_stock_threshold, notes)
+            VALUES (COALESCE((SELECT id FROM bom_parts WHERE UPPER(sku) = UPPER($2) LIMIT 1), $1), $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (id) DO UPDATE SET
+                sku = EXCLUDED.sku, name = EXCLUDED.name, storage_location = EXCLUDED.storage_location,
+                stock_quantity = EXCLUDED.stock_quantity, low_stock_threshold = EXCLUDED.low_stock_threshold,
+                notes = EXCLUDED.notes
+            RETURNING id
+            "#
+        )
+        .bind(bp.id).bind(&bp.sku).bind(&bp.name).bind(&bp.storage_location)
+        .bind(bp.stock_quantity).bind(bp.low_stock_threshold).bind(&bp.notes)
+        .fetch_one(&mut *tx).await
+        .map_err(|e| import_error(format!("shared part '{}' (SKU '{}')", bp.name, bp.sku), e))?;
+        shared_part_ids.insert(bp.id, id);
+    }
+
+    // The BOM of every imported product becomes exactly the one in the backup.
+    // Stock lives on the shared part; an existing line keeps its value (old backups carry no part stock).
+    let imported_lines: Vec<Uuid> = backup.product_parts.iter().map(|p| p.id).collect();
+    let imported_products: Vec<Uuid> = product_ids.values().copied().collect();
+    sqlx::query("DELETE FROM product_parts WHERE product_id = ANY($1) AND id <> ALL($2)")
+        .bind(&imported_products)
+        .bind(&imported_lines)
+        .execute(&mut *tx).await
+        .map_err(|e| import_error("replacing BOM lines".to_string(), e))?;
     for part in &backup.product_parts {
         sqlx::query(
             r#"
-            INSERT INTO product_parts (id, product_id, variant_id, part_name, part_sku, quantity, notes)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO product_parts (id, product_id, variant_id, part_id, part_name, part_sku, quantity, notes, storage_location, stock_quantity, low_stock_threshold)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (id) DO UPDATE SET
-                product_id = EXCLUDED.product_id, variant_id = EXCLUDED.variant_id, part_name = EXCLUDED.part_name,
-                part_sku = EXCLUDED.part_sku, quantity = EXCLUDED.quantity, notes = EXCLUDED.notes
+                product_id = EXCLUDED.product_id, variant_id = EXCLUDED.variant_id, part_id = EXCLUDED.part_id,
+                part_name = EXCLUDED.part_name, part_sku = EXCLUDED.part_sku, quantity = EXCLUDED.quantity,
+                notes = EXCLUDED.notes, storage_location = EXCLUDED.storage_location
             "#
         )
-        .bind(part.id).bind(part.product_id).bind(part.variant_id).bind(&part.part_name)
-        .bind(&part.part_sku).bind(part.quantity).bind(&part.notes)
+        .bind(part.id)
+        .bind(mapped(&product_ids, part.product_id))
+        .bind(part.variant_id.map(|v| mapped(&variant_ids, v)))
+        .bind(part.part_id.and_then(|id| shared_part_ids.get(&id).copied()))
+        .bind(&part.part_name).bind(&part.part_sku).bind(part.quantity).bind(&part.notes).bind(&part.storage_location)
+        .bind(part.stock_quantity).bind(part.low_stock_threshold)
         .execute(&mut *tx).await
         .map_err(|e| import_error(format!("BOM part '{}'", part.part_name), e))?;
     }
+
+    // Older backups have no shared parts: create them from the BOM lines (by SKU) and link everything
+    crate::services::inventory::link_shared_parts(&mut *tx)
+        .await
+        .map_err(|e| import_error("linking BOM lines to shared parts".to_string(), e))?;
 
     // 4. CMS pages (keyed by slug)
     for p in &backup.pages {
@@ -2894,7 +3734,14 @@ async fn admin_import_store_data(
         .map_err(|e| import_error(format!("page '{}'", p.slug), e))?;
     }
 
-    // 5. Navigation — flat first, then parents
+    // 5. Navigation — replaces the target's menus; flat first, then parents
+    if !backup.navigation_menu.is_empty() {
+        let menu_ids: Vec<Uuid> = backup.navigation_menu.iter().map(|m| m.id).collect();
+        sqlx::query("DELETE FROM navigation_items WHERE id <> ALL($1)")
+            .bind(&menu_ids)
+            .execute(&mut *tx).await
+            .map_err(|e| import_error("replacing the navigation menus".to_string(), e))?;
+    }
     for m in &backup.navigation_menu {
         sqlx::query(
             r#"
@@ -2916,58 +3763,84 @@ async fn admin_import_store_data(
             .map_err(|e| import_error(format!("parent of menu item '{}'", m.label), e))?;
     }
 
-    // 6. Shipping providers → zones → rates
+    // 6. Shipping: providers (by code) → zones (by provider + name) → rates (by zone + name + package)
+    let mut provider_ids: HashMap<Uuid, Uuid> = HashMap::new();
     for p in &backup.shipping.providers {
-        sqlx::query(
+        let id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO shipping_providers (id, name, code, tracking_url_template, is_active, sort_order)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES (COALESCE((SELECT id FROM shipping_providers WHERE code = $3), $1), $2, $3, $4, $5, $6)
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name, code = EXCLUDED.code, tracking_url_template = EXCLUDED.tracking_url_template,
                 is_active = EXCLUDED.is_active, sort_order = EXCLUDED.sort_order
+            RETURNING id
             "#
         )
         .bind(p.id).bind(&p.name).bind(&p.code).bind(&p.tracking_url_template).bind(p.is_active).bind(p.sort_order)
-        .execute(&mut *tx).await
+        .fetch_one(&mut *tx).await
         .map_err(|e| import_error(format!("shipping provider '{}'", p.name), e))?;
+        provider_ids.insert(p.id, id);
     }
+    let mut zone_ids: HashMap<Uuid, Uuid> = HashMap::new();
     for z in &backup.shipping.zones {
-        sqlx::query(
+        let provider_id = z.provider_id.map(|p| mapped(&provider_ids, p));
+        let id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO shipping_zones (id, provider_id, zone_name, country_codes, is_default)
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES (COALESCE((SELECT id FROM shipping_zones WHERE provider_id IS NOT DISTINCT FROM $2 AND zone_name = $3 LIMIT 1), $1), $2, $3, $4, $5)
             ON CONFLICT (id) DO UPDATE SET
                 provider_id = EXCLUDED.provider_id, zone_name = EXCLUDED.zone_name,
                 country_codes = EXCLUDED.country_codes, is_default = EXCLUDED.is_default
+            RETURNING id
             "#
         )
-        .bind(z.id).bind(z.provider_id).bind(&z.zone_name).bind(&z.country_codes).bind(z.is_default)
-        .execute(&mut *tx).await
+        .bind(z.id).bind(provider_id).bind(&z.zone_name).bind(&z.country_codes).bind(z.is_default)
+        .fetch_one(&mut *tx).await
         .map_err(|e| import_error(format!("shipping zone '{}'", z.zone_name), e))?;
+        zone_ids.insert(z.id, id);
     }
+    let mut rate_ids: Vec<Uuid> = Vec::new();
     for r in &backup.shipping.rates {
-        sqlx::query(
+        let zone_id = mapped(&zone_ids, r.zone_id);
+        let id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO shipping_rates (id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES (COALESCE((SELECT id FROM shipping_rates WHERE zone_id = $2 AND name = $3 AND package_type = $4 LIMIT 1), $1), $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (id) DO UPDATE SET
                 zone_id = EXCLUDED.zone_id, name = EXCLUDED.name, package_type = EXCLUDED.package_type,
                 min_weight_g = EXCLUDED.min_weight_g, max_weight_g = EXCLUDED.max_weight_g,
                 price_cents = EXCLUDED.price_cents, estimated_delivery_days = EXCLUDED.estimated_delivery_days
+            RETURNING id
             "#
         )
-        .bind(r.id).bind(r.zone_id).bind(&r.name).bind(&r.package_type).bind(r.min_weight_g)
+        .bind(r.id).bind(zone_id).bind(&r.name).bind(&r.package_type).bind(r.min_weight_g)
         .bind(r.max_weight_g).bind(r.price_cents).bind(&r.estimated_delivery_days)
-        .execute(&mut *tx).await
+        .fetch_one(&mut *tx).await
         .map_err(|e| import_error(format!("shipping rate '{}'", r.name), e))?;
+        rate_ids.push(id);
+    }
+    // The backup's shipping setup replaces the target's (rates already used by orders are kept)
+    if !backup.shipping.providers.is_empty() {
+        let kept_zones: Vec<Uuid> = zone_ids.values().copied().collect::<HashSet<_>>().into_iter().collect();
+        let kept_providers: Vec<Uuid> = provider_ids.values().copied().collect::<HashSet<_>>().into_iter().collect();
+        for (sql, ids) in [
+            ("DELETE FROM shipping_rates r WHERE r.id <> ALL($1) AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.shipping_rate_id = r.id)", &rate_ids),
+            ("DELETE FROM shipping_zones z WHERE z.id <> ALL($1) AND NOT EXISTS (SELECT 1 FROM shipping_rates r WHERE r.zone_id = z.id)", &kept_zones),
+            ("DELETE FROM shipping_providers p WHERE p.id <> ALL($1) AND NOT EXISTS (SELECT 1 FROM shipping_zones z WHERE z.provider_id = p.id)", &kept_providers),
+        ] {
+            sqlx::query(sql)
+                .bind(ids)
+                .execute(&mut *tx).await
+                .map_err(|e| import_error("replacing the shipping setup".to_string(), e))?;
+        }
     }
 
-    // 7. Coupons
+    // 7. Coupons (by code)
     for c in &backup.coupons {
         sqlx::query(
             r#"
             INSERT INTO coupons (id, code, discount_type, value_cents, min_order_cents, max_uses, used_count, is_active, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES (COALESCE((SELECT id FROM coupons WHERE code = $2), $1), $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (id) DO UPDATE SET
                 code = EXCLUDED.code, discount_type = EXCLUDED.discount_type, value_cents = EXCLUDED.value_cents,
                 min_order_cents = EXCLUDED.min_order_cents, max_uses = EXCLUDED.max_uses, used_count = EXCLUDED.used_count,
@@ -2980,7 +3853,9 @@ async fn admin_import_store_data(
         .map_err(|e| import_error(format!("coupon '{}'", c.code), e))?;
     }
 
+
     tx.commit().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _ = crate::services::inventory::recalculate_bom_stock(&pool).await;
 
     Ok(Json(json!({
         "success": true,
@@ -2991,13 +3866,15 @@ async fn admin_import_store_data(
             "categories": backup.categories.len(),
             "products": backup.products.len(),
             "variants": backup.product_variants.len(),
+            "bom_parts": backup.bom_parts.len(),
             "product_parts": backup.product_parts.len(),
             "pages": backup.pages.len(),
             "menu_items": backup.navigation_menu.len(),
             "shipping_providers": backup.shipping.providers.len(),
             "shipping_zones": backup.shipping.zones.len(),
             "shipping_rates": backup.shipping.rates.len(),
-            "coupons": backup.coupons.len()
+            "coupons": backup.coupons.len(),
+            "payment_providers": backup.payment_providers.len()
         }
     })))
 }
@@ -3199,6 +4076,7 @@ async fn admin_create_user(
     let role = payload.role.clone().unwrap_or_else(|| "editor".to_string());
     validate_role_assignment(&actor, &role)?;
     let permissions = resolve_permissions(&role, payload.permissions.as_ref())?;
+    let email = admin_email_update(payload.email.as_deref(), None)?;
 
     let password_hash = bcrypt::hash(&payload.password, 12)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -3209,12 +4087,12 @@ async fn admin_create_user(
     ))
     .bind(username)
     .bind(password_hash)
-    .bind(payload.email.as_deref().map(str::trim).filter(|e| !e.is_empty()))
+    .bind(email)
     .bind(&role)
     .bind(&permissions)
     .fetch_one(&pool)
     .await
-    .map_err(|_| (StatusCode::BAD_REQUEST, "Could not create the user (is the username already taken?)".to_string()))?;
+    .map_err(|e| (StatusCode::BAD_REQUEST, if e.to_string().contains("unique") { "This username is already taken".to_string() } else { format!("Could not create user: {}", e) }))?;
 
     Ok((StatusCode::CREATED, Json(admin_user_dto(&row))))
 }
@@ -3238,27 +4116,34 @@ async fn admin_update_user(
     }
 
     let username = payload.username.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(str::to_string).unwrap_or_else(|| current.get("username"));
-    let email = match payload.email.as_deref() {
-        Some(e) => Some(e.trim().to_string()).filter(|e| !e.is_empty()),
-        None => current.try_get("email").ok().flatten(),
-    };
-    let role = payload.role.clone().unwrap_or_else(|| current_role.clone());
-    validate_role_assignment(&actor, &role)?;
+    let email = admin_email_update(payload.email.as_deref(), current.try_get("email").ok().flatten())?;
 
-    // Nobody changes their own role or access (prevents lock-outs and self-promotion)
-    let access_changed = role != current_role || payload.permissions.is_some();
-    if id == actor.id && access_changed {
-        return Err((StatusCode::FORBIDDEN, "You cannot change your own role or permissions".to_string()));
-    }
+    let role = if id == actor.id {
+        if let Some(ref r) = payload.role {
+            if r != &current_role {
+                return Err((StatusCode::FORBIDDEN, "You cannot change your own role".to_string()));
+            }
+        }
+        current_role.clone()
+    } else {
+        let r = payload.role.clone().unwrap_or_else(|| current_role.clone());
+        validate_role_assignment(&actor, &r)?;
+        r
+    };
+
     if current_role == "superadmin" && role != "superadmin" && superadmin_count(&pool).await <= 1 {
         return Err((StatusCode::BAD_REQUEST, "The last superadmin cannot be demoted".to_string()));
     }
 
-    let permissions = match payload.permissions.as_ref() {
-        Some(p) => resolve_permissions(&role, Some(p))?,
-        // Role changed without explicit permissions: use the new role's defaults
-        None if role != current_role => resolve_permissions(&role, None)?,
-        None => current.get::<serde_json::Value, _>("permissions"),
+    let permissions = if id == actor.id {
+        current.get::<serde_json::Value, _>("permissions")
+    } else {
+        match payload.permissions.as_ref() {
+            Some(p) => resolve_permissions(&role, Some(p))?,
+            // Role changed without explicit permissions: use the new role's defaults
+            None if role != current_role => resolve_permissions(&role, None)?,
+            None => current.get::<serde_json::Value, _>("permissions"),
+        }
     };
 
     let new_hash = match payload.password.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
@@ -3287,7 +4172,7 @@ async fn admin_update_user(
     .bind(id)
     .fetch_one(&pool)
     .await
-    .map_err(|_| (StatusCode::BAD_REQUEST, "Could not update the user (is the username already taken?)".to_string()))?;
+    .map_err(|e| (StatusCode::BAD_REQUEST, if e.to_string().contains("unique") { "This username is already taken".to_string() } else { format!("Could not update user: {}", e) }))?;
 
     Ok(Json(admin_user_dto(&row)))
 }

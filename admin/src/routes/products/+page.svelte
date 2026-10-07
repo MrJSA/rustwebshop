@@ -22,6 +22,8 @@
     AlertCircle,
     FolderTree,
     ChevronRight,
+    ChevronDown,
+    MapPin,
     Save,
     Star,
     Warehouse,
@@ -29,7 +31,9 @@
     Search,
     RefreshCw,
     AlertTriangle,
-    Tag
+    Tag,
+    Minus,
+    Equal
   } from 'lucide-svelte';
 
   export let data;
@@ -39,6 +43,7 @@
   let inventory = data.inventory || [];
   let storeSettings = data.storeSettings || {};
   let coupons = data.coupons || [];
+  let bomParts = data.bomParts || [];
 
   $: isKleingewerbe = (storeSettings?.tax_mode === 'kleingewerbe');
   $: if (isKleingewerbe) {
@@ -115,16 +120,28 @@
   let newPartVariantId = '';
   let newPartNotes = '';
   let isUploadingBomFile = false;
+  let selectedBomPartId = '';
+  let selectedBomPartObj = null;
+
+  function onBomPartSelect() {
+    selectedBomPartObj = bomParts.find(p => p.id === selectedBomPartId) || null;
+    if (selectedBomPartObj) {
+      newPartName = selectedBomPartObj.name;
+      newPartSku = selectedBomPartObj.sku;
+    }
+  }
 
   // Edit Part Modal State
   let isEditPartOpen = false;
   let editingPartId = null;
   let editPartType = 'physical';
+  let editPartBomPartId = null;
   let editPartName = '';
   let editPartSku = '';
   let editPartQuantity = 1;
   let editPartVariantId = '';
   let editPartNotes = '';
+  let editPartStorageLocation = '';
 
   // Current editing product's variants list
   let currentProductVariants = [];
@@ -687,14 +704,23 @@
 
   // --- Parts / Bill of Materials (BOM) CRUD ---
   async function handleAddPart() {
-    if (!newPartName) return;
+    if (!editingProductId) return;
     const isDigital = newPartType === 'digital';
+    if (isDigital && !newPartName.trim()) {
+      alert('Please enter a name for the digital asset.');
+      return;
+    }
+    if (!isDigital && !selectedBomPartId && !newPartName.trim()) {
+      alert('Please select an existing BOM part from the catalog or enter a part name.');
+      return;
+    }
     try {
       const res = await fetch(`/api/v1/admin/products/${editingProductId}/parts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           variant_id: newPartVariantId || null,
+          part_id: isDigital ? null : (selectedBomPartId || null),
           part_name: newPartName,
           part_sku: isDigital ? 'DIGITAL_FILE' : (newPartSku || null),
           quantity: isDigital ? 1 : (parseInt(newPartQuantity) || 1),
@@ -708,9 +734,16 @@
         if (partsRes.ok) productParts = await partsRes.json();
         newPartName = '';
         newPartSku = '';
+        selectedBomPartId = '';
+        selectedBomPartObj = null;
         newPartNotes = '';
         newPartQuantity = 1;
         newPartType = 'physical';
+        await reloadInventory();
+        await reloadBomParts();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('Failed to attach part: ' + (err.error || res.statusText));
       }
     } catch (e) {
       console.error('Failed to add part:', e);
@@ -719,11 +752,13 @@
 
   function openEditPart(part) {
     editingPartId = part.id;
+    editPartBomPartId = part.part_id || null;
     editPartName = part.part_name;
     editPartSku = part.part_sku || '';
     editPartQuantity = part.quantity;
     editPartVariantId = part.variant_id || '';
     editPartNotes = part.notes || '';
+    editPartStorageLocation = part.storage_location || '';
     editPartType = (part.part_sku === 'DIGITAL_FILE') ? 'digital' : 'physical';
     isEditPartOpen = true;
   }
@@ -736,10 +771,12 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           variant_id: editPartVariantId || null,
+          part_id: editPartBomPartId || null,
           part_name: editPartName,
           part_sku: isDigital ? 'DIGITAL_FILE' : (editPartSku || null),
           quantity: isDigital ? 1 : (parseInt(editPartQuantity) || 1),
-          notes: editPartNotes || null
+          notes: editPartNotes || null,
+          storage_location: editPartStorageLocation || null
         })
       });
       if (res.ok) {
@@ -748,6 +785,11 @@
         });
         if (partsRes.ok) productParts = await partsRes.json();
         isEditPartOpen = false;
+        await reloadInventory();
+        await reloadBomParts();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('Failed to save part: ' + (err.error || res.statusText));
       }
     } catch (e) {
       console.error('Failed to update part:', e);
@@ -763,6 +805,8 @@
       });
       if (res.ok) {
         productParts = productParts.filter((p) => p.id !== partId);
+        await reloadInventory();
+        await reloadBomParts();
       }
     } catch (e) {
       console.error('Failed to delete part:', e);
@@ -924,52 +968,236 @@
 
   // --- Logistics & Warehouse Inventory State & Functions ---
   let filterLowStockOnly = false;
+  let inventoryTypeFilter = 'all'; // 'all' | 'products' | 'parts'
   let inventorySearchQuery = '';
-  let updatingVariantId = null;
+  let updatingItemId = null;
+  let restockInputs = {};
+  let expandedStockProducts = {};
+
+  function toggleStockProductExpand(variantId) {
+    expandedStockProducts[variantId] = !expandedStockProducts[variantId];
+    expandedStockProducts = expandedStockProducts;
+  }
+
+  async function reloadBomParts() {
+    try {
+      const res = await fetch('/api/v1/admin/bom-parts');
+      if (res.ok) bomParts = await res.json();
+    } catch (e) {
+      console.error('Failed to reload BOM parts:', e);
+    }
+  }
+
+  // BOM Parts Create & Edit modals in Logistics & Stock
+  let isCreateBomPartOpen = false;
+  let isSavingBomPart = false;
+  let createBomPartSku = '';
+  let createBomPartName = '';
+  let createBomPartLocation = 'Warehouse Main, Bin 01';
+  let createBomPartStock = 20;
+  let createBomPartThreshold = 5;
+  let createBomPartNotes = '';
+
+  let isEditBomPartOpen = false;
+  let editingBomPartId = null;
+  let editBomPartSku = '';
+  let editBomPartName = '';
+  let editBomPartLocation = '';
+  let editBomPartStock = 0;
+  let editBomPartThreshold = 5;
+  let editBomPartNotes = '';
+
+  function openCreateBomPartModal() {
+    createBomPartSku = '';
+    createBomPartName = '';
+    createBomPartLocation = 'Warehouse Main, Bin 01';
+    createBomPartStock = 20;
+    createBomPartThreshold = 5;
+    createBomPartNotes = '';
+    isCreateBomPartOpen = true;
+  }
+
+  async function handleCreateBomPartSubmit() {
+    if (!createBomPartSku.trim()) {
+      alert('Please enter a Part SKU');
+      return;
+    }
+    if (!createBomPartName.trim()) {
+      alert('Please enter a Part Name');
+      return;
+    }
+    isSavingBomPart = true;
+    try {
+      const res = await fetch('/api/v1/admin/bom-parts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sku: createBomPartSku.trim(),
+          name: createBomPartName.trim(),
+          storage_location: createBomPartLocation.trim() || 'Warehouse Main, Bin 01',
+          stock_quantity: parseInt(createBomPartStock) || 0,
+          low_stock_threshold: parseInt(createBomPartThreshold) || 5,
+          notes: createBomPartNotes.trim() || null
+        })
+      });
+      if (res.ok) {
+        isCreateBomPartOpen = false;
+        await reloadInventory();
+        await reloadBomParts();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('Failed to create BOM part: ' + (err.error || res.statusText));
+      }
+    } catch (e) {
+      console.error('Failed to create BOM part:', e);
+      alert('Error creating BOM part: ' + e.message);
+    } finally {
+      isSavingBomPart = false;
+    }
+  }
+
+  function openEditBomPartModal(part) {
+    editingBomPartId = part.part_id || part.id;
+    editBomPartSku = part.part_sku || part.sku || '';
+    editBomPartName = part.part_name || part.name || part.product_title || '';
+    editBomPartLocation = part.storage_location || 'Warehouse Main, Bin 01';
+    editBomPartStock = part.stock_quantity ?? 0;
+    editBomPartThreshold = part.low_stock_threshold ?? 5;
+    editBomPartNotes = part.notes || '';
+    isEditBomPartOpen = true;
+  }
+
+  async function handleSaveEditedBomPartSubmit() {
+    if (!editBomPartSku.trim()) {
+      alert('Please enter a Part SKU');
+      return;
+    }
+    if (!editBomPartName.trim()) {
+      alert('Please enter a Part Name');
+      return;
+    }
+    isSavingBomPart = true;
+    try {
+      const res = await fetch(`/api/v1/admin/bom-parts/${editingBomPartId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sku: editBomPartSku.trim(),
+          name: editBomPartName.trim(),
+          storage_location: editBomPartLocation.trim() || 'Warehouse Main, Bin 01',
+          stock_quantity: parseInt(editBomPartStock) || 0,
+          low_stock_threshold: parseInt(editBomPartThreshold) || 5,
+          notes: editBomPartNotes.trim() || null
+        })
+      });
+      if (res.ok) {
+        isEditBomPartOpen = false;
+        await reloadInventory();
+        await reloadBomParts();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('Failed to update BOM part: ' + (err.error || res.statusText));
+      }
+    } catch (e) {
+      console.error('Failed to update BOM part:', e);
+      alert('Error updating BOM part: ' + e.message);
+    } finally {
+      isSavingBomPart = false;
+    }
+  }
+
+  async function handleDeleteBomPartAction(partId) {
+    if (!confirm('Are you sure you want to delete this BOM part from the central inventory?')) return;
+    try {
+      const res = await fetch(`/api/v1/admin/bom-parts/${partId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        await reloadInventory();
+        await reloadBomParts();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('Failed to delete BOM part: ' + (err.error || res.statusText));
+      }
+    } catch (e) {
+      console.error('Failed to delete BOM part:', e);
+    }
+  }
+
+  function getRestockQty(item) {
+    const key = item.part_id || item.variant_id || item.sku;
+    if (restockInputs[key] === undefined) {
+      restockInputs[key] = 10;
+    }
+    return restockInputs[key];
+  }
+
+  function setRestockQty(item, val) {
+    const key = item.part_id || item.variant_id || item.sku;
+    restockInputs[key] = Math.max(0, parseInt(val, 10) || 0);
+  }
+
+  $: totalProductsCount = inventory.filter(i => i.item_type === 'product').length;
+  $: totalPartsCount = inventory.filter(i => i.item_type === 'part').length;
 
   $: filteredInventory = inventory.filter((item) => {
-    if (filterLowStockOnly && !item.is_low_stock && !item.is_out_of_stock) {
+    if (inventoryTypeFilter === 'products' && item.item_type !== 'product') return false;
+    if (inventoryTypeFilter === 'parts' && item.item_type !== 'part') return false;
+    if (filterLowStockOnly && !item.is_low_stock && !item.is_out_of_stock && !item.bom_has_missing_parts) {
       return false;
     }
     if (inventorySearchQuery.trim()) {
       const q = inventorySearchQuery.toLowerCase();
       return (
-        item.sku.toLowerCase().includes(q) ||
-        item.product_title.toLowerCase().includes(q) ||
-        item.variant_title.toLowerCase().includes(q)
+        (item.sku && item.sku.toLowerCase().includes(q)) ||
+        (item.product_title && item.product_title.toLowerCase().includes(q)) ||
+        (item.variant_title && item.variant_title.toLowerCase().includes(q)) ||
+        (item.part_name && item.part_name.toLowerCase().includes(q)) ||
+        (item.storage_location && item.storage_location.toLowerCase().includes(q)) ||
+        (item.used_in_summary && item.used_in_summary.toLowerCase().includes(q))
       );
     }
     return true;
   });
 
-  async function adjustStock(variant_id, amount) {
-    updatingVariantId = variant_id;
+  async function quickRestockAction(item, actionType) {
+    const key = item.part_id || item.variant_id || item.sku;
+    const num = Math.max(0, parseInt(restockInputs[key] ?? 10, 10) || 0);
+    if (num === 0 && actionType !== 'set') return;
+
+    updatingItemId = key;
     try {
-      const res = await fetch(`/api/v1/admin/logistics/inventory/${variant_id}/stock`, {
+      const isPart = item.item_type === 'part' || !!item.product_part_id;
+      const url = isPart
+        ? `/api/v1/admin/logistics/parts/${item.part_id}/stock`
+        : `/api/v1/admin/logistics/inventory/${item.variant_id}/stock`;
+
+      let body = {};
+      if (actionType === 'add') {
+        body = { adjustment: num };
+      } else if (actionType === 'sub') {
+        body = { adjustment: -num };
+      } else if (actionType === 'set') {
+        body = { absolute_quantity: num };
+      }
+
+      const res = await fetch(url, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ adjustment: amount })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
       });
+
       if (res.ok) {
-        inventory = inventory.map((item) => {
-          if (item.variant_id === variant_id) {
-            const newQty = item.stock_quantity + amount;
-            return {
-              ...item,
-              stock_quantity: newQty,
-              is_low_stock: item.product_type === 'physical' && newQty <= item.low_stock_threshold,
-              is_out_of_stock: item.product_type === 'physical' && newQty <= 0
-            };
-          }
-          return item;
-        });
+        // Refresh inventory to update part stock & linked products in real time
+        await reloadInventory();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Failed to update stock');
       }
     } catch (e) {
       console.error('Failed to update stock:', e);
     } finally {
-      updatingVariantId = null;
+      updatingItemId = null;
     }
   }
 </script>
@@ -1206,23 +1434,60 @@
   {:else if activeTab === 'stock'}
     <!-- Logistics & Stock View -->
     <div class="space-y-6">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <h2 class="text-xl font-black text-white tracking-tight flex items-center gap-2.5">
             <Warehouse size={22} class="text-orange-500" />
-            Logistics & Warehouse Stock Management
+            Logistics, Finished Goods & BOM Parts Inventory
           </h2>
-          <p class="text-xs text-slate-400 mt-1">Live tracking of physical inventory SKUs, stock thresholds, and one-click restocking adjustments.</p>
+          <p class="text-xs text-slate-400 mt-1">
+            Centralized Bill of Materials (BOM) stock, warehouse storage bins, and finished product inventory. Expand any product to inspect and restock its component parts. Product buildable stock is auto-calculated.
+          </p>
         </div>
 
-        <!-- Filters & Search -->
+        <!-- Filters, Action & Search -->
         <div class="flex flex-wrap items-center gap-3">
+          <!-- Create BOM Part Button -->
+          <button
+            type="button"
+            on:click={openCreateBomPartModal}
+            class="px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition-all shadow-lg shadow-purple-600/20 flex items-center gap-1.5"
+          >
+            <Plus size={14} />
+            <span>Create BOM Part</span>
+          </button>
+
+          <!-- Type Filter Tabs -->
+          <div class="inline-flex rounded-xl bg-slate-900 border border-slate-800 p-1 text-xs font-semibold">
+            <button
+              type="button"
+              on:click={() => inventoryTypeFilter = 'all'}
+              class="px-3 py-1.5 rounded-lg transition-colors {inventoryTypeFilter === 'all' ? 'bg-orange-600 text-white font-bold' : 'text-slate-400 hover:text-white'}"
+            >
+              All ({inventory.length})
+            </button>
+            <button
+              type="button"
+              on:click={() => inventoryTypeFilter = 'products'}
+              class="px-3 py-1.5 rounded-lg transition-colors {inventoryTypeFilter === 'products' ? 'bg-orange-600 text-white font-bold' : 'text-slate-400 hover:text-white'}"
+            >
+              Products ({totalProductsCount})
+            </button>
+            <button
+              type="button"
+              on:click={() => inventoryTypeFilter = 'parts'}
+              class="px-3 py-1.5 rounded-lg transition-colors {inventoryTypeFilter === 'parts' ? 'bg-purple-600 text-white font-bold' : 'text-slate-400 hover:text-white'}"
+            >
+              BOM Parts ({totalPartsCount})
+            </button>
+          </div>
+
           <div class="relative">
             <input
               type="text"
               bind:value={inventorySearchQuery}
-              placeholder="Filter by SKU or title..."
-              class="pl-9 pr-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-orange-500 w-52 sm:w-64"
+              placeholder="Filter SKU, location, or part..."
+              class="pl-9 pr-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-orange-500 w-52 sm:w-60"
             />
             <Search size={14} class="absolute left-3 top-3 text-slate-500 pointer-events-none" />
           </div>
@@ -1233,7 +1498,7 @@
             class="px-3.5 py-2 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1.5 {filterLowStockOnly ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-700'}"
           >
             <AlertTriangle size={13} class={filterLowStockOnly ? 'text-amber-400' : 'text-slate-400'} />
-            <span>Low Stock Only</span>
+            <span>Low Stock / Alerts</span>
           </button>
         </div>
       </div>
@@ -1244,100 +1509,373 @@
           <table class="w-full text-left text-xs">
             <thead class="bg-slate-950/60 border-b border-slate-800 text-slate-400 uppercase tracking-wider text-[11px]">
               <tr>
-                <th class="py-3.5 px-4 font-bold">SKU</th>
-                <th class="py-3.5 px-4 font-bold">Product & Variant Title</th>
-                <th class="py-3.5 px-4 font-bold">Type</th>
-                <th class="py-3.5 px-4 font-bold text-center">Current Stock</th>
-                <th class="py-3.5 px-4 font-bold text-center">Status</th>
-                <th class="py-3.5 px-4 font-bold text-right">Quick Restock</th>
+                <th class="py-3.5 px-4 font-bold w-12 text-center">Tree</th>
+                <th class="py-3.5 px-4 font-bold">SKU Code</th>
+                <th class="py-3.5 px-4 font-bold">Item Name & Storage Location</th>
+                <th class="py-3.5 px-4 font-bold">Inventory Type</th>
+                <th class="py-3.5 px-4 font-bold text-center">Available Stock</th>
+                <th class="py-3.5 px-4 font-bold text-center">Status & Readiness</th>
+                <th class="py-3.5 px-4 font-bold text-right min-w-[280px]">Restock & Operations</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-800/60">
               {#if filteredInventory.length === 0}
                 <tr>
-                  <td colspan="6" class="text-center py-12 text-slate-400">
-                    No matching warehouse SKUs found.
+                  <td colspan="7" class="text-center py-12 text-slate-400">
+                    No matching inventory items found for the current filter.
                   </td>
                 </tr>
               {:else}
                 {#each filteredInventory as item}
-                  <tr class="hover:bg-slate-800/30 transition-colors">
-                    <td class="py-3 px-4 font-mono font-bold text-orange-400">
-                      {item.sku}
-                    </td>
-                    <td class="py-3 px-4">
-                      <div class="font-semibold text-white">{item.product_title}</div>
-                      <div class="text-[11px] text-slate-400">Option: {item.variant_title}</div>
-                    </td>
-                    <td class="py-3 px-4">
-                      <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider {item.product_type === 'digital' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'bg-slate-800 text-slate-300 border border-slate-700'}">
-                        {item.product_type}
-                      </span>
-                    </td>
-                    <td class="py-3 px-4 text-center">
-                      {#if item.product_type === 'digital'}
-                        <span class="text-slate-500 font-mono italic">&infin; (Unlimited)</span>
+                  <!-- Main Item Row -->
+                  <tr
+                    class="hover:bg-slate-800/30 transition-colors {item.item_type === 'part' ? 'bg-purple-950/5' : ''} {item.item_type === 'product' && item.has_bom_parts ? 'cursor-pointer' : ''}"
+                    on:click={() => {
+                      if (item.item_type === 'product' && item.has_bom_parts) {
+                        toggleStockProductExpand(item.variant_id);
+                      }
+                    }}
+                  >
+                    <!-- Tree Expand Icon -->
+                    <td class="py-3.5 px-4 text-center">
+                      {#if item.item_type === 'product' && item.has_bom_parts}
+                        <button
+                          type="button"
+                          class="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                          title={expandedStockProducts[item.variant_id] ? 'Collapse BOM components' : 'Expand BOM components'}
+                        >
+                          <ChevronRight
+                            size={16}
+                            class="transition-transform duration-200 {expandedStockProducts[item.variant_id] ? 'rotate-90 text-orange-400' : 'text-slate-400'}"
+                          />
+                        </button>
+                      {:else if item.item_type === 'part'}
+                        <Layers size={14} class="text-purple-400 mx-auto" />
                       {:else}
-                        <span class="text-sm font-bold font-mono {item.is_out_of_stock ? 'text-rose-400' : item.is_low_stock ? 'text-amber-400' : 'text-emerald-400'}">
-                          {item.stock_quantity}
+                        <Package size={14} class="text-slate-500 mx-auto" />
+                      {/if}
+                    </td>
+
+                    <!-- SKU Code -->
+                    <td class="py-3.5 px-4 font-mono font-bold">
+                      <div class="flex items-center gap-1.5">
+                        <span class="{item.item_type === 'part' ? 'text-purple-400' : 'text-orange-400'}">{item.sku}</span>
+                      </div>
+                      <div class="text-[10px] text-slate-500 font-sans uppercase font-bold tracking-wider mt-0.5">
+                        {item.item_type === 'part' ? 'Part SKU' : 'Product SKU'}
+                      </div>
+                    </td>
+
+                    <!-- Product / Part Title & Storage Location -->
+                    <td class="py-3.5 px-4">
+                      {#if item.item_type === 'part'}
+                        <div class="font-bold text-white text-sm flex items-center gap-1.5">
+                          <Layers size={14} class="text-purple-400 flex-shrink-0" />
+                          <span>{item.part_name || item.product_title}</span>
+                        </div>
+                        <div class="text-[11px] text-slate-400 mt-1 flex items-center gap-1.5">
+                          <MapPin size={12} class="text-purple-400 flex-shrink-0" />
+                          <span class="font-mono text-slate-300 font-semibold">{item.storage_location || 'Warehouse Main, Bin 01'}</span>
+                        </div>
+                        <div class="text-slate-400 text-xs mt-0.5">
+                          <span class="text-orange-400 font-semibold">Required by:</span> {item.used_in_summary}
+                        </div>
+                        {#if item.notes}
+                          <div class="text-[10px] text-slate-500 italic mt-0.5">{item.notes}</div>
+                        {/if}
+                      {:else}
+                        <div class="font-bold text-white text-sm flex items-center gap-2">
+                          <span>{item.product_title}</span>
+                          <span class="text-slate-400 text-xs font-normal">({item.variant_title})</span>
+                        </div>
+                        {#if item.bom_parts && item.bom_parts.length > 0}
+                          <div class="mt-1 flex items-center gap-1.5">
+                            {#if item.bom_has_missing_parts}
+                              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30 flex items-center gap-1">
+                                <AlertTriangle size={10} />
+                                <span>{item.bom_parts_depleted} BOM component{item.bom_parts_depleted === 1 ? '' : 's'} depleted</span>
+                              </span>
+                            {:else}
+                              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                                ✓ All {item.bom_parts_total} BOM components ready
+                              </span>
+                            {/if}
+                            <span class="text-[10px] text-slate-500">
+                              (Click row to {expandedStockProducts[item.variant_id] ? 'collapse' : 'expand'} components)
+                            </span>
+                          </div>
+                        {/if}
+                      {/if}
+                    </td>
+
+                    <!-- Type -->
+                    <td class="py-3.5 px-4">
+                      {#if item.item_type === 'part'}
+                        <span class="px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider bg-purple-500/15 text-purple-300 border border-purple-500/30 inline-flex items-center gap-1">
+                          <Layers size={11} /> BOM Part
+                        </span>
+                      {:else if item.product_type === 'digital'}
+                        <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-500/10 text-sky-400 border border-sky-500/20">
+                          Digital Asset
+                        </span>
+                      {:else}
+                        <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                          Finished Good
                         </span>
                       {/if}
                     </td>
-                    <td class="py-3 px-4 text-center">
+
+                    <!-- In Stock Count -->
+                    <td class="py-3.5 px-4 text-center font-mono font-bold text-base {item.is_out_of_stock ? 'text-rose-400' : item.is_low_stock ? 'text-amber-400' : 'text-emerald-400'}">
                       {#if item.product_type === 'digital'}
-                        <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                          Digital Delivery
-                        </span>
-                      {:else if item.is_out_of_stock}
-                        <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                          Out of Stock
-                        </span>
-                      {:else if item.is_low_stock}
-                        <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                          Low Stock (&le; {item.low_stock_threshold})
-                        </span>
+                        ∞
                       {:else}
-                        <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                          Healthy Stock
+                        {item.stock_quantity}
+                        <span class="text-[10px] text-slate-500 block font-sans font-normal">
+                          {item.item_type === 'part' ? 'units on hand' : item.has_bom_parts ? 'buildable units (BOM)' : 'units'}
                         </span>
                       {/if}
                     </td>
-                    <td class="py-3 px-4 text-right">
-                      {#if item.product_type === 'physical'}
-                        <div class="flex items-center justify-end gap-1.5">
+
+                    <!-- Status Badge -->
+                    <td class="py-3.5 px-4 text-center">
+                      {#if item.product_type === 'digital'}
+                        <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/10 text-sky-400 border border-sky-500/20">
+                          Unlimited
+                        </span>
+                      {:else if item.item_type === 'part'}
+                        {#if item.is_out_of_stock}
+                          <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse">
+                            <AlertTriangle size={11} class="text-rose-400" /> Depleted (Produce Now)
+                          </span>
+                        {:else if item.is_low_stock}
+                          <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                            <AlertTriangle size={11} class="text-amber-400" /> Low Stock (&le; {item.low_stock_threshold})
+                          </span>
+                        {:else}
+                          <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                            ✓ Ready in Bin
+                          </span>
+                        {/if}
+                      {:else}
+                        {#if item.is_out_of_stock}
+                          <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                            Out of Stock
+                          </span>
+                        {:else if item.bom_has_missing_parts}
+                          <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-300 border border-rose-500/20">
+                            Missing BOM Parts
+                          </span>
+                        {:else if item.is_low_stock}
+                          <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                            Low Stock (&le; {item.low_stock_threshold})
+                          </span>
+                        {:else}
+                          <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            Healthy Stock
+                          </span>
+                        {/if}
+                      {/if}
+                    </td>
+
+                    <!-- Restock Actions -->
+                    <td class="py-3.5 px-4 text-right">
+                      {#if item.item_type === 'product' && item.has_bom_parts}
+                        <!-- Product stock is derived from BOM parts - individual stock editing locked -->
+                        <div class="inline-flex items-center gap-2">
+                          <span class="inline-flex items-center gap-1 text-[11px] text-purple-300 bg-purple-950/60 border border-purple-800/60 px-2.5 py-1 rounded-lg">
+                            <Layers size={12} class="text-purple-400" />
+                            <span>Derived from BOM Parts</span>
+                          </span>
                           <button
                             type="button"
-                            on:click={() => adjustStock(item.variant_id, -1)}
-                            disabled={updatingVariantId === item.variant_id || item.stock_quantity <= 0}
-                            class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-30 text-white font-mono font-bold text-xs"
-                            title="Subtract 1"
+                            on:click|stopPropagation={() => toggleStockProductExpand(item.variant_id)}
+                            class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-bold transition-colors"
                           >
-                            -1
-                          </button>
-                          <button
-                            type="button"
-                            on:click={() => adjustStock(item.variant_id, 1)}
-                            disabled={updatingVariantId === item.variant_id}
-                            class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-30 text-white font-mono font-bold text-xs"
-                            title="Add 1"
-                          >
-                            +1
-                          </button>
-                          <button
-                            type="button"
-                            on:click={() => adjustStock(item.variant_id, 10)}
-                            disabled={updatingVariantId === item.variant_id}
-                            class="px-2.5 py-1 rounded bg-orange-600/20 hover:bg-orange-600/30 border border-orange-500/30 disabled:opacity-30 text-orange-400 font-mono font-bold text-xs"
-                            title="Restock +10"
-                          >
-                            +10
+                            {expandedStockProducts[item.variant_id] ? 'Hide Parts' : 'Restock Parts ↓'}
                           </button>
                         </div>
+                      {:else if item.product_type !== 'digital'}
+                        <div class="flex items-center justify-end gap-1.5" on:click|stopPropagation>
+                          <input
+                            type="number"
+                            min="0"
+                            value={getRestockQty(item)}
+                            on:input={(e) => setRestockQty(item, e.target.value)}
+                            class="w-16 px-2 py-1.5 rounded-lg bg-slate-950 border border-slate-700 focus:border-orange-500 text-white font-mono text-xs text-center focus:outline-none"
+                            title="Enter quantity to add, subtract, or set"
+                            disabled={updatingItemId === (item.part_id || item.variant_id || item.sku)}
+                          />
+                          <button
+                            type="button"
+                            on:click={() => quickRestockAction(item, 'add')}
+                            disabled={updatingItemId === (item.part_id || item.variant_id || item.sku)}
+                            class="px-2 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 disabled:opacity-30 text-emerald-400 font-mono font-bold text-xs transition-colors flex items-center gap-1"
+                            title="Add to current stock (+)"
+                          >
+                            <Plus size={12} />
+                            <span>Add</span>
+                          </button>
+                          <button
+                            type="button"
+                            on:click={() => quickRestockAction(item, 'sub')}
+                            disabled={updatingItemId === (item.part_id || item.variant_id || item.sku) || item.stock_quantity <= 0}
+                            class="px-2 py-1.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/30 disabled:opacity-30 text-rose-400 font-mono font-bold text-xs transition-colors flex items-center gap-1"
+                            title="Subtract from current stock (-)"
+                          >
+                            <Minus size={12} />
+                            <span>Sub</span>
+                          </button>
+                          <button
+                            type="button"
+                            on:click={() => quickRestockAction(item, 'set')}
+                            disabled={updatingItemId === (item.part_id || item.variant_id || item.sku)}
+                            class="px-2 py-1.5 rounded-lg bg-orange-600/20 hover:bg-orange-600/30 border border-orange-500/30 disabled:opacity-30 text-orange-400 font-mono font-bold text-xs transition-colors flex items-center gap-1"
+                            title="Set current stock (=)"
+                          >
+                            <Equal size={12} />
+                            <span>Set</span>
+                          </button>
+                          {#if item.item_type === 'part'}
+                            <button
+                              type="button"
+                              on:click={() => openEditBomPartModal(item)}
+                              class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-bold transition-colors flex items-center gap-1 ml-1"
+                              title="Edit Part Name, SKU & Bin Location"
+                            >
+                              <Edit2 size={12} class="text-purple-400" />
+                              <span>Edit</span>
+                            </button>
+                          {/if}
+                        </div>
                       {:else}
-                        <span class="text-slate-600 text-xs italic">N/A</span>
+                        <span class="text-slate-600 text-xs italic">Asset Hosted</span>
                       {/if}
                     </td>
                   </tr>
+
+                  <!-- Expandable Nested Bill of Materials (BOM) Sub-Rows -->
+                  {#if item.item_type === 'product' && item.has_bom_parts && expandedStockProducts[item.variant_id]}
+                    {#each item.bom_parts as part}
+                      <tr class="bg-slate-950/70 border-l-4 border-l-purple-500/80 hover:bg-slate-950 transition-colors">
+                        <!-- Sub Tree Indicator -->
+                        <td class="py-2.5 px-4 text-center">
+                          <span class="text-purple-400 font-mono font-bold text-sm">↳</span>
+                        </td>
+
+                        <!-- Part SKU -->
+                        <td class="py-2.5 px-4 font-mono">
+                          <span class="text-purple-300 font-semibold">{part.part_sku}</span>
+                          <span class="text-[10px] text-slate-500 block">BOM SKU</span>
+                        </td>
+
+                        <!-- Part Name & Storage Location -->
+                        <td class="py-2.5 px-4">
+                          <div class="font-semibold text-slate-200 flex items-center gap-1.5">
+                            <Layers size={13} class="text-purple-400 flex-shrink-0" />
+                            <span>{part.part_name}</span>
+                          </div>
+                          <div class="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
+                            <span class="flex items-center gap-1 text-slate-300 font-mono text-[11px]">
+                              <MapPin size={11} class="text-purple-400" />
+                              <span>{part.storage_location || 'Warehouse Main, Bin 01'}</span>
+                            </span>
+                            <span class="text-slate-500">•</span>
+                            <span class="text-purple-300 font-medium">Required: {part.quantity}x per finished unit</span>
+                          </div>
+                          {#if part.notes}
+                            <div class="text-[10px] text-slate-500 italic mt-0.5">{part.notes}</div>
+                          {/if}
+                        </td>
+
+                        <!-- Type -->
+                        <td class="py-2.5 px-4">
+                          <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-950 border border-purple-800 text-purple-300">
+                            BOM Component
+                          </span>
+                        </td>
+
+                        <!-- Stock on Hand & Buildable -->
+                        <td class="py-2.5 px-4 text-center font-mono font-bold {part.stock_quantity < part.quantity ? 'text-rose-400' : 'text-purple-300'}">
+                          {part.stock_quantity}
+                          <span class="text-[10px] text-slate-500 block font-sans font-normal">
+                            (Builds {Math.floor(part.stock_quantity / (part.quantity || 1))} units)
+                          </span>
+                        </td>
+
+                        <!-- Status -->
+                        <td class="py-2.5 px-4 text-center">
+                          {#if part.stock_quantity <= 0}
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                              <AlertTriangle size={10} /> Depleted
+                            </span>
+                          {:else if part.stock_quantity < (part.quantity * 5)}
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                              Low ({part.stock_quantity})
+                            </span>
+                          {:else}
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                              Ready
+                            </span>
+                          {/if}
+                        </td>
+
+                        <!-- Restock Controls for this Component -->
+                        <td class="py-2.5 px-4 text-right">
+                          <div class="flex items-center justify-end gap-1.5">
+                            <input
+                              type="number"
+                              min="0"
+                              value={getRestockQty(part)}
+                              on:input={(e) => setRestockQty(part, e.target.value)}
+                              class="w-16 px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 focus:border-purple-500 text-white font-mono text-xs text-center focus:outline-none"
+                              title="Enter quantity to add, subtract, or set"
+                              disabled={updatingItemId === (part.part_id || part.id || part.part_sku)}
+                            />
+                            <button
+                              type="button"
+                              on:click={() => quickRestockAction({ ...part, item_type: 'part', part_id: part.part_id || part.id }, 'add')}
+                              disabled={updatingItemId === (part.part_id || part.id || part.part_sku)}
+                              class="px-2 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 disabled:opacity-30 text-emerald-400 font-mono font-bold text-xs transition-colors flex items-center gap-0.5"
+                              title="Add to part stock (+)"
+                            >
+                              <Plus size={11} />
+                              <span>Add</span>
+                            </button>
+                            <button
+                              type="button"
+                              on:click={() => quickRestockAction({ ...part, item_type: 'part', part_id: part.part_id || part.id }, 'sub')}
+                              disabled={updatingItemId === (part.part_id || part.id || part.part_sku) || part.stock_quantity <= 0}
+                              class="px-2 py-1 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/30 disabled:opacity-30 text-rose-400 font-mono font-bold text-xs transition-colors flex items-center gap-0.5"
+                              title="Subtract from part stock (-)"
+                            >
+                              <Minus size={11} />
+                              <span>Sub</span>
+                            </button>
+                            <button
+                              type="button"
+                              on:click={() => quickRestockAction({ ...part, item_type: 'part', part_id: part.part_id || part.id }, 'set')}
+                              disabled={updatingItemId === (part.part_id || part.id || part.part_sku)}
+                              class="px-2 py-1 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/30 disabled:opacity-30 text-purple-300 font-mono font-bold text-xs transition-colors flex items-center gap-0.5"
+                              title="Set part stock (=)"
+                            >
+                              <Equal size={11} />
+                              <span>Set</span>
+                            </button>
+                            <button
+                              type="button"
+                              on:click={() => openEditBomPartModal(part)}
+                              class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-bold transition-colors flex items-center gap-1 ml-1"
+                              title="Edit Part Name, SKU & Bin Location"
+                            >
+                              <Edit2 size={11} class="text-purple-400" />
+                              <span>Edit</span>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    {/each}
+                  {/if}
                 {/each}
               {/if}
             </tbody>
@@ -1402,30 +1940,23 @@
             </div>
             <div>
               <div class="flex items-center justify-between mb-1">
-                <label class="block text-slate-300 font-semibold">VAT Rate (%)</label>
+                <label class="block text-slate-300 font-semibold {isKleingewerbe ? 'opacity-40 text-slate-500' : ''}">VAT Rate (%)</label>
                 {#if isKleingewerbe}
                   <span class="text-[10px] font-bold text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20">
                     § 19 UStG (0% Exempt)
                   </span>
                 {/if}
               </div>
-              <div class="flex items-center gap-1.5">
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  max="100"
-                  bind:value={createProductTaxRate}
-                  disabled={isKleingewerbe}
-                  required
-                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                />
-                {#if !isKleingewerbe}
-                  <button type="button" on:click={() => createProductTaxRate = 19.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">19%</button>
-                  <button type="button" on:click={() => createProductTaxRate = 7.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">7%</button>
-                  <button type="button" on:click={() => createProductTaxRate = 0.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">0%</button>
-                {/if}
-              </div>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                max="100"
+                bind:value={createProductTaxRate}
+                disabled={isKleingewerbe}
+                required
+                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500 disabled:opacity-40 disabled:bg-slate-900/60 disabled:text-slate-500 disabled:border-slate-800/60 disabled:cursor-not-allowed"
+              />
             </div>
           </div>
 
@@ -1476,30 +2007,23 @@
             </div>
             <div>
               <div class="flex items-center justify-between mb-1">
-                <label class="block text-slate-300 font-semibold">VAT Rate (%)</label>
+                <label class="block text-slate-300 font-semibold {isKleingewerbe ? 'opacity-40 text-slate-500' : ''}">VAT Rate (%)</label>
                 {#if isKleingewerbe}
                   <span class="text-[10px] font-bold text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20">
                     § 19 UStG (0% Exempt)
                   </span>
                 {/if}
               </div>
-              <div class="flex items-center gap-1.5">
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  max="100"
-                  bind:value={taxRatePercent}
-                  disabled={isKleingewerbe}
-                  required
-                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                />
-                {#if !isKleingewerbe}
-                  <button type="button" on:click={() => taxRatePercent = 19.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">19%</button>
-                  <button type="button" on:click={() => taxRatePercent = 7.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">7%</button>
-                  <button type="button" on:click={() => taxRatePercent = 0.0} class="px-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono">0%</button>
-                {/if}
-              </div>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                max="100"
+                bind:value={taxRatePercent}
+                disabled={isKleingewerbe}
+                required
+                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500 disabled:opacity-40 disabled:bg-slate-900/60 disabled:text-slate-500 disabled:border-slate-800/60 disabled:cursor-not-allowed"
+              />
             </div>
           </div>
 
@@ -1887,15 +2411,48 @@
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
-              <div class="sm:col-span-2">
-                <label class="block text-slate-400 mb-1">{newPartType === 'digital' ? 'Digital Asset Name / Label' : 'Part Name & Specs'}</label>
-                <input
-                  type="text"
-                  bind:value={newPartName}
-                  placeholder={newPartType === 'digital' ? 'e.g. Firmware v2.0.hex or 3D Model STL' : 'e.g. CNC Aluminum Case 6063'}
-                  class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white"
-                />
-              </div>
+              {#if newPartType === 'physical'}
+                <div class="sm:col-span-2">
+                  <label class="block text-slate-300 font-semibold mb-1 flex items-center justify-between">
+                    <span>Select Existing BOM Part <span class="text-orange-400">*</span></span>
+                    <span class="text-[10px] text-purple-400 font-normal">From Central Inventory ({bomParts.length})</span>
+                  </label>
+                  <select
+                    bind:value={selectedBomPartId}
+                    on:change={onBomPartSelect}
+                    class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-orange-500"
+                  >
+                    <option value="">-- Choose Existing BOM Part --</option>
+                    {#each bomParts as bp}
+                      <option value={bp.id}>
+                        [{bp.sku}] {bp.name} — In Stock: {bp.stock_quantity} ({bp.storage_location || 'Warehouse'})
+                      </option>
+                    {/each}
+                  </select>
+                  {#if selectedBomPartObj}
+                    <div class="mt-1 flex items-center gap-2 text-[11px] text-slate-400">
+                      <span class="text-purple-400 font-mono font-bold">SKU: {selectedBomPartObj.sku}</span>
+                      <span>•</span>
+                      <span class="flex items-center gap-1 text-slate-300">
+                        <MapPin size={11} class="text-purple-400" />
+                        {selectedBomPartObj.storage_location || 'Warehouse Main'}
+                      </span>
+                      <span>•</span>
+                      <span class="text-emerald-400 font-mono font-bold">Stock: {selectedBomPartObj.stock_quantity} units</span>
+                    </div>
+                  {/if}
+                </div>
+              {:else}
+                <div class="sm:col-span-2">
+                  <label class="block text-slate-400 mb-1">Digital Asset Name / Label</label>
+                  <input
+                    type="text"
+                    bind:value={newPartName}
+                    placeholder="e.g. Firmware v2.0.hex or 3D Model STL"
+                    class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white"
+                  />
+                </div>
+              {/if}
               <div>
                 <label class="block text-slate-400 mb-1">Assigned Version</label>
                 <select bind:value={newPartVariantId} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white">
@@ -1907,7 +2464,7 @@
               </div>
               <div>
                 {#if newPartType === 'physical'}
-                  <label class="block text-slate-400 mb-1">Quantity</label>
+                  <label class="block text-slate-400 mb-1">Quantity per Unit</label>
                   <input type="number" bind:value={newPartQuantity} min="1" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono" />
                 {:else}
                   <label class="block text-slate-400 mb-1">Upload Digital File</label>
@@ -2192,6 +2749,24 @@
           </div>
         {/if}
 
+        {#if editPartType === 'physical'}
+          <div>
+            <label class="block font-semibold text-slate-300 mb-1 flex items-center gap-1">
+              <MapPin size={12} class="text-purple-400" />
+              <span>Storage Location / Warehouse Bin</span>
+            </label>
+            <input
+              type="text"
+              bind:value={editPartStorageLocation}
+              placeholder="e.g. Aisle 3, Bin 12"
+              class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"
+            />
+          </div>
+          <p class="text-[11px] text-slate-500 leading-relaxed">
+            Name and storage location are shared by every product that uses this SKU. Entering a different SKU switches this line to that part (or creates it). Stock is managed in Logistics &amp; Stock.
+          </p>
+        {/if}
+
         <div>
           <label class="block font-semibold text-slate-300 mb-1">Assigned Variant / Version</label>
           <select bind:value={editPartVariantId} class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500">
@@ -2315,6 +2890,235 @@
           </button>
         </div>
       </form>
+    </div>
+  </div>
+{/if}
+
+<!-- Modal: Create Centralized BOM Part -->
+{#if isCreateBomPartOpen}
+  <div class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+          <Layers size={18} class="text-purple-400" />
+          <span>Create Centralized BOM Part</span>
+        </h3>
+        <button
+          type="button"
+          on:click={() => isCreateBomPartOpen = false}
+          class="text-xs text-slate-400 hover:text-white p-1"
+        >
+          <X size={16} />
+        </button>
+      </div>
+
+      <p class="text-xs text-slate-400">
+        Register a new raw component or sub-assembly. BOM parts are tracked centrally with SKU, warehouse storage bin, and stock on hand.
+      </p>
+
+      <div class="space-y-3 text-xs">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-400 mb-1 font-semibold">Part SKU <span class="text-rose-400">*</span></label>
+            <input
+              type="text"
+              bind:value={createBomPartSku}
+              placeholder="e.g. BOM-SW-YEL"
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-purple-500 uppercase"
+            />
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1 font-semibold">Part Name <span class="text-rose-400">*</span></label>
+            <input
+              type="text"
+              bind:value={createBomPartName}
+              placeholder="e.g. Gateron Yellow Linear Switches (84x)"
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-purple-500"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-slate-400 mb-1 font-semibold flex items-center gap-1">
+            <MapPin size={12} class="text-purple-400" />
+            <span>Storage Location / Warehouse Bin</span>
+          </label>
+          <input
+            type="text"
+            bind:value={createBomPartLocation}
+            placeholder="e.g. Aisle 4, Bin 23 (Switches)"
+            class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-purple-500"
+          />
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-400 mb-1 font-semibold">Initial Stock Quantity</label>
+            <input
+              type="number"
+              min="0"
+              bind:value={createBomPartStock}
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-purple-500"
+            />
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1 font-semibold">Low Stock Threshold</label>
+            <input
+              type="number"
+              min="0"
+              bind:value={createBomPartThreshold}
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-purple-500"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-slate-400 mb-1 font-semibold">Technical Notes / Specs (Optional)</label>
+          <textarea
+            bind:value={createBomPartNotes}
+            rows="2"
+            placeholder="e.g. 50g actuation, factory lubed, 5-pin PCB mount"
+            class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-purple-500"
+          ></textarea>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
+        <button
+          type="button"
+          on:click={() => isCreateBomPartOpen = false}
+          class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          on:click={handleCreateBomPartSubmit}
+          disabled={isSavingBomPart}
+          class="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-bold transition-colors flex items-center gap-1.5 shadow-lg shadow-purple-600/25"
+        >
+          <Save size={14} />
+          <span>{isSavingBomPart ? 'Saving...' : 'Create Part'}</span>
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Modal: Edit Centralized BOM Part -->
+{#if isEditBomPartOpen}
+  <div class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+          <Edit2 size={18} class="text-purple-400" />
+          <span>Edit BOM Component</span>
+        </h3>
+        <button
+          type="button"
+          on:click={() => isEditBomPartOpen = false}
+          class="text-xs text-slate-400 hover:text-white p-1"
+        >
+          <X size={16} />
+        </button>
+      </div>
+
+      <p class="text-xs text-slate-400">
+        Update this component's SKU, name, storage location, or inventory threshold. Changes automatically sync to all linked products.
+      </p>
+
+      <div class="space-y-3 text-xs">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-400 mb-1 font-semibold">Part SKU <span class="text-rose-400">*</span></label>
+            <input
+              type="text"
+              bind:value={editBomPartSku}
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-purple-500 uppercase"
+            />
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1 font-semibold">Part Name <span class="text-rose-400">*</span></label>
+            <input
+              type="text"
+              bind:value={editBomPartName}
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-purple-500"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-slate-400 mb-1 font-semibold flex items-center gap-1">
+            <MapPin size={12} class="text-purple-400" />
+            <span>Storage Location / Warehouse Bin</span>
+          </label>
+          <input
+            type="text"
+            bind:value={editBomPartLocation}
+            placeholder="e.g. Aisle 2, Bin 14 (Electronics)"
+            class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-purple-500"
+          />
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-400 mb-1 font-semibold">Stock Quantity</label>
+            <input
+              type="number"
+              min="0"
+              bind:value={editBomPartStock}
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-purple-500"
+            />
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1 font-semibold">Low Stock Threshold</label>
+            <input
+              type="number"
+              min="0"
+              bind:value={editBomPartThreshold}
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:outline-none focus:border-purple-500"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-slate-400 mb-1 font-semibold">Technical Notes / Specs</label>
+          <textarea
+            bind:value={editBomPartNotes}
+            rows="2"
+            class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-purple-500"
+          ></textarea>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between pt-2 border-t border-slate-800">
+        <button
+          type="button"
+          on:click={() => handleDeleteBomPartAction(editingBomPartId)}
+          class="px-3.5 py-2 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 text-xs font-semibold transition-colors flex items-center gap-1.5 border border-rose-500/30"
+        >
+          <Trash2 size={13} />
+          <span>Delete Part</span>
+        </button>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            on:click={() => isEditBomPartOpen = false}
+            class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            on:click={handleSaveEditedBomPartSubmit}
+            disabled={isSavingBomPart}
+            class="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-bold transition-colors flex items-center gap-1.5 shadow-lg shadow-purple-600/25"
+          >
+            <Save size={14} />
+            <span>{isSavingBomPart ? 'Saving...' : 'Save Changes'}</span>
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 {/if}

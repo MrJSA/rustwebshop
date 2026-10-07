@@ -48,15 +48,23 @@
   let role = 'editor';
   let permissions = roleDefaults('editor');
 
-  $: editingSelf = modalMode === 'edit' && users.find((u) => u.id === editId)?.username === me.username;
+  $: editingSelf = modalMode === 'edit' && (
+    Boolean(me.id && editId === me.id) ||
+    Boolean(me.username && users.find((u) => u.id === editId)?.username?.toLowerCase() === me.username?.toLowerCase())
+  );
 
   onMount(() => {
     if (users.length === 0) reloadUsers();
   });
 
   async function readError(res, fallback) {
-    const body = await res.json().catch(() => ({}));
-    return body.error || fallback;
+    const text = await res.text().catch(() => '');
+    try {
+      const body = JSON.parse(text);
+      return body.error || body.message || fallback;
+    } catch {
+      return text || fallback;
+    }
   }
 
   async function reloadUsers() {
@@ -134,6 +142,10 @@
         return;
       }
       successNotice = `User "${cleanUsername}" ${modalMode === 'create' ? 'created' : 'updated'}.`;
+      if (editingSelf && $page.data.admin) {
+        $page.data.admin.username = cleanUsername;
+        $page.data.admin.email = email.trim();
+      }
       isModalOpen = false;
       await reloadUsers();
       setTimeout(() => (successNotice = ''), 4000);

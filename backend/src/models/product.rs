@@ -97,19 +97,61 @@ pub struct ProductPart {
     pub id: Uuid,
     pub product_id: Uuid,
     pub variant_id: Option<Uuid>,
+    pub part_id: Option<Uuid>,
     pub part_name: String,
     pub part_sku: Option<String>,
     pub quantity: i32,
     pub notes: Option<String>,
+    pub storage_location: Option<String>,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub stock_quantity: i32,
+    #[serde(default)]
+    pub low_stock_threshold: i32,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreatePartRequest {
     pub variant_id: Option<Uuid>,
-    pub part_name: String,
+    pub part_id: Option<Uuid>,
+    pub part_name: Option<String>,
     pub part_sku: Option<String>,
     pub quantity: i32,
+    pub notes: Option<String>,
+    pub storage_location: Option<String>,
+    pub stock_quantity: Option<i32>,
+    pub low_stock_threshold: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct BomPart {
+    pub id: Uuid,
+    pub sku: String,
+    pub name: String,
+    pub storage_location: Option<String>,
+    pub stock_quantity: i32,
+    pub low_stock_threshold: i32,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateBomPartRequest {
+    pub sku: String,
+    pub name: String,
+    pub storage_location: Option<String>,
+    pub stock_quantity: Option<i32>,
+    pub low_stock_threshold: Option<i32>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateBomPartRequest {
+    pub sku: Option<String>,
+    pub name: Option<String>,
+    pub storage_location: Option<String>,
+    pub stock_quantity: Option<i32>,
+    pub low_stock_threshold: Option<i32>,
     pub notes: Option<String>,
 }
 

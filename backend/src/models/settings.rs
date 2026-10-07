@@ -52,7 +52,25 @@ pub struct StoreSettings {
     pub order_prefix: String,
     pub order_date_enabled: bool,
     pub stock_display_template: String,
+    #[serde(default = "default_true")]
+    pub low_stock_alerts_enabled: bool,
+    #[serde(default = "default_stock_managers")]
+    pub low_stock_alert_recipients_mode: String,
+    #[serde(default)]
+    pub low_stock_alert_custom_emails: String,
+    #[serde(default = "default_json_array")]
+    pub low_stock_alert_selected_user_ids: serde_json::Value,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_stock_managers() -> String {
+    "stock_managers".to_string()
+}
+fn default_json_array() -> serde_json::Value {
+    serde_json::json!([])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,12 +161,18 @@ pub struct UpdateStoreSettingsRequest {
     pub order_prefix: Option<String>,
     pub order_date_enabled: Option<bool>,
     pub stock_display_template: Option<String>,
+    pub low_stock_alerts_enabled: Option<bool>,
+    pub low_stock_alert_recipients_mode: Option<String>,
+    pub low_stock_alert_custom_emails: Option<String>,
+    pub low_stock_alert_selected_user_ids: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct TestEmailRequest {
     #[serde(alias = "recipient", alias = "to_email")]
     pub recipient_email: String,
+    #[serde(default)]
+    pub email_type: Option<String>,
     /// Unsaved values from the settings form; an empty password keeps the stored one
     #[serde(default)]
     pub smtp: Option<SmtpOverride>,

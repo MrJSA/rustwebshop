@@ -81,6 +81,8 @@ fn send_order_emails(pool: &PgPool, order_number: &str, is_paid: bool) {
         if is_paid {
             crate::services::email::send_payment_received_notification(&pool, &order_number).await;
         }
+        let _ = crate::services::inventory::recalculate_bom_stock(&pool).await;
+        crate::services::email::check_and_send_low_stock_alerts(&pool).await;
     });
 }
 

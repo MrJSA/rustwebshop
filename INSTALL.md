@@ -201,7 +201,7 @@ gunzip -c backups/shop-YYYY-MM-DD.sql.gz | docker compose exec -T db psql -U sho
 docker compose start backend
 ```
 
-Copy the `backups/` folder to another machine regularly. The admin's *Export & Backups* tab additionally exports catalogue/content as JSON and the media library as ZIP.
+Copy the `backups/` folder to another machine regularly. The admin's *Export & Backups* tab additionally exports the store settings and catalogue as JSON (importable into another installation; passwords and API keys are not included and must be entered again) and the media library as ZIP.
 
 ## 13. Troubleshooting
 

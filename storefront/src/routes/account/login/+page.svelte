@@ -1,7 +1,8 @@
 <script>
+  import { onDestroy } from 'svelte';
   import { customer } from '$lib/stores/customer.js';
   import { goto } from '$app/navigation';
-  import { LogIn, UserPlus, Lock, Mail, User, AlertCircle, CheckCircle2 } from 'lucide-svelte';
+  import { LogIn, UserPlus, Lock, Mail, User, AlertCircle, CheckCircle2, RotateCw } from 'lucide-svelte';
 
   let activeTab = 'login'; // 'login' | 'register'
   let email = '';
@@ -12,8 +13,54 @@
   let isLoading = false;
   let needsVerification = false;
   let isResending = false;
+  let resendCooldown = 0;
+  let cooldownTimer = null;
+
+  function checkStoredCooldown() {
+    if (!email) return;
+    try {
+      const stored = sessionStorage.getItem('resend_until_' + email.trim().toLowerCase());
+      if (stored) {
+        const remaining = Math.ceil((parseInt(stored, 10) - Date.now()) / 1000);
+        if (remaining > 0) {
+          startCooldown(remaining);
+        } else {
+          sessionStorage.removeItem('resend_until_' + email.trim().toLowerCase());
+        }
+      }
+    } catch (e) {}
+  }
+
+  $: if (email) {
+    checkStoredCooldown();
+  }
+
+  function startCooldown(seconds = 60) {
+    if (cooldownTimer) clearInterval(cooldownTimer);
+    resendCooldown = seconds;
+    try {
+      sessionStorage.setItem('resend_until_' + email.trim().toLowerCase(), (Date.now() + seconds * 1000).toString());
+    } catch (e) {}
+
+    cooldownTimer = setInterval(() => {
+      resendCooldown -= 1;
+      if (resendCooldown <= 0) {
+        clearInterval(cooldownTimer);
+        cooldownTimer = null;
+        resendCooldown = 0;
+        try {
+          sessionStorage.removeItem('resend_until_' + email.trim().toLowerCase());
+        } catch (e) {}
+      }
+    }, 1000);
+  }
+
+  onDestroy(() => {
+    if (cooldownTimer) clearInterval(cooldownTimer);
+  });
 
   async function resendVerification() {
+    if (resendCooldown > 0 || isResending || !email) return;
     isResending = true;
     errorMsg = '';
     successMsg = '';
@@ -24,8 +71,15 @@
         body: JSON.stringify({ email })
       });
       const data = await res.json().catch(() => ({}));
-      if (res.ok) successMsg = `${data.message} Please check your inbox and spam folder.`;
-      else errorMsg = data.error || 'The email could not be sent. Please try again later.';
+      if (res.ok) {
+        startCooldown(data.cooldown_seconds || 60);
+        successMsg = data.message;
+      } else {
+        errorMsg = data.error || 'The email could not be sent. Please try again later.';
+        if (res.status === 429) {
+          startCooldown(60);
+        }
+      }
     } catch (e) {
       errorMsg = 'Network error. Please try again.';
     } finally {
@@ -47,6 +101,9 @@
         errorMsg = data.error || 'Invalid email or password';
         // 403 = correct password but email not verified yet
         needsVerification = res.status === 403;
+        if (needsVerification) {
+          checkStoredCooldown();
+        }
       } else {
         customer.login(data.token, data.email, data.full_name);
         goto('/');
@@ -77,6 +134,7 @@
         if (data.verification_email_sent === false) {
           errorMsg = 'Your account was created, but the verification email could not be sent right now. Please try "Resend verification email" later or contact the shop.';
         } else {
+          startCooldown(60);
           successMsg = `Account created! We sent a verification link to ${data.email}. Please confirm your email address, then log in.`;
         }
       } else {
@@ -133,14 +191,26 @@
     {/if}
 
     {#if needsVerification}
-      <button
-        type="button"
-        on:click={resendVerification}
-        disabled={isResending || !email}
-        class="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition-all disabled:opacity-50"
-      >
-        {isResending ? 'Sending…' : 'Resend verification email'}
-      </button>
+      <div class="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+        <div class="text-[11px] text-slate-400 leading-relaxed">
+          Need a new verification link? You can request another email once every 1 minute.
+        </div>
+        <button
+          type="button"
+          on:click={resendVerification}
+          disabled={isResending || !email || resendCooldown > 0}
+          class="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 border border-slate-700"
+        >
+          {#if isResending}
+            <RotateCw size={13} class="animate-spin text-orange-400" />
+            <span>Sending verification email…</span>
+          {:else if resendCooldown > 0}
+            <span>Resend verification email in {resendCooldown}s</span>
+          {:else}
+            <span>Resend verification email</span>
+          {/if}
+        </button>
+      </div>
     {/if}
 
     {#if activeTab === 'login'}
