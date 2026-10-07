@@ -108,6 +108,12 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
         order_prefix: settings.order_prefix,
         order_date_enabled: settings.order_date_enabled,
         stock_display_template: settings.stock_display_template,
+        address_street: settings.address_street,
+        address_house_number: settings.address_house_number,
+        address_extra: settings.address_extra,
+        address_postal_code: settings.address_postal_code,
+        address_city: settings.address_city,
+        address_country: settings.address_country,
     };
 
     let payment_providers = sqlx::query_as::<_, PaymentProviderRow>(
@@ -550,6 +556,53 @@ async fn public_get_menu(
     Ok(Json(items))
 }
 
+/// Fills the shop's own data into a CMS page. A line whose placeholders are all empty (e.g. no
+/// phone number or VAT ID set) is left out instead of showing an empty label.
+fn render_page_placeholders(md: &str, s: &StoreSettings) -> String {
+    let join = |parts: &[&str]| parts.iter().map(|p| p.trim()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" ");
+    let legal_name = if s.legal_name.trim().is_empty() { s.store_name.as_str() } else { s.legal_name.as_str() };
+    let odr_url = if s.odr_url.trim().is_empty() { "https://ec.europa.eu/odr" } else { s.odr_url.as_str() };
+    let street_line = join(&[&s.address_street, &s.address_house_number]);
+    let city_line = join(&[&s.address_postal_code, &s.address_city]);
+    let values: [(&str, &str); 19] = [
+        ("{{STORE_NAME}}", &s.store_name),
+        ("{{LEGAL_NAME}}", legal_name),
+        ("{{STORE_OWNER}}", &s.store_owner),
+        ("{{COMPANY_ADDRESS}}", &s.company_address),
+        ("{{STREET_LINE}}", &street_line),
+        ("{{STREET}}", &s.address_street),
+        ("{{HOUSE_NUMBER}}", &s.address_house_number),
+        ("{{ADDRESS_EXTRA}}", &s.address_extra),
+        ("{{CITY_LINE}}", &city_line),
+        ("{{POSTAL_CODE}}", &s.address_postal_code),
+        ("{{CITY}}", &s.address_city),
+        ("{{COUNTRY}}", &s.address_country),
+        ("{{SUPPORT_EMAIL}}", &s.support_email),
+        ("{{PHONE}}", &s.phone),
+        ("{{VAT_ID}}", &s.vat_id),
+        ("{{TAX_NOTICE}}", &s.tax_notice),
+        ("{{COMMERCIAL_REGISTER}}", &s.commercial_register),
+        ("{{DISPUTE_RESOLUTION_NOTICE}}", &s.dispute_resolution_notice),
+        ("{{ODR_URL}}", odr_url),
+    ];
+
+    md.lines()
+        .filter_map(|line| {
+            let mut out = line.to_string();
+            let (mut used, mut filled) = (false, false);
+            for (key, value) in &values {
+                if out.contains(key) {
+                    used = true;
+                    filled |= !value.trim().is_empty();
+                    out = out.replace(key, value.trim());
+                }
+            }
+            (!used || filled).then_some(out)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // 8. Public CMS Policy Page Handler
 async fn public_get_page(
     State(pool): State<PgPool>,
@@ -573,25 +626,7 @@ async fn public_get_page(
     .unwrap_or(None);
 
     if let Some(s) = settings_opt {
-        let mut md = page.content_markdown;
-        md = md.replace("{{STORE_NAME}}", &s.store_name);
-        md = md.replace("{{LEGAL_NAME}}", if !s.legal_name.is_empty() { &s.legal_name } else { &s.store_name });
-        md = md.replace("{{STORE_OWNER}}", &s.store_owner);
-        md = md.replace("{{COMPANY_ADDRESS}}", &s.company_address);
-        md = md.replace("{{SUPPORT_EMAIL}}", &s.support_email);
-        md = md.replace("{{PHONE}}", &s.phone);
-        md = md.replace("{{VAT_ID}}", &s.vat_id);
-        md = md.replace("{{TAX_NOTICE}}", &s.tax_notice);
-        md = md.replace("{{COMMERCIAL_REGISTER}}", &s.commercial_register);
-        md = md.replace("{{DISPUTE_RESOLUTION_NOTICE}}", &s.dispute_resolution_notice);
-        md = md.replace("{{ODR_URL}}", if !s.odr_url.is_empty() { &s.odr_url } else { "https://ec.europa.eu/odr" });
-        // Also update standard initial default strings if present
-        md = md.replace("RustCraft Gear & Software GmbH", if !s.legal_name.is_empty() { &s.legal_name } else { &s.store_name });
-        md = md.replace("RustCraft Gear & Software", &s.store_name);
-        md = md.replace("support@rustwebshop.local", &s.support_email);
-        md = md.replace("+49 (0) 30 123456-78", &s.phone);
-        md = md.replace("DE314159265", &s.vat_id);
-        page.content_markdown = md;
+        page.content_markdown = render_page_placeholders(&page.content_markdown, &s);
     }
 
     // If shipment policy, also bundle active shipping providers with zones and rates!

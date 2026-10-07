@@ -55,14 +55,20 @@
   }
 
   // --- Store Identity & Legal Form State ---
-  let storeName = settings.store_name || 'RustCraft Store';
-  let legalName = settings.legal_name || 'Max Mustermann E-Commerce';
-  let storeOwner = settings.store_owner || 'Max Mustermann';
-  let storeSubtitle = settings.store_subtitle || 'Rust Powered • ACID Fast';
-  let companyAddress = settings.company_address || 'Musterstraße 1, 12345 Musterstadt, Germany';
-  let supportEmail = settings.support_email || 'shop@example.com';
-  let phone = settings.phone || '+49 123 4567890';
-  let vatId = settings.vat_id || 'DE123456789';
+  // Empty fields stay empty: example values only appear as placeholders, never get saved
+  let storeName = settings.store_name || '';
+  let legalName = settings.legal_name || '';
+  let storeOwner = settings.store_owner || '';
+  let storeSubtitle = settings.store_subtitle ?? '';
+  let addressStreet = settings.address_street || '';
+  let addressHouseNumber = settings.address_house_number || '';
+  let addressExtra = settings.address_extra || '';
+  let addressPostalCode = settings.address_postal_code || '';
+  let addressCity = settings.address_city || '';
+  let addressCountry = settings.address_country || '';
+  let supportEmail = settings.support_email || '';
+  let phone = settings.phone || '';
+  let vatId = settings.vat_id || '';
   let taxNotice = settings.tax_notice || 'Value added tax is not collected, as small businesses according to §19 (1) UStG.';
   let commercialRegister = settings.commercial_register || '';
   let odrUrl = settings.odr_url || 'https://ec.europa.eu/odr';
@@ -112,6 +118,10 @@
   }
 
   async function handleSaveIdentity() {
+    if (data.settingsLoadFailed) {
+      identityErrorNotice = 'The current settings could not be loaded. Please reload the page before saving.';
+      return;
+    }
     isSavingIdentity = true;
     identitySuccessNotice = '';
     identityErrorNotice = '';
@@ -129,7 +139,12 @@
         legal_name: legalName,
         store_owner: storeOwner,
         store_subtitle: storeSubtitle,
-        company_address: companyAddress,
+        address_street: addressStreet,
+        address_house_number: addressHouseNumber,
+        address_extra: addressExtra,
+        address_postal_code: addressPostalCode,
+        address_city: addressCity,
+        address_country: addressCountry,
         support_email: supportEmail,
         phone,
         vat_id: vatId,
@@ -157,7 +172,7 @@
       });
 
       if (res.ok) {
-        settings = payload;
+        settings = { ...settings, ...payload };
         identitySuccessNotice = 'Store Identity & Taxation settings saved!';
         setTimeout(() => identitySuccessNotice = '', 4500);
       } else {
@@ -648,7 +663,7 @@
                 placeholder="e.g. Max Mustermann"
                 class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
               />
-              <p class="text-[10px] text-slate-500 mt-1">Authorized representative (§ 5 TMG Vertreten durch).</p>
+              <p class="text-[10px] text-slate-500 mt-1">Authorized representative (§ 5 DDG "Vertreten durch").</p>
             </div>
 
             <div>
@@ -661,16 +676,68 @@
               />
             </div>
 
-            <div class="sm:col-span-2">
-              <label class="block text-slate-300 font-semibold mb-1">Company Registered Legal Address</label>
+            <div class="sm:col-span-2 grid grid-cols-1 sm:grid-cols-6 gap-4">
+              <div class="sm:col-span-6">
+                <p class="text-slate-300 font-semibold">Registered Business Address</p>
+                <p class="text-[10px] text-slate-500 mt-0.5">Used on invoices, packing slips, emails, the legal notice and all legal pages.</p>
+              </div>
+            <div class="sm:col-span-4">
+              <label class="block text-slate-300 font-semibold mb-1">Street</label>
               <input
                 type="text"
-                bind:value={companyAddress}
+                bind:value={addressStreet}
                 required
-                placeholder="Street address, Postal code, City, Country"
+                placeholder="e.g. Musterstraße"
                 class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
               />
-              <p class="text-[10px] text-slate-500 mt-1">Printed in invoice sender header and legal notice disclosures.</p>
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-slate-300 font-semibold mb-1">House Number</label>
+              <input
+                type="text"
+                bind:value={addressHouseNumber}
+                placeholder="e.g. 1a"
+                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <div class="sm:col-span-6">
+              <label class="block text-slate-300 font-semibold mb-1">Address Addition (optional)</label>
+              <input
+                type="text"
+                bind:value={addressExtra}
+                placeholder="e.g. Building B, 2nd floor"
+                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-slate-300 font-semibold mb-1">Postal Code</label>
+              <input
+                type="text"
+                bind:value={addressPostalCode}
+                required
+                placeholder="e.g. 12345"
+                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <div class="sm:col-span-4">
+              <label class="block text-slate-300 font-semibold mb-1">City</label>
+              <input
+                type="text"
+                bind:value={addressCity}
+                required
+                placeholder="e.g. Musterstadt"
+                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <div class="sm:col-span-6">
+              <label class="block text-slate-300 font-semibold mb-1">Country</label>
+              <input
+                type="text"
+                bind:value={addressCountry}
+                placeholder="e.g. Germany"
+                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
+              />
+            </div>
             </div>
 
             <div>

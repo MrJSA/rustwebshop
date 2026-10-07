@@ -52,6 +52,18 @@ pub struct StoreSettings {
     pub order_prefix: String,
     pub order_date_enabled: bool,
     pub stock_display_template: String,
+    #[serde(default)]
+    pub address_street: String,
+    #[serde(default)]
+    pub address_house_number: String,
+    #[serde(default)]
+    pub address_extra: String,
+    #[serde(default)]
+    pub address_postal_code: String,
+    #[serde(default)]
+    pub address_city: String,
+    #[serde(default)]
+    pub address_country: String,
     #[serde(default = "default_true")]
     pub low_stock_alerts_enabled: bool,
     #[serde(default = "default_stock_managers")]
@@ -112,6 +124,12 @@ pub struct StoreSettingsDTO {
     pub order_prefix: String,
     pub order_date_enabled: bool,
     pub stock_display_template: String,
+    pub address_street: String,
+    pub address_house_number: String,
+    pub address_extra: String,
+    pub address_postal_code: String,
+    pub address_city: String,
+    pub address_country: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -161,6 +179,12 @@ pub struct UpdateStoreSettingsRequest {
     pub order_prefix: Option<String>,
     pub order_date_enabled: Option<bool>,
     pub stock_display_template: Option<String>,
+    pub address_street: Option<String>,
+    pub address_house_number: Option<String>,
+    pub address_extra: Option<String>,
+    pub address_postal_code: Option<String>,
+    pub address_city: Option<String>,
+    pub address_country: Option<String>,
     pub low_stock_alerts_enabled: Option<bool>,
     pub low_stock_alert_recipients_mode: Option<String>,
     pub low_stock_alert_custom_emails: Option<String>,

@@ -1724,6 +1724,12 @@ async fn check_email_verification_possible(pool: &PgPool, payload: &UpdateStoreS
     Ok(())
 }
 
+/// Rebuilds the single-line address used by invoices, emails and {{COMPANY_ADDRESS}}.
+const COMPOSE_COMPANY_ADDRESS_SQL: &str = "UPDATE store_settings SET company_address = concat_ws(', ', NULLIF(TRIM(concat_ws(' ', NULLIF(TRIM(address_street), ''), NULLIF(TRIM(address_house_number), ''))), ''), NULLIF(TRIM(address_extra), ''), NULLIF(TRIM(concat_ws(' ', NULLIF(TRIM(address_postal_code), ''), NULLIF(TRIM(address_city), ''))), ''), NULLIF(TRIM(address_country), '')) WHERE id = 1 AND (address_street <> '' OR address_postal_code <> '' OR address_city <> '')";
+
+/// Splits legacy single-line addresses and replaces demo texts in legal pages. Idempotent.
+const LEGAL_IDENTITY_SQL: &str = include_str!("../../migrations/0021_structured_address_and_legal_placeholders.sql");
+
 async fn admin_update_system_settings(
     State(pool): State<PgPool>,
     Extension(admin): Extension<CurrentAdmin>,
@@ -1841,6 +1847,39 @@ async fn admin_update_system_settings(
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // The structured address is the source; company_address is its single-line form for documents
+    let address = [
+        &payload.address_street, &payload.address_house_number, &payload.address_extra,
+        &payload.address_postal_code, &payload.address_city, &payload.address_country,
+    ];
+    if address.iter().any(|f| f.is_some()) {
+        sqlx::query(
+            r#"
+            UPDATE store_settings
+            SET address_street = COALESCE($1, address_street),
+                address_house_number = COALESCE($2, address_house_number),
+                address_extra = COALESCE($3, address_extra),
+                address_postal_code = COALESCE($4, address_postal_code),
+                address_city = COALESCE($5, address_city),
+                address_country = COALESCE($6, address_country)
+            WHERE id = 1
+            "#,
+        )
+        .bind(address[0].as_deref().map(str::trim))
+        .bind(address[1].as_deref().map(str::trim))
+        .bind(address[2].as_deref().map(str::trim))
+        .bind(address[3].as_deref().map(str::trim))
+        .bind(address[4].as_deref().map(str::trim))
+        .bind(address[5].as_deref().map(str::trim))
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        sqlx::query(COMPOSE_COMPANY_ADDRESS_SQL)
+            .execute(&pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     Ok(Json(json!({ "success": true })))
 }
@@ -3450,6 +3489,7 @@ async fn admin_import_store_data(
         let str_field = |k: &str| s.get(k).and_then(|v| v.as_str()).map(str::to_string);
         let bool_field = |k: &str| s.get(k).and_then(|v| v.as_bool());
         let json_field = |k: &str| s.get(k).filter(|v| !v.is_null()).cloned();
+        let legacy_address = (s.get("address_street").is_none() && str_field("company_address").is_some()).then(String::new);
         sqlx::query(
             r#"
             UPDATE store_settings
@@ -3500,6 +3540,12 @@ async fn admin_import_store_data(
                 low_stock_alert_recipients_mode = COALESCE($44, low_stock_alert_recipients_mode),
                 low_stock_alert_custom_emails = COALESCE($45, low_stock_alert_custom_emails),
                 low_stock_alert_selected_user_ids = COALESCE($46, low_stock_alert_selected_user_ids),
+                address_street = COALESCE($47, address_street),
+                address_house_number = COALESCE($48, address_house_number),
+                address_extra = COALESCE($49, address_extra),
+                address_postal_code = COALESCE($50, address_postal_code),
+                address_city = COALESCE($51, address_city),
+                address_country = COALESCE($52, address_country),
                 updated_at = NOW()
             WHERE id = 1
             "#
@@ -3550,6 +3596,13 @@ async fn admin_import_store_data(
         .bind(str_field("low_stock_alert_recipients_mode"))
         .bind(str_field("low_stock_alert_custom_emails"))
         .bind(json_field("low_stock_alert_selected_user_ids"))
+        // Older backups only have company_address: clear the parts so it is split again below
+        .bind(str_field("address_street").or(legacy_address.clone()))
+        .bind(str_field("address_house_number").or(legacy_address.clone()))
+        .bind(str_field("address_extra").or(legacy_address.clone()))
+        .bind(str_field("address_postal_code").or(legacy_address.clone()))
+        .bind(str_field("address_city").or(legacy_address.clone()))
+        .bind(str_field("address_country").or(legacy_address.clone()))
         .execute(&mut *tx)
         .await
         .map_err(|e| import_error("store settings".to_string(), e))?;
@@ -3733,6 +3786,15 @@ async fn admin_import_store_data(
         .execute(&mut *tx).await
         .map_err(|e| import_error(format!("page '{}'", p.slug), e))?;
     }
+
+    // Legacy single-line address and demo texts from older backups
+    sqlx::Executor::execute(&mut *tx, LEGAL_IDENTITY_SQL)
+        .await
+        .map_err(|e| import_error("updating address fields and legal texts".to_string(), e))?;
+    sqlx::query(COMPOSE_COMPANY_ADDRESS_SQL)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| import_error("composing the shop address".to_string(), e))?;
 
     // 5. Navigation — replaces the target's menus; flat first, then parents
     if !backup.navigation_menu.is_empty() {

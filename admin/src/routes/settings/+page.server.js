@@ -43,22 +43,9 @@ export async function load({ fetch }) {
   }
 
   return {
-    settings: Object.keys(settings).length > 0 ? settings : {
-      store_name: 'RustCraft Gear & Software',
-      store_subtitle: 'Rust Powered • ACID Fast',
-      company_address: 'Rustacean Way 42, 10115 Berlin, Germany',
-      support_email: 'support@rustwebshop.local',
-      phone: '+49 (0) 30 123456-78',
-      vat_id: 'DE314159265',
-      tax_notice: 'Gemäß § 19 UStG wird keine Umsatzsteuer berechnet (Kleinunternehmerstatus). / Small business exemption applies according to §19 UStG.',
-      currency: 'EUR',
-      currency_symbol: '€',
-      tax_rate_percent: 19.0,
-      order_prefix_enabled: true,
-      order_prefix: 'ORD',
-      order_date_enabled: true,
-      logo_url: ''
-    },
+    settings,
+    // Saving a form built from missing data would overwrite the real settings with blanks
+    settingsLoadFailed: Object.keys(settings).length === 0,
     paymentConfigs,
     shippingProviders,
     adminUsers

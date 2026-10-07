@@ -122,6 +122,10 @@
         <code class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-orange-400 font-mono">{"{{VAT_ID}}"}</code>,
         <code class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-orange-400 font-mono">{"{{TAX_NOTICE}}"}</code>.
       </p>
+      <p class="text-[11px] text-slate-400">
+        Also: {"{{LEGAL_NAME}}"}, {"{{STORE_OWNER}}"}, {"{{COMMERCIAL_REGISTER}}"}, and the address parts {"{{STREET_LINE}}"} (street + number), {"{{STREET}}"}, {"{{HOUSE_NUMBER}}"}, {"{{ADDRESS_EXTRA}}"}, {"{{CITY_LINE}}"} (postal code + city), {"{{POSTAL_CODE}}"}, {"{{CITY}}"}, {"{{COUNTRY}}"}.
+        A line whose placeholders are all empty is hidden on the shop.
+      </p>
     </div>
   </div>
 

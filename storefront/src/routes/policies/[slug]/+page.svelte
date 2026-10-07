@@ -28,6 +28,8 @@
       .replace(/\[(.*?)\]\((.*?)\)/gim, '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-orange-400 hover:text-orange-300 underline underline-offset-2">$1</a>')
       // Unordered lists
       .replace(/^\s*-\s+(.*$)/gim, '<li class="ml-4 list-disc text-slate-300 leading-relaxed">$1</li>')
+      // Markdown hard line breaks (two trailing spaces)
+      .replace(/ {2,}\n/g, '<br>\n')
       // Paragraphs
       .replace(/\n\n/gim, '</p><p class="my-4 text-slate-300 leading-relaxed text-sm">');
 

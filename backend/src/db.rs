@@ -56,6 +56,7 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, sqlx::Error> {
         ("0018_centralized_bom_parts", include_str!("../migrations/0018_centralized_bom_parts.sql")),
         ("0019_part_stock_sync_and_low_stock_alerts", include_str!("../migrations/0019_part_stock_sync_and_low_stock_alerts.sql")),
         ("0020_link_shared_parts", include_str!("../migrations/0020_link_shared_parts.sql")),
+        ("0021_structured_address_and_legal_placeholders", include_str!("../migrations/0021_structured_address_and_legal_placeholders.sql")),
     ];
 
     // If schema already existed prior to migration tracking, mark initial migrations 0001..0006 as applied if not tracked
