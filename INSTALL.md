@@ -77,6 +77,10 @@ ADMIN_DOMAIN=admin.example.com
 PUBLISH_ADDR=127.0.0.1
 ```
 
+> Any host names work, as long as shop and admin differ: the shop can live on the main domain (`example.com`)
+> or a subdomain (`shop.example.com`), and the admin on any other (sub)domain, including one below the shop
+> (`admin.shop.example.com`). Each needs its own DNS A/AAAA record pointing to this server.
+
 > Using your own web server instead? Leave `COMPOSE_PROFILES` empty, keep `PUBLISH_ADDR=127.0.0.1` and see [section 9](#9-using-your-own-reverse-proxy-nginx-apache-caddy-traefik).
 
 ## 6. Start

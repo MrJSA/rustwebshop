@@ -98,6 +98,12 @@
     <meta name="robots" content="noindex, nofollow" />
   {/if}
   <meta name="theme-color" content="#020617" />
+  {#if store.logo_url}
+    <link rel="icon" href={store.logo_url} />
+    <link rel="apple-touch-icon" href={store.logo_url} />
+  {:else}
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦀</text></svg>" />
+  {/if}
 </svelte:head>
 
 <svelte:window on:click={(e) => {

@@ -34,6 +34,8 @@ services:
       ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
       # Public storefront URL used in links inside emails (verification, password reset)
       SHOP_PUBLIC_URL: ${SHOP_PUBLIC_URL:-http://localhost:8080}
+      # Public admin URL used in links inside admin notification emails (low-stock alerts)
+      ADMIN_PUBLIC_URL: ${ADMIN_PUBLIC_URL:-http://localhost:4000}
       UPDATER_URL: http://updater:9000
       UPDATER_TOKEN_FILE: /secrets/updater_token
     # Debug access from this machine only — never exposed to the network
@@ -76,6 +78,8 @@ services:
       PORT: 4000
       BACKEND_INTERNAL_URL: http://backend:8000
       ORIGIN: ${ADMIN_PUBLIC_URL:-http://localhost:4000}
+      # Public storefront URL for the "Open Storefront" and policy preview links
+      SHOP_PUBLIC_URL: ${SHOP_PUBLIC_URL:-http://localhost:8080}
       BODY_SIZE_LIMIT: 50M
     ports:
       - "${PUBLISH_ADDR:-0.0.0.0}:${ADMIN_PORT:-4000}:4000"

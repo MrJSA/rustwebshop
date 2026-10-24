@@ -515,7 +515,7 @@ pub async fn send_part_low_stock_email(
 ) -> Result<(), String> {
     let loc_str = storage_location.filter(|s| !s.trim().is_empty()).unwrap_or("Not specified");
     let subject = format!("⚠️ Low Stock Warning: {} ({}) - {}", part_name, part_sku, settings.store_name);
-    let admin_url = format!("{}/admin/products", shop_public_url());
+    let admin_url = format!("{}/products?tab=stock", admin_public_url());
 
     let content = format!(
         r#"<p style="margin: 0 0 16px 0; font-size: 15px; color: #e2e8f0;">
@@ -832,6 +832,14 @@ pub fn html_escape(input: &str) -> String {
 pub fn shop_public_url() -> String {
     std::env::var("SHOP_PUBLIC_URL")
         .unwrap_or_else(|_| "http://localhost:8080".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Public base URL of the admin dashboard used in links inside admin emails (e.g. https://admin.shop.example).
+pub fn admin_public_url() -> String {
+    std::env::var("ADMIN_PUBLIC_URL")
+        .unwrap_or_else(|_| "http://localhost:4000".to_string())
         .trim_end_matches('/')
         .to_string()
 }

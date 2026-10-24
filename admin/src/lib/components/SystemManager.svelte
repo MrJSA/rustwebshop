@@ -182,7 +182,7 @@
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
         <div>
           <label for="shop-domain" class="block font-semibold text-slate-400 mb-1">Shop domain</label>
-          <input id="shop-domain" type="text" bind:value={shopDomain} placeholder="shop.example.com" class={inputClass} />
+          <input id="shop-domain" type="text" bind:value={shopDomain} placeholder="example.com or shop.example.com" class={inputClass} />
         </div>
         <div>
           <label for="admin-domain" class="block font-semibold text-slate-400 mb-1">Admin domain</label>

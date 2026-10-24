@@ -241,7 +241,7 @@
           <div>
             <span class="font-extrabold text-white text-base tracking-tight">RustCraft</span>
             <div class="text-[10px] text-orange-400 font-mono uppercase tracking-wider font-semibold">
-              Admin Console (Port 4000)
+              Admin Console
             </div>
           </div>
         </div>
@@ -305,11 +305,11 @@
       <!-- Bottom Storefront Link -->
       <div class="p-4 border-t border-slate-800 bg-slate-900/90">
         <a
-          href="http://localhost:8080"
+          href={data.shopUrl}
           target="_blank"
           class="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center justify-center gap-2 transition-colors border border-slate-700"
         >
-          <span>Open Storefront (8080)</span>
+          <span>Open Storefront</span>
           <ExternalLink size={13} class="text-orange-400" />
         </a>
       </div>
@@ -377,7 +377,7 @@
           </div>
 
           <a
-            href="http://localhost:8080"
+            href={data.shopUrl}
             target="_blank"
             class="px-4 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold transition-all shadow-md flex items-center gap-1.5"
           >

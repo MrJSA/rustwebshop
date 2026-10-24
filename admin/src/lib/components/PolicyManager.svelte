@@ -1,5 +1,6 @@
 <script>
   import { FileText, Save, Check, Eye, ExternalLink, Bold, Italic, Heading, List, Link, Code, Info } from 'lucide-svelte';
+  import { page } from '$app/stores';
 
   export let pages = [];
 
@@ -83,7 +84,7 @@
 
     <div class="flex items-center gap-3">
       <a
-        href="http://localhost:8080/policies/{selectedSlug}"
+        href="{$page.data.shopUrl}/policies/{selectedSlug}"
         target="_blank"
         class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors border border-slate-700"
       >
