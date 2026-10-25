@@ -100,6 +100,11 @@
     { value: 'password_reset', label: 'Password Reset' },
     { value: 'low_stock_alert', label: 'BOM Low Stock Inventory Alert' },
     { value: 'backup_failed', label: 'Automatic Backup Failed' },
+    { value: 'refund', label: 'Refund with Credit Note' },
+    { value: 'newsletter_confirm', label: 'Newsletter: Confirm Subscription (Double Opt-in)' },
+    { value: 'newsletter', label: 'Newsletter: Sample Issue' },
+    { value: 'withdrawal_confirmation', label: 'Withdrawal: Confirmation to Customer' },
+    { value: 'withdrawal_notification', label: 'Withdrawal: Notification to Shop' },
   ];
   let isSendingTest = false;
   let testResult = null; // { success: boolean, message: string }

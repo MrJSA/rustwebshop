@@ -73,6 +73,19 @@
     }
   }
 
+  async function resetDownloads() {
+    modalActionError = '';
+    modalActionMessage = '';
+    try {
+      const res = await fetch(`/api/v1/admin/orders/${selectedOrder.id}/downloads/reset`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'Reset failed');
+      modalActionMessage = body.files > 0 ? `Download limits reset for ${body.files} file(s).` : 'The customer has not opened any download yet — nothing to reset.';
+    } catch (e) {
+      modalActionError = e.message;
+    }
+  }
+
   async function handleUpdateStatus() {
     modalActionError = '';
     modalActionMessage = '';
@@ -593,6 +606,34 @@
         </div>
       </div>
 
+      <!-- Business order / reverse charge -->
+      {#if selectedOrder.buyer_company || selectedOrder.buyer_vat_id}
+        <div class="border-t border-slate-800 pt-4 text-xs space-y-1">
+          <span class="font-bold text-white block">Business customer</span>
+          {#if selectedOrder.buyer_company}<div class="text-slate-300">{selectedOrder.buyer_company}</div>{/if}
+          {#if selectedOrder.buyer_vat_id}<div class="text-slate-300 font-mono">VAT ID {selectedOrder.buyer_vat_id}</div>{/if}
+          {#if selectedOrder.reverse_charge}
+            <div class="text-emerald-300">VAT-free EU business order (reverse charge / intra-Community supply) — include it in your recapitulative statement.</div>
+            {#if selectedOrder.vat_check}
+              <div class="text-[11px] text-slate-500">
+                VIES check {new Date(selectedOrder.vat_check.checked_at).toLocaleString()}{#if selectedOrder.vat_check.request_identifier} · consultation number {selectedOrder.vat_check.request_identifier}{/if}{#if selectedOrder.vat_check.name} · {selectedOrder.vat_check.name}{/if}
+              </div>
+            {/if}
+          {/if}
+        </div>
+      {/if}
+
+      <!-- Digital downloads of this order -->
+      {#if selectedOrderItems.some((i) => i.is_digital)}
+        <div class="border-t border-slate-800 pt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <div>
+            <span class="font-bold text-white block">Digital downloads</span>
+            <span class="text-[11px] text-slate-400">The customer downloads through personal, counted links. Reset gives fresh downloads and restarts the validity.</span>
+          </div>
+          <button type="button" on:click={resetDownloads} class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold">Reset download limits</button>
+        </div>
+      {/if}
+
       <!-- Fulfillment Documents Preview & PDF Section -->
       <div class="border-t border-slate-800 pt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -618,6 +659,18 @@
             <FileText size={15} class="text-emerald-400" />
             <span>Preview Tax Invoice</span>
           </button>
+
+          {#if selectedOrder.payment_status === 'refunded'}
+            <a
+              href={`/api/v1/admin/orders/${selectedOrder.id}/invoice?credit_note=true`}
+              target="_blank"
+              rel="noopener"
+              class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700 flex items-center gap-2"
+            >
+              <FileText size={15} class="text-sky-400" />
+              <span>Credit Note</span>
+            </a>
+          {/if}
         </div>
       </div>
     </div>

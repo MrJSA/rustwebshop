@@ -567,7 +567,7 @@ pub async fn send_order_created_email(settings: &StoreSettings, to_email: &str, 
         "{}{}{}",
         paragraph(&format!(
             "Hello {}, thank you for your order! We have received it and will take care of it right away.",
-            html_escape(&inv.buyer.name)
+            html_escape(inv.buyer.person())
         )),
         summary.html(),
         small(next)
@@ -598,7 +598,7 @@ pub async fn send_payment_received_email(
         "{}{}{}{}",
         paragraph(&format!(
             "Hello {}, we have received your payment of <strong>{}</strong>. {}",
-            html_escape(&inv.buyer.name),
+            html_escape(inv.buyer.person()),
             money(inv.payable_cents, &inv.currency_symbol),
             next
         )),
@@ -741,6 +741,173 @@ pub async fn send_backup_failed_email(
     send_email_raw(settings, to_email, &subject, &html).await
 }
 
+// ------------------------------------------------------------------ newsletter & withdrawal
+
+/// Double opt-in: the subscription only becomes active after this link was clicked.
+pub async fn send_newsletter_confirmation_email(settings: &StoreSettings, to_email: &str, token: &str) -> Result<(), String> {
+    let url = format!("{}/newsletter/confirm?token={}", shop_public_url(), token);
+    let subject = format!("Please confirm your newsletter subscription - {}", settings.store_name);
+    let content = format!(
+        "{}{}{}{}",
+        paragraph(&format!(
+            "Someone — hopefully you — signed up for the newsletter of <strong>{}</strong> with this email address. Please confirm that you want to receive it:",
+            html_escape(&settings.store_name)
+        )),
+        button(&url, "Yes, subscribe me", C_ACCENT),
+        link_fallback(&url),
+        small("If you did not sign up, simply ignore this email — you will not be subscribed and will not hear from us again. You can unsubscribe at any time with the link in every newsletter.")
+    );
+    let html = render_email_layout(settings, "Confirm your newsletter subscription.", "Confirm your subscription", C_ACCENT, &content);
+    send_email_raw(settings, to_email, &subject, &html).await
+}
+
+/// Minimal, safe Markdown for newsletters: headings, paragraphs, lists, **bold**, *italic*, [links](https://…).
+pub fn simple_markdown(md: &str) -> String {
+    fn inline(text: &str) -> String {
+        let mut s = html_escape(text);
+        // Links: [label](https://url), scanned left to right
+        let mut from = 0;
+        while let Some(a) = s[from..].find('[').map(|i| from + i) {
+            let Some(b) = s[a..].find("](").map(|i| a + i) else { break };
+            let Some(c) = s[b..].find(')').map(|i| b + i) else { break };
+            let label = s[a + 1..b].to_string();
+            let url = s[b + 2..c].to_string();
+            let link = if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:") {
+                format!(r#"<a href="{}" style="color: {}; text-decoration: underline;">{}</a>"#, url, C_ACCENT, label)
+            } else {
+                label
+            };
+            s = format!("{}{}{}", &s[..a], link, &s[c + 1..]);
+            from = a + link.len();
+        }
+        for (marker, tag) in [("**", "strong"), ("*", "em")] {
+            let mut out = String::new();
+            let mut open = false;
+            for (i, part) in s.split(marker).enumerate() {
+                if i > 0 {
+                    out.push_str(&if open { format!("</{}>", tag) } else { format!("<{}>", tag) });
+                    open = !open;
+                }
+                out.push_str(part);
+            }
+            if open {
+                out.push_str(&format!("</{}>", tag));
+            }
+            s = out;
+        }
+        s
+    }
+    let mut html = String::new();
+    let mut list = false;
+    let mut para: Vec<String> = Vec::new();
+    let flush = |para: &mut Vec<String>, html: &mut String| {
+        if !para.is_empty() {
+            html.push_str(&paragraph(&para.join("<br/>")));
+            para.clear();
+        }
+    };
+    for line in md.lines() {
+        let t = line.trim();
+        if let Some(item) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
+            flush(&mut para, &mut html);
+            if !list {
+                html.push_str(r#"<ul style="margin: 0 0 16px 0; padding-left: 22px;">"#);
+                list = true;
+            }
+            html.push_str(&format!("<li style=\"margin-bottom: 6px;\">{}</li>", inline(item)));
+            continue;
+        }
+        if list {
+            html.push_str("</ul>");
+            list = false;
+        }
+        if t.is_empty() {
+            flush(&mut para, &mut html);
+        } else if let Some(h) = t.strip_prefix("## ").or_else(|| t.strip_prefix("# ")) {
+            flush(&mut para, &mut html);
+            html.push_str(&format!(r#"<h2 style="margin: 24px 0 12px 0; font-size: 18px; color: {};">{}</h2>"#, C_HEAD, inline(h)));
+        } else {
+            para.push(inline(t));
+        }
+    }
+    if list {
+        html.push_str("</ul>");
+    }
+    flush(&mut para, &mut html);
+    html
+}
+
+pub async fn send_newsletter_email(settings: &StoreSettings, to_email: &str, subject: &str, body_markdown: &str, unsubscribe_token: &str) -> Result<(), String> {
+    let unsubscribe_url = format!("{}/newsletter/unsubscribe?token={}", shop_public_url(), unsubscribe_token);
+    let content = format!(
+        "{}{}",
+        simple_markdown(body_markdown),
+        small(&format!(
+            "You receive this newsletter because you subscribed at {}. <a href=\"{}\" style=\"color: {};\">Unsubscribe</a> at any time with one click.",
+            html_escape(&settings.store_name),
+            html_escape(&unsubscribe_url),
+            C_MUTED
+        ))
+    );
+    let html = render_email_layout(settings, subject, &html_escape(subject), C_ACCENT, &content);
+    send_email_raw(settings, to_email, subject, &html).await
+}
+
+pub struct WithdrawalDetails<'a> {
+    pub reference: &'a str,
+    pub received_at: chrono::DateTime<chrono::Utc>,
+    pub order_number: &'a str,
+    pub customer_name: &'a str,
+    pub customer_email: &'a str,
+    pub items: &'a str,
+    pub message: &'a str,
+}
+
+fn withdrawal_rows(w: &WithdrawalDetails) -> Vec<(&'static str, String)> {
+    let mut rows = vec![
+        ("Received", w.received_at.format("%d.%m.%Y %H:%M UTC").to_string()),
+        ("Reference", html_escape(w.reference)),
+        ("Order number", html_escape(w.order_number)),
+        ("Name", html_escape(w.customer_name)),
+        ("Email", html_escape(w.customer_email)),
+    ];
+    rows.push(("Items", if w.items.trim().is_empty() { "All items of the order".to_string() } else { html_escape(w.items) }));
+    if !w.message.trim().is_empty() {
+        rows.push(("Message", html_escape(w.message)));
+    }
+    rows
+}
+
+/// Confirmation of receipt on a durable medium, required for the withdrawal function.
+pub async fn send_withdrawal_confirmation_email(settings: &StoreSettings, w: &WithdrawalDetails<'_>) -> Result<(), String> {
+    let subject = format!("We have received your withdrawal for order {} - {}", w.order_number, settings.store_name);
+    let content = format!(
+        "{}{}{}",
+        paragraph(&format!(
+            "Hello {}, we confirm that we have received your declaration of withdrawal from the contract for order <strong>{}</strong>.",
+            html_escape(w.customer_name),
+            html_escape(w.order_number)
+        )),
+        details_box(&withdrawal_rows(w)),
+        small("Please send physical goods back to us within 14 days, unless we agreed otherwise. We will refund your payment within 14 days of receiving your withdrawal — for goods not before they have arrived back or you have proven that you sent them. Please keep this email as proof of your withdrawal.")
+    );
+    let html = render_email_layout(settings, "Confirmation of your withdrawal.", "Withdrawal received", "#0284c7", &content);
+    send_email_raw(settings, w.customer_email, &subject, &html).await
+}
+
+pub async fn send_withdrawal_notification_email(settings: &StoreSettings, to_email: &str, w: &WithdrawalDetails<'_>) -> Result<(), String> {
+    let subject = format!("Withdrawal received: order {}", w.order_number);
+    let admin_url = format!("{}/orders?tab=withdrawals", admin_public_url());
+    let content = format!(
+        "{}{}{}",
+        paragraph(&format!("A customer withdrew from order <strong>{}</strong> using the withdrawal button in the shop.", html_escape(w.order_number))),
+        details_box(&withdrawal_rows(w)),
+        button(&admin_url, "Open withdrawals", "#0284c7")
+    );
+    let html = render_email_layout(settings, &format!("Withdrawal for order {}.", w.order_number), "Withdrawal received", "#0284c7", &content);
+    send_email_raw(settings, to_email, &subject, &html).await
+}
+
 // ------------------------------------------------------------------ invoices for emails
 
 /// The invoice PDF (a ZUGFeRD / Factur-X e-invoice when enabled) for the payment confirmation.
@@ -832,6 +999,49 @@ pub async fn send_test_email_by_type(
             let attachments = invoice_attachments(settings, &order, &items).await;
             send_payment_received_email(settings, to_email, &OrderSummary::new(&order, &items, settings), attachments).await
         }
+        "refund" => {
+            let (order, items) = sample_order(settings);
+            let summary = OrderSummary::new(&order, &items, settings);
+            let credit_note = summary.invoice.credit_note("ORD-10042-CN".to_string(), chrono::Utc::now().date_naive());
+            let settings_c = settings.clone();
+            let shop_url = shop_public_url();
+            let rendered = tokio::task::spawn_blocking(move || {
+                let logo = crate::services::branding::logo_png(&settings_c, 600);
+                let xml = settings_c.einvoice_enabled.then(|| credit_note.to_cii_xml());
+                crate::services::invoice_pdf::render(&credit_note, logo.as_deref(), &shop_url, xml.as_deref())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            let attachment = EmailAttachment { filename: "Credit-Note-ORD-10042-CN.pdf".to_string(), content_type: "application/pdf".to_string(), data: rendered };
+            send_refund_email(settings, to_email, &summary, vec![attachment]).await
+        }
+        "newsletter_confirm" => send_newsletter_confirmation_email(settings, to_email, "sample-confirmation-token").await,
+        "newsletter" => {
+            send_newsletter_email(
+                settings,
+                to_email,
+                "New in the shop",
+                "## Fresh arrivals\n\nWe have **new products** for you:\n\n- Pro Mechanical Keyboard\n- USB-C Cable 2 m\n\n[Visit the shop](https://example.com)",
+                "sample-unsubscribe-token",
+            )
+            .await
+        }
+        "withdrawal_confirmation" | "withdrawal_notification" => {
+            let w = WithdrawalDetails {
+                reference: "W-1A2B3C",
+                received_at: chrono::Utc::now(),
+                order_number: "ORD-10042",
+                customer_name: "Erika Musterfrau",
+                customer_email: to_email,
+                items: "",
+                message: "The keyboard does not fit my desk.",
+            };
+            if email_type == Some("withdrawal_confirmation") {
+                send_withdrawal_confirmation_email(settings, &w).await
+            } else {
+                send_withdrawal_notification_email(settings, to_email, &w).await
+            }
+        }
         "order_shipped" => send_order_shipped_email(settings, to_email, "ORD-10042", "DHL9876543210DE").await,
         "back_in_stock" => {
             let sample_url = format!("{}/products", shop_public_url());
@@ -889,9 +1099,67 @@ pub async fn send_order_created_notification(pool: &sqlx::PgPool, order_number: 
 pub async fn send_payment_received_notification(pool: &sqlx::PgPool, order_number: &str) {
     let Some((settings, order, items)) = load_order(pool, order_number).await else { return };
     let summary = OrderSummary::new(&order, &items, &settings);
-    let attachments = invoice_attachments(&settings, &order, &items).await;
+    // The invoice is issued (and stored unchangeable) now that the payment is confirmed
+    let attachments = match crate::services::invoice_store::ensure_invoice(pool, order.id).await {
+        Ok(Some(doc)) if settings.email_invoice_pdf => vec![pdf_attachment(doc)],
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            error!("Invoice for order {} could not be issued: {}", order_number, e);
+            Vec::new()
+        }
+    };
     if let Err(e) = send_payment_received_email(&settings, &order.customer_email, &summary, attachments).await {
         error!("Payment confirmation for {} not sent: {}", order_number, e);
+    }
+}
+
+fn pdf_attachment(doc: crate::services::invoice_store::StoredDocument) -> EmailAttachment {
+    EmailAttachment { filename: doc.file_name, content_type: "application/pdf".to_string(), data: doc.pdf }
+}
+
+pub async fn send_refund_email(
+    settings: &StoreSettings,
+    to_email: &str,
+    summary: &OrderSummary,
+    attachments: Vec<EmailAttachment>,
+) -> Result<(), String> {
+    let inv = &summary.invoice;
+    let subject = format!("Refund for order {} - {}", inv.order_number, settings.store_name);
+    let note = if attachments.is_empty() {
+        String::new()
+    } else {
+        small("The credit note cancelling your invoice is attached as a PDF. Please keep it for your records.")
+    };
+    let content = format!(
+        "{}{}{}",
+        paragraph(&format!(
+            "Hello {}, we have refunded <strong>{}</strong> for your order <strong>{}</strong> via {}. Depending on your payment method it can take a few days until the amount shows up in your account.",
+            html_escape(inv.buyer.person()),
+            money(inv.payable_cents, &inv.currency_symbol),
+            html_escape(&inv.order_number),
+            html_escape(&inv.payment_label)
+        )),
+        summary.html(),
+        note
+    );
+    let html = render_email_layout(settings, &format!("Your refund for order {} is on its way.", inv.order_number), "Refund issued", "#0284c7", &content);
+    send_email(settings, to_email, &subject, &html, attachments).await
+}
+
+/// After a refund: credit note (stored) and email to the customer.
+pub async fn send_refund_notification(pool: &sqlx::PgPool, order_id: Uuid) {
+    let Ok((settings, order, items)) = crate::services::invoice_store::load_order(pool, order_id).await else { return };
+    let attachments = match crate::services::invoice_store::ensure_credit_note(pool, order_id).await {
+        Ok(Some(doc)) => vec![pdf_attachment(doc)],
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            error!("Credit note for order {} could not be issued: {}", order.order_number, e);
+            Vec::new()
+        }
+    };
+    let summary = OrderSummary::new(&order, &items, &settings);
+    if let Err(e) = send_refund_email(&settings, &order.customer_email, &summary, attachments).await {
+        error!("Refund email for {} not sent: {}", order.order_number, e);
     }
 }
 
@@ -1068,5 +1336,19 @@ mod tests {
         assert!(html.contains("Pro Mechanical Keyboard"));
         assert!(html.contains("79,60 €"));
         assert!(html.contains("incl."));
+    }
+}
+
+#[cfg(test)]
+mod markdown_tests {
+    use super::simple_markdown;
+
+    #[test]
+    fn newsletter_markdown_is_safe_and_formatted() {
+        let html = simple_markdown("# Hi\n\nSee [A](https://a.example) and [B](https://b.example) **now** *please*\n\n- one\n- two\n\n<script>x</script> [bad](javascript:alert(1))");
+        assert!(html.contains(r#"href="https://a.example""#) && html.contains(r#"href="https://b.example""#));
+        assert!(html.contains("<strong>now</strong>") && html.contains("<em>please</em>"));
+        assert!(html.contains("<li") && html.contains("</ul>"));
+        assert!(!html.contains("<script>") && !html.contains("javascript:"));
     }
 }

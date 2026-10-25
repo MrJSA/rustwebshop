@@ -3,6 +3,7 @@
   import { cart, cartCount, cartSubtotal, isCartOpen } from '$lib/stores/cart.js';
   import { customer } from '$lib/stores/customer.js';
   import CookieBanner from '$lib/components/CookieBanner.svelte';
+  import NewsletterSignup from '$lib/components/NewsletterSignup.svelte';
   import { page } from '$app/stores';
   import { PRIVATE_PATH } from '$lib/seo.js';
   import {
@@ -731,6 +732,12 @@
         </div>
       </div>
 
+      {#if store.newsletter_enabled}
+        <div class="max-w-xl mb-8">
+          <NewsletterSignup />
+        </div>
+      {/if}
+
       <!-- FULL WIDTH BOTTOM COPYRIGHT BAR -->
       <div class="pt-8 border-t border-slate-900 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
         <div>
@@ -741,6 +748,9 @@
           {/if}
         </div>
         <div class="flex flex-wrap items-center gap-4 text-[11px] text-slate-400">
+          <!-- Withdrawal function: always visible (Art. 11a Consumer Rights Directive) -->
+          <a href="/withdraw" class="font-bold text-orange-400 hover:text-orange-300 underline underline-offset-2">Withdraw from contract here</a>
+          <span>&bull;</span>
           <a href="/policies/privacy-policy" class="hover:text-white transition-colors">Privacy Policy</a>
           <span>&bull;</span>
           <a href="/policies/terms-conditions" class="hover:text-white transition-colors">Terms & Conditions</a>

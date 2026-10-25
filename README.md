@@ -75,5 +75,11 @@ Database migrations run automatically when the backend starts.
 - Export and import of store data as JSON: settings, catalogue incl. parts and stock, pages, menus, shipping, coupons and payment settings. The import also works on a different installation. Passwords and API keys are never exported.
 - Media library with download of all files as ZIP. Images are converted to WebP on upload.
 - Invoices as PDF, attached automatically to the payment confirmation email. Optional EN 16931 e-invoices (ZUGFeRD / Factur-X, PDF/A-3 with embedded XML); the XML can also be downloaded per order.
+- Optional sale prices that show the lowest price of the last 30 days (§ 11 PAngV), unit prices and the VAT note next to every price.
+- Optional product reviews from verified buyers (with approval) and a double opt-in newsletter with campaigns.
+- Protected digital downloads (personal links with download limit and validity).
+- Product weights and weight-based shipping rates; delivery times; product safety information (GPSR).
+- VAT-free orders for EU businesses with a live VIES check (intra-Community supply / reverse charge).
+- Withdrawal button with confirmation emails, invoices stored unchangeable and credit notes on refunds.
 - Automatic daily, weekly or monthly backups of the complete database and all uploads to a private GitHub repository (see [BACKUP.md](BACKUP.md)).
 - Updates from the admin with an automatic database backup (see [INSTALL.md](INSTALL.md#11-updates)).

@@ -70,6 +70,7 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let eu_business_vat_free = crate::services::vies::available(&settings);
     let store_dto = StoreSettingsDTO {
         store_name: settings.store_name,
         currency: settings.currency,
@@ -114,6 +115,15 @@ async fn get_store_info(State(pool): State<PgPool>) -> Result<impl IntoResponse,
         address_postal_code: settings.address_postal_code,
         address_city: settings.address_city,
         address_country: settings.address_country,
+        tax_number: settings.tax_number,
+        reviews_enabled: settings.reviews_enabled,
+        newsletter_enabled: settings.newsletter_enabled,
+        sale_prices_enabled: settings.sale_prices_enabled,
+        eu_business_vat_free,
+        default_delivery_time: settings.default_delivery_time,
+        download_limit: settings.download_limit,
+        download_days: settings.download_days,
+        gpsr_default_manufacturer: settings.gpsr_default_manufacturer,
     };
 
     let payment_providers = sqlx::query_as::<_, PaymentProviderRow>(
@@ -208,7 +218,7 @@ async fn list_products(
 
     let products = sqlx::query_as::<_, Product>(
         r#"
-        SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent
+        SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent, weight_grams, delivery_time, sale_starts_at, sale_ends_at, gpsr_manufacturer, gpsr_responsible_person, gpsr_safety_info, unit_content, unit_content_unit, length_mm, width_mm, height_mm
         FROM products
         WHERE is_active = true
           AND ($1::text[] IS NULL OR category = ANY($1) OR subcategory = ANY($1))
@@ -229,7 +239,7 @@ async fn list_products(
     // One query for all variants instead of one per product
     let ids: Vec<Uuid> = products.iter().map(|p| p.id).collect();
     let all_variants = sqlx::query_as::<_, ProductVariant>(
-        "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = ANY($1) ORDER BY created_at ASC"
+        "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images, weight_grams, sale_price_cents, length_mm, width_mm, height_mm FROM product_variants WHERE product_id = ANY($1) ORDER BY created_at ASC"
     )
     .bind(&ids)
     .fetch_all(&pool)
@@ -241,13 +251,14 @@ async fn list_products(
         by_product.entry(v.product_id).or_default().push(v);
     }
 
-    let result: Vec<ProductWithVariants> = products
+    let mut result: Vec<ProductWithVariants> = products
         .into_iter()
         .map(|product| {
             let variants = by_product.remove(&product.id).unwrap_or_default();
             ProductWithVariants { product: public_product(product), variants }
         })
         .collect();
+    attach_pricing(&pool, &mut result).await;
 
     Ok(Json(result))
 }
@@ -257,7 +268,7 @@ async fn get_product_by_slug(
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let product = sqlx::query_as::<_, Product>(
-        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE slug = $1 AND is_active = true"
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent, weight_grams, delivery_time, sale_starts_at, sale_ends_at, gpsr_manufacturer, gpsr_responsible_person, gpsr_safety_info, unit_content, unit_content_unit, length_mm, width_mm, height_mm FROM products WHERE slug = $1 AND is_active = true"
     )
     .bind(slug)
     .fetch_optional(&pool)
@@ -266,14 +277,17 @@ async fn get_product_by_slug(
     .ok_or((StatusCode::NOT_FOUND, "Product not found".to_string()))?;
 
     let variants = sqlx::query_as::<_, ProductVariant>(
-        "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
+        "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images, weight_grams, sale_price_cents, length_mm, width_mm, height_mm FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
     )
     .bind(product.id)
     .fetch_all(&pool)
     .await
     .unwrap_or_default();
 
-    Ok(Json(ProductWithVariants { product: public_product(product), variants }))
+    let mut result = [ProductWithVariants { product: public_product(product), variants }];
+    attach_pricing(&pool, &mut result).await;
+    let [result] = result;
+    Ok(Json(result))
 }
 
 async fn validate_cart(
@@ -358,9 +372,12 @@ async fn get_shipping_rates(
 
     if let Some(z) = zone {
         let rates = sqlx::query_as::<_, ShippingRate>(
-            "SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days FROM shipping_rates WHERE zone_id = $1 ORDER BY price_cents ASC"
+            "SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm FROM shipping_rates
+             WHERE zone_id = $1 AND ($2::int IS NULL OR ($2 >= min_weight_g AND (max_weight_g <= 0 OR $2 <= max_weight_g)))
+             ORDER BY price_cents ASC"
         )
         .bind(z.id)
+        .bind(query.total_weight_g)
         .fetch_all(&pool)
         .await
         .unwrap_or_default();
@@ -449,53 +466,14 @@ async fn lookup_order(
         let is_digital: bool = r.get("is_digital");
         let orig_url: Option<String> = r.try_get("download_url").ok().flatten();
 
-        let mut files = Vec::new();
+        // Never hand out download links for unpaid, failed or refunded orders; files are only
+        // reachable through personal, counted links (never their storage address)
         let order_paid = pay_status == "paid";
-        // Never hand out download links for unpaid, failed or refunded orders
-        let mut effective_url = if order_paid { orig_url.clone() } else { None };
-
-        if is_digital && order_paid {
-            if let Some(product_id) = pid {
-                let live_prod = sqlx::query("SELECT digital_download_url FROM products WHERE id = $1")
-                    .bind(product_id)
-                    .fetch_optional(&pool)
-                    .await
-                    .ok()
-                    .flatten();
-                let live_url = live_prod.and_then(|lp| lp.try_get::<Option<String>, _>("digital_download_url").ok().flatten());
-                effective_url = live_url.or(orig_url);
-
-                if let Some(ref u) = effective_url {
-                    if let Ok(json_files) = serde_json::from_str::<Vec<serde_json::Value>>(u) {
-                        for f in json_files {
-                            let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("File");
-                            let link = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                            if !link.is_empty() {
-                                files.push(json!({ "name": name, "url": link }));
-                            }
-                        }
-                    } else if !u.trim().is_empty() {
-                        files.push(json!({ "name": format!("{} Package", ptitle), "url": u }));
-                    }
-                }
-
-                // Also BOM files
-                let bom_parts = sqlx::query("SELECT part_name, notes FROM product_parts WHERE product_id = $1 AND part_sku = 'DIGITAL_FILE'")
-                    .bind(product_id)
-                    .fetch_all(&pool)
-                    .await
-                    .unwrap_or_default();
-                for bp in bom_parts {
-                    let pname: String = bp.get("part_name");
-                    let furl: Option<String> = bp.get("notes");
-                    if let Some(fu) = furl {
-                        if !fu.trim().is_empty() && !files.iter().any(|f| f.get("url").and_then(|v| v.as_str()) == Some(&fu)) {
-                            files.push(json!({ "name": pname, "url": fu }));
-                        }
-                    }
-                }
-            }
-        }
+        let files = match (is_digital && order_paid, pid) {
+            (true, Some(product_id)) => crate::routes::shop_features::order_download_files(&pool, order_id, product_id, &ptitle, orig_url.as_deref()).await,
+            _ => Vec::new(),
+        };
+        let effective_url: Option<String> = None;
 
         items.push(json!({
             "product_id": pid,
@@ -626,6 +604,10 @@ async fn public_get_page(
     .unwrap_or(None);
 
     if let Some(s) = settings_opt {
+        if page.content_markdown.contains("{{FEATURE_PRIVACY_SECTIONS}}") {
+            let sections = feature_privacy_sections(&pool, &s).await;
+            page.content_markdown = page.content_markdown.replace("{{FEATURE_PRIVACY_SECTIONS}}", &sections);
+        }
         page.content_markdown = render_page_placeholders(&page.content_markdown, &s);
     }
 
@@ -668,7 +650,7 @@ async fn fetch_all_active_providers_with_rates(pool: &PgPool) -> Result<Vec<Ship
         let mut zones_with_rates = Vec::new();
         for z in zones {
             let rates = sqlx::query_as::<_, ShippingRate>(
-                "SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days FROM shipping_rates WHERE zone_id = $1 ORDER BY price_cents ASC"
+                "SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm FROM shipping_rates WHERE zone_id = $1 ORDER BY price_cents ASC"
             )
             .bind(z.id)
             .fetch_all(pool)
@@ -1173,50 +1155,14 @@ async fn public_get_customer_orders(
         let shipping_addr: serde_json::Value = r.try_get("shipping_address").unwrap_or(json!({}));
 
         let mut items_with_files = Vec::new();
+        let paid = r.get::<String, _>("payment_status") == "paid";
         for mut item in items {
-            let mut files = Vec::new();
-            if item.is_digital {
-                if let Some(pid) = item.product_id {
-                    let live_prod = sqlx::query("SELECT digital_download_url FROM products WHERE id = $1")
-                        .bind(pid)
-                        .fetch_optional(&pool)
-                        .await
-                        .ok()
-                        .flatten();
-                    let live_url = live_prod.and_then(|lp| lp.try_get::<Option<String>, _>("digital_download_url").ok().flatten());
-                    let effective_url = live_url.or_else(|| item.download_url.clone());
-                    if let Some(ref u) = effective_url {
-                        item.download_url = Some(u.clone());
-                        if let Ok(json_files) = serde_json::from_str::<Vec<serde_json::Value>>(u) {
-                            for f in json_files {
-                                let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("File");
-                                let link = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                                if !link.is_empty() {
-                                    files.push(json!({ "name": name, "url": link }));
-                                }
-                            }
-                        } else if !u.trim().is_empty() {
-                            files.push(json!({ "name": format!("{} File", item.product_title), "url": u }));
-                        }
-                    }
-
-                    // Also BOM files
-                    let bom_parts = sqlx::query("SELECT part_name, notes FROM product_parts WHERE product_id = $1 AND part_sku = 'DIGITAL_FILE'")
-                        .bind(pid)
-                        .fetch_all(&pool)
-                        .await
-                        .unwrap_or_default();
-                    for bp in bom_parts {
-                        let pname: String = bp.get("part_name");
-                        let furl: Option<String> = bp.get("notes");
-                        if let Some(fu) = furl {
-                            if !fu.trim().is_empty() && !files.iter().any(|f| f.get("url").and_then(|v| v.as_str()) == Some(&fu)) {
-                                files.push(json!({ "name": pname, "url": fu }));
-                            }
-                        }
-                    }
-                }
-            }
+            // Personal, counted download links for paid orders only; the storage address stays hidden
+            let files = match (item.is_digital && paid, item.product_id) {
+                (true, Some(pid)) => crate::routes::shop_features::order_download_files(&pool, order_id, pid, &item.product_title, item.download_url.as_deref()).await,
+                _ => Vec::new(),
+            };
+            item.download_url = None;
             let mut item_json = serde_json::to_value(&item).unwrap_or(json!({}));
             if let Some(obj) = item_json.as_object_mut() {
                 obj.insert("files".to_string(), json!(files));
@@ -1454,7 +1400,7 @@ async fn public_get_related_products(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let current_product = sqlx::query_as::<_, Product>(
-        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE id = $1"
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent, weight_grams, delivery_time, sale_starts_at, sale_ends_at, gpsr_manufacturer, gpsr_responsible_person, gpsr_safety_info, unit_content, unit_content_unit, length_mm, width_mm, height_mm FROM products WHERE id = $1"
     )
     .bind(id)
     .fetch_optional(&pool)
@@ -1464,7 +1410,7 @@ async fn public_get_related_products(
 
     let related = sqlx::query_as::<_, Product>(
         r#"
-        SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent
+        SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent, weight_grams, delivery_time, sale_starts_at, sale_ends_at, gpsr_manufacturer, gpsr_responsible_person, gpsr_safety_info, unit_content, unit_content_unit, length_mm, width_mm, height_mm
         FROM products 
         WHERE is_active = true AND id != $1
         ORDER BY (category = $2) DESC, (subcategory = $3) DESC, created_at DESC
@@ -1481,7 +1427,7 @@ async fn public_get_related_products(
     let mut result = Vec::new();
     for p in related {
         let variants = sqlx::query_as::<_, ProductVariant>(
-            "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
+            "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images, weight_grams, sale_price_cents, length_mm, width_mm, height_mm FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
         )
         .bind(p.id)
         .fetch_all(&pool)
@@ -1491,6 +1437,7 @@ async fn public_get_related_products(
         result.push(ProductWithVariants { product: public_product(p), variants });
     }
 
+    attach_pricing(&pool, &mut result).await;
     Ok(Json(result))
 }
 
@@ -1530,7 +1477,7 @@ async fn public_get_carousels(
                     .unwrap_or_default();
                 if !ids.is_empty() {
                     products = sqlx::query_as::<_, Product>(
-                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE is_active = true AND id = ANY($1)"
+                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent, weight_grams, delivery_time, sale_starts_at, sale_ends_at, gpsr_manufacturer, gpsr_responsible_person, gpsr_safety_info, unit_content, unit_content_unit, length_mm, width_mm, height_mm FROM products WHERE is_active = true AND id = ANY($1)"
                     )
                     .bind(&ids)
                     .fetch_all(&pool)
@@ -1538,7 +1485,7 @@ async fn public_get_carousels(
                     .unwrap_or_default();
                 } else {
                     products = sqlx::query_as::<_, Product>(
-                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE is_active = true ORDER BY created_at DESC LIMIT 10"
+                        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent, weight_grams, delivery_time, sale_starts_at, sale_ends_at, gpsr_manufacturer, gpsr_responsible_person, gpsr_safety_info, unit_content, unit_content_unit, length_mm, width_mm, height_mm FROM products WHERE is_active = true ORDER BY created_at DESC LIMIT 10"
                     )
                     .fetch_all(&pool)
                     .await
@@ -1549,7 +1496,7 @@ async fn public_get_carousels(
                 let days = sec.get("days").and_then(|v| v.as_i64()).unwrap_or(30);
                 let limit = sec.get("limit").and_then(|v| v.as_i64()).unwrap_or(12);
                 products = sqlx::query_as::<_, Product>(
-                    "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products WHERE is_active = true AND created_at >= NOW() - ($1 || ' days')::INTERVAL ORDER BY created_at DESC LIMIT $2"
+                    "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent, weight_grams, delivery_time, sale_starts_at, sale_ends_at, gpsr_manufacturer, gpsr_responsible_person, gpsr_safety_info, unit_content, unit_content_unit, length_mm, width_mm, height_mm FROM products WHERE is_active = true AND created_at >= NOW() - ($1 || ' days')::INTERVAL ORDER BY created_at DESC LIMIT $2"
                 )
                 .bind(days.to_string())
                 .bind(limit)
@@ -1564,7 +1511,8 @@ async fn public_get_carousels(
                     SELECT p.id, p.title, p.slug, p.description, p.product_type, p.category, p.subcategory,
                            p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at,
                            p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images, p.has_multiple_variants,
-                           p.tax_rate_percent
+                           p.tax_rate_percent, p.weight_grams, p.delivery_time, p.sale_starts_at, p.sale_ends_at, p.gpsr_manufacturer,
+                           p.gpsr_responsible_person, p.gpsr_safety_info, p.unit_content, p.unit_content_unit, p.length_mm, p.width_mm, p.height_mm
                     FROM products p
                     LEFT JOIN order_items oi ON oi.product_id = p.id
                     WHERE p.is_active = true
@@ -1585,7 +1533,8 @@ async fn public_get_carousels(
                     SELECT DISTINCT p.id, p.title, p.slug, p.description, p.product_type, p.category, p.subcategory,
                            p.base_price_cents, p.digital_download_url, p.image_url, p.is_active, p.created_at, p.updated_at,
                            p.subtitle, p.variant_selector_label, p.short_description, p.long_description, p.images, p.has_multiple_variants,
-                           p.tax_rate_percent
+                           p.tax_rate_percent, p.weight_grams, p.delivery_time, p.sale_starts_at, p.sale_ends_at, p.gpsr_manufacturer,
+                           p.gpsr_responsible_person, p.gpsr_safety_info, p.unit_content, p.unit_content_unit, p.length_mm, p.width_mm, p.height_mm
                     FROM products p
                     JOIN product_variants pv ON pv.product_id = p.id
                     WHERE p.is_active = true AND (p.product_type = 'digital' OR pv.stock_quantity > 0)
@@ -1604,7 +1553,7 @@ async fn public_get_carousels(
         let mut items_with_variants = Vec::new();
         for product in products {
             let variants = sqlx::query_as::<_, ProductVariant>(
-                "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
+                "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images, weight_grams, sale_price_cents, length_mm, width_mm, height_mm FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
             )
             .bind(product.id)
             .fetch_all(&pool)
@@ -1613,6 +1562,7 @@ async fn public_get_carousels(
 
             items_with_variants.push(ProductWithVariants { product: public_product(product), variants });
         }
+        attach_pricing(&pool, &mut items_with_variants).await;
 
         carousels.push(json!({
             "id": sec_id,
@@ -1734,12 +1684,6 @@ async fn public_validate_coupon(
 // ==========================================
 
 #[derive(Serialize)]
-struct DownloadFileItem {
-    name: String,
-    url: String,
-}
-
-#[derive(Serialize)]
 struct CustomerDownloadProduct {
     product_id: Option<Uuid>,
     product_title: String,
@@ -1747,7 +1691,7 @@ struct CustomerDownloadProduct {
     order_id: Uuid,
     order_number: String,
     purchase_date: chrono::DateTime<chrono::Utc>,
-    files: Vec<DownloadFileItem>,
+    files: Vec<serde_json::Value>,
 }
 
 async fn public_get_customer_downloads(
@@ -1768,7 +1712,7 @@ async fn public_get_customer_downloads(
         JOIN orders o ON o.id = oi.order_id
         LEFT JOIN products p ON p.id = oi.product_id
         WHERE o.customer_email = $1 
-          AND (o.payment_status = 'paid' OR o.order_status = 'completed')
+          AND o.payment_status = 'paid'
           AND oi.is_digital = true
         ORDER BY o.created_at DESC
         "#
@@ -1792,56 +1736,12 @@ async fn public_get_customer_downloads(
         let product_title = live_title.unwrap_or(fallback_title);
         let image_url: Option<String> = r.try_get("live_image_url").ok().flatten();
 
-        // Always resolve latest files from product record first, falling back to original if product deleted
-        let live_url: Option<String> = r.try_get("live_download_url").ok().flatten();
+        // Latest files of the product, each behind a personal, counted download link
         let orig_url: Option<String> = r.try_get("original_download_url").ok().flatten();
-        let effective_url = live_url.or(orig_url);
-
-        let mut files = Vec::new();
-
-        if let Some(ref url_str) = effective_url {
-            if let Ok(json_files) = serde_json::from_str::<Vec<serde_json::Value>>(url_str) {
-                for f in json_files {
-                    let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("File");
-                    let u = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    if !u.is_empty() {
-                        files.push(DownloadFileItem {
-                            name: name.to_string(),
-                            url: u.to_string(),
-                        });
-                    }
-                }
-            } else if !url_str.trim().is_empty() {
-                files.push(DownloadFileItem {
-                    name: format!("{} Package", product_title),
-                    url: url_str.clone(),
-                });
-            }
-        }
-
-        // ALSO check current BOM product_parts where part_sku = 'DIGITAL_FILE'
-        if let Some(pid) = product_id {
-            let parts = sqlx::query("SELECT part_name, notes FROM product_parts WHERE product_id = $1 AND part_sku = 'DIGITAL_FILE'")
-                .bind(pid)
-                .fetch_all(&pool)
-                .await
-                .unwrap_or_default();
-
-            for p in parts {
-                let pname: String = p.get("part_name");
-                let file_url: Option<String> = p.get("notes");
-                if let Some(furl) = file_url {
-                    if !furl.trim().is_empty() {
-                        if !files.iter().any(|existing| existing.url == furl) {
-                            files.push(DownloadFileItem {
-                                name: pname,
-                                url: furl,
-                            });
-                        }
-                    }
-                }
-            }
-        }
+        let files = match product_id {
+            Some(pid) => crate::routes::shop_features::order_download_files(&pool, order_id, pid, &product_title, orig_url.as_deref()).await,
+            None => Vec::new(),
+        };
 
         result.push(CustomerDownloadProduct {
             product_id,
@@ -1857,3 +1757,49 @@ async fn public_get_customer_downloads(
     Ok(Json(result))
 }
 
+
+/// Sale, regular and unit prices of every variant (see `services::pricing`).
+async fn attach_pricing(pool: &PgPool, products: &mut [ProductWithVariants]) {
+    if let Ok(settings) = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1").fetch_one(pool).await {
+        crate::services::pricing::attach(pool, &settings, products).await;
+    }
+}
+
+/// Privacy-policy sections for the features this shop actually uses (`{{FEATURE_PRIVACY_SECTIONS}}`).
+async fn feature_privacy_sections(pool: &PgPool, s: &StoreSettings) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let providers: Vec<String> = sqlx::query_scalar("SELECT provider FROM payment_configs WHERE is_enabled = true ORDER BY provider")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    if !providers.is_empty() {
+        let mut lines = vec!["### Payment Providers".to_string(),
+            "To process your payment we pass the data required for it (name, email address, billing address, order amount and order number) to the payment provider you choose (Art. 6 Para. 1 lit. b GDPR):".to_string(), String::new()];
+        for p in &providers {
+            match p.as_str() {
+                "stripe" => lines.push("- **Stripe** (Stripe Payments Europe, Ltd., 1 Grand Canal Street Lower, Dublin 2, Ireland) for card, wallet and bank payments.".to_string()),
+                "paypal" => lines.push("- **PayPal** (PayPal (Europe) S.à r.l. et Cie, S.C.A., 22–24 Boulevard Royal, 2449 Luxembourg).".to_string()),
+                other => lines.push(format!("- {}", other)),
+            }
+        }
+        out.push(lines.join("\n"));
+    }
+    out.push("### Emails\nWe send order confirmations, invoices, shipping and account emails to the email address you provide (Art. 6 Para. 1 lit. b GDPR). The emails are delivered through our email provider.".to_string());
+    out.push("### Withdrawal Function\nIf you withdraw from a contract using the withdrawal function of this shop, we process the details you enter (name, email address, order number, message) to handle your withdrawal and confirm its receipt (Art. 6 Para. 1 lit. c GDPR).".to_string());
+    if s.newsletter_enabled {
+        out.push("### Newsletter\nIf you subscribe to our newsletter, we only send it after you have confirmed your email address with the link in our confirmation email (double opt-in). The legal basis is your consent (Art. 6 Para. 1 lit. a GDPR), which you can withdraw at any time with the unsubscribe link in every newsletter. To prove your consent we store the time and IP address of your sign-up and of your confirmation (Art. 6 Para. 1 lit. f GDPR). Sign-ups that are not confirmed are deleted after 30 days; after you unsubscribe we keep only the proof of consent and of the unsubscription for up to three years.".to_string());
+    }
+    if s.reviews_enabled {
+        out.push("### Product Reviews\nOnly customers who bought a product can review it. With your review we publish your rating, the text and the name you choose (by default your first name and the initial of your last name). Reviews are checked before publication. The legal basis is your consent (Art. 6 Para. 1 lit. a GDPR); you can ask us to delete your review at any time.".to_string());
+    }
+    if crate::services::vies::available(s) {
+        out.push("### VAT ID Check\nIf you order as a business with a VAT identification number, we check it with the VAT Information Exchange System (VIES) of the European Commission and keep the result as proof required by tax law (Art. 6 Para. 1 lit. c GDPR).".to_string());
+    }
+    let backups: Option<bool> = sqlx::query_scalar("SELECT enabled FROM backup_settings WHERE id = 1").fetch_optional(pool).await.ok().flatten();
+    if backups == Some(true) {
+        out.push("### Backups\nTo protect your data against loss we store backups of our shop database in a private repository at GitHub (GitHub B.V., Netherlands / GitHub, Inc., USA). GitHub is certified under the EU-U.S. Data Privacy Framework. The legal basis is our legitimate interest in data security (Art. 6 Para. 1 lit. f, Art. 32 GDPR).".to_string());
+    }
+    out.push("### Storage Duration\nWe store order and invoice data for as long as commercial and tax law requires (invoices and accounting records 8 years, business letters 6 years, § 147 AO, § 257 HGB). Customer account data is stored until you delete your account or ask us to delete it; data without a retention obligation is deleted as soon as it is no longer needed.".to_string());
+    out.push("### Right to Lodge a Complaint\nYou have the right to lodge a complaint with a data protection supervisory authority, in particular in the EU member state of your residence, your place of work or the place of the alleged infringement (Art. 77 GDPR).".to_string());
+    out.join("\n\n")
+}

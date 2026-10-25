@@ -6,6 +6,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { cart } from '$lib/stores/cart.js';
+  import { submitRememberedNewsletterOptIn } from '$lib/newsletter.js';
   import { AlertCircle, Loader2 } from 'lucide-svelte';
 
   export let data;
@@ -48,6 +49,7 @@
       }
       const order = await res.json();
       cart.clear();
+      submitRememberedNewsletterOptIn();
       goto(`/order-success/${encodeURIComponent(order.order_number)}?token=${encodeURIComponent(order.access_token || "")}`, { replaceState: true });
     } catch (e) {
       status = 'error';

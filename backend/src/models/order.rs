@@ -39,6 +39,23 @@ pub struct Order {
     #[serde(default)]
     #[sqlx(default)]
     pub tax_mode: Option<String>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub buyer_company: Option<String>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub buyer_vat_id: Option<String>,
+    /// VAT-free EU business order (intra-Community supply / reverse charge)
+    #[serde(default)]
+    #[sqlx(default)]
+    pub reverse_charge: bool,
+    /// VIES answer kept as proof
+    #[serde(default)]
+    #[sqlx(default)]
+    pub vat_check: Option<JsonValue>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub paid_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -87,6 +104,11 @@ pub struct CheckoutRequest {
     pub shipping_rate_id: Option<Uuid>,
     pub coupon_code: Option<String>,
     pub items: Vec<CartItemInput>,
+    /// Business customers: company name and EU VAT ID (VAT-free when valid and from another EU country)
+    #[serde(default)]
+    pub buyer_company: Option<String>,
+    #[serde(default)]
+    pub vat_id: Option<String>,
 }
 
 /// Server-computed price breakdown shown on the checkout page and charged by the payment provider.
@@ -101,6 +123,12 @@ pub struct CheckoutQuote {
     pub is_digital_only: bool,
     pub coupon_code: Option<String>,
     pub currency: String,
+    /// Physical goods weight for weight-based shipping rates
+    pub total_weight_g: i32,
+    /// Shipping rates the cart fits into for the destination (cheapest first)
+    pub shipping_options: Vec<serde_json::Value>,
+    /// VAT-free EU business order
+    pub reverse_charge: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

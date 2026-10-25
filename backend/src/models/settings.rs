@@ -84,11 +84,41 @@ pub struct StoreSettings {
     #[serde(default)]
     #[sqlx(default)]
     pub einvoice_enabled: bool,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub reviews_enabled: bool,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub newsletter_enabled: bool,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub sale_prices_enabled: bool,
+    /// VAT-free sales to EU businesses with a VIES-checked VAT ID
+    #[serde(default)]
+    #[sqlx(default)]
+    pub reverse_charge_enabled: bool,
+    /// Downloads per file and days after payment (0 = unlimited)
+    #[serde(default = "default_download_limit")]
+    #[sqlx(default)]
+    pub download_limit: i32,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub download_days: i32,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub default_delivery_time: String,
+    /// GPSR manufacturer details used when a product has none of its own
+    #[serde(default)]
+    #[sqlx(default)]
+    pub gpsr_default_manufacturer: String,
     pub updated_at: DateTime<Utc>,
 }
 
 fn default_true() -> bool {
     true
+}
+fn default_download_limit() -> i32 {
+    10
 }
 fn default_stock_managers() -> String {
     "stock_managers".to_string()
@@ -142,6 +172,16 @@ pub struct StoreSettingsDTO {
     pub address_postal_code: String,
     pub address_city: String,
     pub address_country: String,
+    pub tax_number: String,
+    pub reviews_enabled: bool,
+    pub newsletter_enabled: bool,
+    pub sale_prices_enabled: bool,
+    /// EU businesses can order VAT-free with a VIES-checked VAT ID
+    pub eu_business_vat_free: bool,
+    pub default_delivery_time: String,
+    pub download_limit: i32,
+    pub download_days: i32,
+    pub gpsr_default_manufacturer: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -204,6 +244,14 @@ pub struct UpdateStoreSettingsRequest {
     pub tax_number: Option<String>,
     pub email_invoice_pdf: Option<bool>,
     pub einvoice_enabled: Option<bool>,
+    pub reviews_enabled: Option<bool>,
+    pub newsletter_enabled: Option<bool>,
+    pub sale_prices_enabled: Option<bool>,
+    pub reverse_charge_enabled: Option<bool>,
+    pub download_limit: Option<i32>,
+    pub download_days: Option<i32>,
+    pub default_delivery_time: Option<String>,
+    pub gpsr_default_manufacturer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

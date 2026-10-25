@@ -13,7 +13,9 @@ const FORBIDDEN_HEADERS = new Set([
   'te',
   'trailer',
   // Never forward the backend's development auth bypass from public visitors
-  'x-dev-mode'
+  'x-dev-mode',
+  // Set by this proxy only (proof of the newsletter double opt-in)
+  'x-shop-client-ip'
 ]);
 
 // The public storefront must never expose the admin API; that is only reachable through the admin app.
@@ -43,8 +45,9 @@ function targetUrl(params, url) {
   return `${backendUrl}/api/v1/${params.path}${query ? `?${query}` : ''}`;
 }
 
-function cleanHeaders(request) {
+function cleanHeaders(request, clientIp) {
   const headers = {};
+  if (clientIp) headers['x-shop-client-ip'] = clientIp;
   for (const [key, value] of request.headers.entries()) {
     if (!FORBIDDEN_HEADERS.has(key.toLowerCase())) {
       headers[key] = value;
@@ -53,7 +56,7 @@ function cleanHeaders(request) {
   return headers;
 }
 
-async function proxy(method, { params, url, request }) {
+async function proxy(method, { params, url, request, getClientAddress }) {
   if (isBlockedPath(params.path)) return notFound();
 
   let body;
@@ -67,11 +70,32 @@ async function proxy(method, { params, url, request }) {
   }
 
   try {
+    let clientIp = '';
+    try {
+      clientIp = getClientAddress();
+    } catch (_) {
+      // not available (e.g. during prerendering)
+    }
+    const isDownload = params.path.startsWith('downloads/');
     const res = await globalThis.fetch(targetUrl(params, url), {
       method,
-      headers: cleanHeaders(request),
-      body
+      headers: cleanHeaders(request, clientIp),
+      body,
+      // Externally hosted downloads: the browser follows the redirect, not this server
+      redirect: isDownload ? 'manual' : 'follow'
     });
+    if (isDownload && res.ok) {
+      // Stream files instead of buffering them, keep their name
+      const headers = { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' };
+      for (const name of ['content-type', 'content-length', 'content-disposition']) {
+        const value = res.headers.get(name);
+        if (value) headers[name] = value;
+      }
+      return new Response(res.body, { status: res.status, headers });
+    }
+    if (isDownload && res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      return new Response(null, { status: 302, headers: { Location: res.headers.get('location'), 'Cache-Control': 'no-store' } });
+    }
     const contentType = res.headers.get('content-type') || '';
     // Backend errors are plain text; clients consistently receive `{ error }` JSON
     if (res.status >= 400 && !contentType.includes('application/json')) {

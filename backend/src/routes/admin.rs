@@ -85,6 +85,8 @@ pub fn admin_router(pool: PgPool) -> Router<PgPool> {
         .route("/settings/shipping/zones", post(admin_create_shipping_zone))
         .route("/settings/shipping/zones/:id", put(admin_update_shipping_zone).delete(admin_delete_shipping_zone))
         .route("/settings/shipping/zones/:id/rates", post(admin_create_zone_rate))
+        .route("/settings/shipping/zones/:id/copy", post(admin_copy_shipping_zone))
+        .route("/settings/shipping/zones/:id/copy-rates", post(admin_copy_zone_rates))
         .route("/settings/shipping/rates", post(admin_create_shipping_rate))
         .route("/settings/shipping/rates/:id", put(admin_update_shipping_rate).delete(admin_delete_shipping_rate))
         // CMS Policy Pages
@@ -108,6 +110,7 @@ pub fn admin_router(pool: PgPool) -> Router<PgPool> {
         .route("/backup/test", post(admin_test_backup_connection))
         .route("/backup/run", post(admin_run_backup))
         .route("/backup/disconnect", post(admin_disconnect_backup))
+        .merge(crate::routes::shop_features::admin_routes())
         .layer(axum::middleware::from_fn_with_state(pool, crate::middleware::admin_auth_middleware));
 
     Router::new()
@@ -374,7 +377,7 @@ async fn get_sales_analytics(State(pool): State<PgPool>) -> Result<impl IntoResp
 // 3. Products Management
 async fn admin_list_products(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let products = sqlx::query_as::<_, Product>(
-        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent FROM products ORDER BY created_at DESC"
+        "SELECT id, title, slug, description, product_type, category, subcategory, base_price_cents, digital_download_url, image_url, is_active, created_at, updated_at, subtitle, variant_selector_label, short_description, long_description, images, has_multiple_variants, tax_rate_percent, weight_grams, delivery_time, sale_starts_at, sale_ends_at, gpsr_manufacturer, gpsr_responsible_person, gpsr_safety_info, unit_content, unit_content_unit, length_mm, width_mm, height_mm FROM products ORDER BY created_at DESC"
     )
     .fetch_all(&pool)
     .await
@@ -383,7 +386,7 @@ async fn admin_list_products(State(pool): State<PgPool>) -> Result<impl IntoResp
     let mut result = Vec::new();
     for p in products {
         let variants = sqlx::query_as::<_, ProductVariant>(
-            "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
+            "SELECT id, product_id, sku, title, price_override_cents, attributes, stock_quantity, low_stock_threshold, image_url, created_at, updated_at, images, weight_grams, sale_price_cents, length_mm, width_mm, height_mm FROM product_variants WHERE product_id = $1 ORDER BY created_at ASC"
         )
         .bind(p.id)
         .fetch_all(&pool)
@@ -465,7 +468,12 @@ async fn admin_create_product(
     .await
     .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to create product: {}", e)))?;
 
+    if let Some(extras) = &payload.extras {
+        save_product_extras(&mut *tx, product_id, extras).await?;
+    }
+
     let variants_to_create = payload.variants.unwrap_or_default();
+    let mut variant_extras: Vec<(Uuid, crate::models::VariantExtras)> = Vec::new();
 
     if variants_to_create.is_empty() {
         // Automatically create single default variant for immediate out-of-the-box readiness
@@ -491,6 +499,7 @@ async fn admin_create_product(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to create default variant: {}", e)))?;
     } else {
         for v in variants_to_create {
+            let new_variant_id = Uuid::new_v4();
             let v_images = v.images.unwrap_or_else(|| {
                 if let Some(ref u) = v.image_url {
                     json!([u])
@@ -505,7 +514,7 @@ async fn admin_create_product(
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 "#
             )
-            .bind(Uuid::new_v4())
+            .bind(new_variant_id)
             .bind(product_id)
             .bind(&v.sku)
             .bind(&v.title)
@@ -518,10 +527,16 @@ async fn admin_create_product(
             .execute(&mut *tx)
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to create variant: {}", e)))?;
+            if let Some(x) = &v.extras {
+                variant_extras.push((new_variant_id, x.clone()));
+            }
         }
     }
 
     tx.commit().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    for (vid, x) in &variant_extras {
+        save_variant_extras(&pool, *vid, x).await?;
+    }
 
     Ok((StatusCode::CREATED, Json(json!({ "id": product_id, "slug": slug }))))
 }
@@ -575,6 +590,10 @@ async fn admin_update_product(
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if let Some(extras) = &payload.extras {
+        save_product_extras(&pool, id, extras).await?;
+    }
 
     Ok(Json(json!({ "success": true })))
 }
@@ -756,6 +775,9 @@ async fn admin_add_variant(
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    if let Some(x) = &payload.extras {
+        save_variant_extras(&pool, variant_id, x).await?;
+    }
 
     Ok((StatusCode::CREATED, Json(json!({ "id": variant_id }))))
 }
@@ -793,6 +815,9 @@ async fn admin_update_variant(
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(x) = &payload.extras {
+        save_variant_extras(&pool, id, x).await?;
+    }
 
     Ok(Json(json!({ "success": true })))
 }
@@ -1229,7 +1254,7 @@ async fn admin_get_order(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let order = sqlx::query_as::<_, Order>(
-        "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, is_test, tax_mode, created_at, updated_at FROM orders WHERE id = $1"
+        "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, is_test, tax_mode, buyer_company, buyer_vat_id, reverse_charge, vat_check, paid_at, created_at, updated_at FROM orders WHERE id = $1"
     )
     .bind(id)
     .fetch_optional(&pool)
@@ -1358,6 +1383,14 @@ async fn admin_refund_order(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // A paid order has an invoice: the refund cancels it with a credit note (sent to the customer)
+    if payment_status == "paid" {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            crate::services::email::send_refund_notification(&pool, id).await;
+        });
+    }
+
     Ok(Json(json!({ "success": true, "payment_status": "refunded", "provider_refunded": provider_refunded })))
 }
 
@@ -1379,41 +1412,29 @@ async fn admin_get_order_invoice(
     Path(id): Path<Uuid>,
     Query(query): Query<InvoiceQuery>,
 ) -> Result<Response, (StatusCode, String)> {
-    let order = sqlx::query_as::<_, Order>(
-        "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, is_test, tax_mode, created_at, updated_at FROM orders WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
-
-    let items = sqlx::query_as::<_, OrderItem>(
-        "SELECT id, order_id, product_id, variant_id, product_title, variant_title, sku, unit_price_cents, quantity, total_price_cents, is_digital, download_url, tax_rate_percent FROM order_items WHERE order_id = $1"
-    )
-    .bind(id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
-
-    let settings = sqlx::query_as::<_, StoreSettings>(
-        "SELECT * FROM store_settings WHERE id = 1"
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // The same PDF the customer receives (a ZUGFeRD / Factur-X e-invoice when enabled)
-    let (filename, pdf) = crate::services::email::render_invoice_pdf(&settings, &order, &items)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("The invoice could not be created: {}", e)))?;
+    use crate::services::invoice_store;
+    let err = |e: anyhow::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("The document could not be created: {}", e));
+    // Stored documents only (GoBD): the invoice is issued once when the payment is confirmed
+    let doc = if query.credit_note.unwrap_or(false) {
+        invoice_store::get(&pool, id, invoice_store::CREDIT_NOTE).await.map_err(err)?
+    } else {
+        invoice_store::ensure_invoice(&pool, id).await.map_err(err)?
+    };
+    let doc = doc.ok_or((
+        StatusCode::CONFLICT,
+        if query.credit_note.unwrap_or(false) {
+            "This order has no credit note (one is issued automatically when a paid order is refunded).".to_string()
+        } else {
+            "No invoice yet: it is issued automatically as soon as the payment is confirmed.".to_string()
+        },
+    ))?;
     let disposition = if query.download.unwrap_or(false) { "attachment" } else { "inline" };
     Ok((
         [
             (CONTENT_TYPE, "application/pdf".to_string()),
-            (axum::http::header::CONTENT_DISPOSITION, format!("{}; filename=\"{}\"", disposition, filename)),
+            (axum::http::header::CONTENT_DISPOSITION, format!("{}; filename=\"{}\"", disposition, doc.file_name)),
         ],
-        pdf,
+        doc.pdf,
     )
         .into_response())
 }
@@ -1421,6 +1442,7 @@ async fn admin_get_order_invoice(
 #[derive(Debug, Deserialize)]
 struct InvoiceQuery {
     download: Option<bool>,
+    credit_note: Option<bool>,
 }
 
 /// The EN 16931 XML (UN/CEFACT CII, as embedded in ZUGFeRD / Factur-X) for accounting software.
@@ -1428,28 +1450,25 @@ async fn admin_get_order_invoice_xml(
     State(pool): State<PgPool>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, (StatusCode, String)> {
-    let order = sqlx::query_as::<_, Order>("SELECT * FROM orders WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
-    let items = sqlx::query_as::<_, OrderItem>("SELECT * FROM order_items WHERE order_id = $1")
-        .bind(id)
-        .fetch_all(&pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let settings = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1")
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let invoice = crate::services::invoice::Invoice::build(&order, &items, &settings);
+    use crate::services::invoice_store;
+    let err = |e: anyhow::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let stored = invoice_store::ensure_invoice(&pool, id).await.map_err(err)?;
+    let (xml, number) = match stored {
+        Some(doc) if doc.xml.is_some() => (doc.xml.unwrap_or_default(), doc.number),
+        // Issued without e-invoicing: derive the XML from the order data
+        _ => {
+            let (settings, order, items) = invoice_store::load_order(&pool, id).await.map_err(err)?;
+            let invoice = crate::services::invoice::Invoice::build(&order, &items, &settings);
+            (invoice.to_cii_xml(), invoice.number)
+        }
+    };
+    let safe: String = number.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
     Ok((
         [
             (CONTENT_TYPE, "application/xml; charset=utf-8".to_string()),
-            (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}.xml\"", invoice.file_stem())),
+            (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"Invoice-{}.xml\"", safe)),
         ],
-        invoice.to_cii_xml(),
+        xml,
     )
         .into_response())
 }
@@ -1607,7 +1626,7 @@ async fn admin_get_shipping(State(pool): State<PgPool>) -> Result<impl IntoRespo
     let mut result = Vec::new();
     for z in zones {
         let rates = sqlx::query_as::<_, ShippingRate>(
-            "SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days FROM shipping_rates WHERE zone_id = $1 ORDER BY price_cents ASC"
+            "SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm FROM shipping_rates WHERE zone_id = $1 ORDER BY price_cents ASC"
         )
         .bind(z.id)
         .fetch_all(&pool)
@@ -1657,8 +1676,8 @@ async fn admin_create_shipping_rate(
 
     sqlx::query(
         r#"
-        INSERT INTO shipping_rates (id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO shipping_rates (id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         "#
     )
     .bind(rate_id)
@@ -1669,6 +1688,9 @@ async fn admin_create_shipping_rate(
     .bind(payload.max_weight_g.unwrap_or(5000))
     .bind(payload.price_cents)
     .bind(&payload.estimated_delivery_days)
+    .bind(payload.max_length_mm.unwrap_or(0).max(0))
+    .bind(payload.max_width_mm.unwrap_or(0).max(0))
+    .bind(payload.max_height_mm.unwrap_or(0).max(0))
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1921,6 +1943,57 @@ async fn admin_update_system_settings(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+
+    let feature_fields_sent = payload.reviews_enabled.is_some()
+        || payload.newsletter_enabled.is_some()
+        || payload.sale_prices_enabled.is_some()
+        || payload.reverse_charge_enabled.is_some()
+        || payload.download_limit.is_some()
+        || payload.download_days.is_some()
+        || payload.default_delivery_time.is_some()
+        || payload.gpsr_default_manufacturer.is_some();
+    if feature_fields_sent {
+        if payload.download_limit.is_some_and(|v| !(0..=1000).contains(&v)) || payload.download_days.is_some_and(|v| !(0..=3650).contains(&v)) {
+            return Err((StatusCode::BAD_REQUEST, "Download limit must be 0–1000 and validity 0–3650 days (0 = unlimited)".to_string()));
+        }
+        if payload.reverse_charge_enabled == Some(true) {
+            let s = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            if s.tax_mode == "kleingewerbe" || s.vat_id.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "VAT-free sales to EU businesses need a VAT ID (USt-IdNr.) and a tax mode with VAT — small businesses under § 19 UStG cannot use reverse charge.".to_string(),
+                ));
+            }
+        }
+        sqlx::query(
+            "UPDATE store_settings SET reviews_enabled = COALESCE($1, reviews_enabled), newsletter_enabled = COALESCE($2, newsletter_enabled),
+             sale_prices_enabled = COALESCE($3, sale_prices_enabled), reverse_charge_enabled = COALESCE($4, reverse_charge_enabled),
+             download_limit = COALESCE($5, download_limit), download_days = COALESCE($6, download_days),
+             default_delivery_time = COALESCE($7, default_delivery_time), gpsr_default_manufacturer = COALESCE($8, gpsr_default_manufacturer)
+             WHERE id = 1",
+        )
+        .bind(payload.reviews_enabled)
+        .bind(payload.newsletter_enabled)
+        .bind(payload.sale_prices_enabled)
+        .bind(payload.reverse_charge_enabled)
+        .bind(payload.download_limit)
+        .bind(payload.download_days)
+        .bind(payload.default_delivery_time.as_deref().map(str::trim))
+        .bind(payload.gpsr_default_manufacturer.as_deref().map(str::trim))
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if payload.sale_prices_enabled.is_some() {
+            // Switching sales on/off changes what customers pay: record it in the price history
+            let _ = sqlx::query("SELECT record_variant_prices(NULL)").execute(&pool).await;
+        }
+    }
+
+    // Legal pages show settings (address, features): let the storefront reload them
+    invalidate_storefront_pages("*");
 
     // The structured address is the source; company_address is its single-line form for documents
     let address = [
@@ -2610,7 +2683,7 @@ async fn admin_get_shipping_providers(State(pool): State<PgPool>) -> Result<impl
         let mut zones_with_rates = Vec::new();
         for z in zones {
             let rates = sqlx::query_as::<_, ShippingRate>(
-                "SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days FROM shipping_rates WHERE zone_id = $1 ORDER BY price_cents ASC"
+                "SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm FROM shipping_rates WHERE zone_id = $1 ORDER BY price_cents ASC"
             )
             .bind(z.id)
             .fetch_all(&pool)
@@ -2769,8 +2842,8 @@ async fn admin_create_zone_rate(
     let rate_id = Uuid::new_v4();
     sqlx::query(
         r#"
-        INSERT INTO shipping_rates (id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO shipping_rates (id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         "#
     )
     .bind(rate_id)
@@ -2781,6 +2854,9 @@ async fn admin_create_zone_rate(
     .bind(payload.max_weight_g.unwrap_or(5000))
     .bind(payload.price_cents)
     .bind(&payload.estimated_delivery_days)
+    .bind(payload.max_length_mm.unwrap_or(0).max(0))
+    .bind(payload.max_width_mm.unwrap_or(0).max(0))
+    .bind(payload.max_height_mm.unwrap_or(0).max(0))
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2802,7 +2878,10 @@ async fn admin_update_shipping_rate(
             min_weight_g = COALESCE($3, min_weight_g),
             max_weight_g = COALESCE($4, max_weight_g),
             price_cents = COALESCE($5, price_cents),
-            estimated_delivery_days = COALESCE($6, estimated_delivery_days)
+            estimated_delivery_days = COALESCE($6, estimated_delivery_days),
+            max_length_mm = COALESCE($8, max_length_mm),
+            max_width_mm = COALESCE($9, max_width_mm),
+            max_height_mm = COALESCE($10, max_height_mm)
         WHERE id = $7
         "#
     )
@@ -2813,6 +2892,9 @@ async fn admin_update_shipping_rate(
     .bind(payload.price_cents)
     .bind(payload.estimated_delivery_days)
     .bind(id)
+    .bind(payload.max_length_mm.map(|v| v.max(0)))
+    .bind(payload.max_width_mm.map(|v| v.max(0)))
+    .bind(payload.max_height_mm.map(|v| v.max(0)))
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2872,22 +2954,8 @@ async fn admin_update_page(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Asynchronously push update to storefront container in-memory cache
-    let slug_clone = slug.clone();
-    let title_clone = payload.title.clone();
-    let content_clone = payload.content_markdown.clone();
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        let _ = client.post("http://storefront:3000/api/cache/page")
-            .json(&serde_json::json!({
-                "slug": slug_clone,
-                "title": title_clone,
-                "content_markdown": content_clone
-            }))
-            .timeout(std::time::Duration::from_millis(2000))
-            .send()
-            .await;
-    });
+    // The storefront reloads the page (with the shop data filled in) on the next visit
+    invalidate_storefront_pages(&slug);
 
     Ok(Json(json!({ "success": true })))
 }
@@ -3435,7 +3503,7 @@ async fn admin_export_store_data(
         .fetch_all(&pool).await.map_err(db_err)?;
     let shipping_zones = sqlx::query_as::<_, ShippingZone>("SELECT id, provider_id, zone_name, country_codes, is_default, created_at FROM shipping_zones ORDER BY is_default DESC, zone_name ASC")
         .fetch_all(&pool).await.map_err(db_err)?;
-    let shipping_rates = sqlx::query_as::<_, ShippingRate>("SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days FROM shipping_rates ORDER BY price_cents ASC")
+    let shipping_rates = sqlx::query_as::<_, ShippingRate>("SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm FROM shipping_rates ORDER BY price_cents ASC")
         .fetch_all(&pool).await.map_err(db_err)?;
 
     let bom_parts = sqlx::query_as::<_, BomPart>(&format!("SELECT {} FROM bom_parts ORDER BY sku ASC", BOM_PART_COLUMNS))
@@ -3946,17 +4014,19 @@ async fn admin_import_store_data(
         let zone_id = mapped(&zone_ids, r.zone_id);
         let id: Uuid = sqlx::query_scalar(
             r#"
-            INSERT INTO shipping_rates (id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days)
-            VALUES (COALESCE((SELECT id FROM shipping_rates WHERE zone_id = $2 AND name = $3 AND package_type = $4 LIMIT 1), $1), $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO shipping_rates (id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm)
+            VALUES (COALESCE((SELECT id FROM shipping_rates WHERE zone_id = $2 AND name = $3 AND package_type = $4 LIMIT 1), $1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (id) DO UPDATE SET
                 zone_id = EXCLUDED.zone_id, name = EXCLUDED.name, package_type = EXCLUDED.package_type,
                 min_weight_g = EXCLUDED.min_weight_g, max_weight_g = EXCLUDED.max_weight_g,
-                price_cents = EXCLUDED.price_cents, estimated_delivery_days = EXCLUDED.estimated_delivery_days
+                price_cents = EXCLUDED.price_cents, estimated_delivery_days = EXCLUDED.estimated_delivery_days,
+                max_length_mm = EXCLUDED.max_length_mm, max_width_mm = EXCLUDED.max_width_mm, max_height_mm = EXCLUDED.max_height_mm
             RETURNING id
             "#
         )
         .bind(r.id).bind(zone_id).bind(&r.name).bind(&r.package_type).bind(r.min_weight_g)
         .bind(r.max_weight_g).bind(r.price_cents).bind(&r.estimated_delivery_days)
+        .bind(r.max_length_mm).bind(r.max_width_mm).bind(r.max_height_mm)
         .fetch_one(&mut *tx).await
         .map_err(|e| import_error(format!("shipping rate '{}'", r.name), e))?;
         rate_ids.push(id);
@@ -4666,4 +4736,197 @@ async fn admin_stripe_capabilities(State(pool): State<PgPool>) -> Result<impl In
         })
         .collect();
     Ok(Json(json!({ "checked": caps.is_some(), "status": status })))
+}
+
+// ==========================================
+// Product extras: weight, delivery time, sale window, GPSR, unit price; variant weight & sale price
+// ==========================================
+
+/// A dimension in mm, or `None` when not set (0, negative or absurdly large)
+fn positive_mm(v: Option<i32>) -> Option<i32> {
+    v.filter(|v| (1..=100_000).contains(v))
+}
+
+const UNIT_CONTENT_UNITS: &[&str] = &["kg", "g", "l", "ml", "m", "cm", "m2"];
+
+fn clean_text(v: &Option<String>, max: usize) -> Option<String> {
+    v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.chars().take(max).collect())
+}
+
+async fn save_product_extras<'e, E>(db: E, product_id: Uuid, x: &crate::models::ProductExtras) -> Result<(), (StatusCode, String)>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if x.weight_grams.is_some_and(|w| !(0..=1_000_000).contains(&w)) {
+        return Err((StatusCode::BAD_REQUEST, "The weight must be between 0 and 1,000,000 g".to_string()));
+    }
+    if let (Some(s), Some(e)) = (x.sale_starts_at, x.sale_ends_at) {
+        if e <= s {
+            return Err((StatusCode::BAD_REQUEST, "The sale must end after it starts".to_string()));
+        }
+    }
+    let unit = clean_text(&x.unit_content_unit, 10);
+    if unit.as_deref().is_some_and(|u| !UNIT_CONTENT_UNITS.contains(&u)) {
+        return Err((StatusCode::BAD_REQUEST, "Unit must be kg, g, l, ml, m, cm or m2".to_string()));
+    }
+    let content = x.unit_content.filter(|c| c.is_finite() && *c > 0.0);
+    sqlx::query(
+        "UPDATE products SET weight_grams = $1, delivery_time = $2, sale_starts_at = $3, sale_ends_at = $4, gpsr_manufacturer = $5,
+         gpsr_responsible_person = $6, gpsr_safety_info = $7, unit_content = $8, unit_content_unit = $9,
+         length_mm = $11, width_mm = $12, height_mm = $13, updated_at = NOW() WHERE id = $10",
+    )
+    .bind(x.weight_grams)
+    .bind(clean_text(&x.delivery_time, 120))
+    .bind(x.sale_starts_at)
+    .bind(x.sale_ends_at)
+    .bind(clean_text(&x.gpsr_manufacturer, 2000))
+    .bind(clean_text(&x.gpsr_responsible_person, 2000))
+    .bind(clean_text(&x.gpsr_safety_info, 10000))
+    .bind(unit.as_ref().and(content))
+    .bind(content.and(unit))
+    .bind(product_id)
+    .bind(positive_mm(x.length_mm))
+    .bind(positive_mm(x.width_mm))
+    .bind(positive_mm(x.height_mm))
+    .execute(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(())
+}
+
+async fn save_variant_extras(pool: &PgPool, variant_id: Uuid, x: &crate::models::VariantExtras) -> Result<(), (StatusCode, String)> {
+    if x.weight_grams.is_some_and(|w| !(0..=1_000_000).contains(&w)) {
+        return Err((StatusCode::BAD_REQUEST, "The weight must be between 0 and 1,000,000 g".to_string()));
+    }
+    let regular: Option<i32> = sqlx::query_scalar(
+        "SELECT COALESCE(pv.price_override_cents, p.base_price_cents) FROM product_variants pv JOIN products p ON p.id = pv.product_id WHERE pv.id = $1",
+    )
+    .bind(variant_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let regular = regular.ok_or((StatusCode::NOT_FOUND, "Variant not found".to_string()))?;
+    if let Some(sale) = x.sale_price_cents {
+        if sale <= 0 || sale >= regular {
+            return Err((StatusCode::BAD_REQUEST, "The sale price must be above 0 and below the regular price".to_string()));
+        }
+    }
+    sqlx::query(
+        "UPDATE product_variants SET weight_grams = $1, sale_price_cents = $2, length_mm = $4, width_mm = $5, height_mm = $6, updated_at = NOW() WHERE id = $3",
+    )
+        .bind(x.weight_grams)
+        .bind(x.sale_price_cents)
+        .bind(variant_id)
+        .bind(positive_mm(x.length_mm))
+        .bind(positive_mm(x.width_mm))
+        .bind(positive_mm(x.height_mm))
+        .execute(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(())
+}
+
+/// Tells the storefront to forget cached policy pages (`*` = all), e.g. after settings changed.
+fn invalidate_storefront_pages(slug: &str) {
+    let slug = slug.to_string();
+    tokio::spawn(async move {
+        let _ = reqwest::Client::new()
+            .post("http://storefront:3000/api/cache/page")
+            .json(&json!({ "slug": slug }))
+            .timeout(std::time::Duration::from_millis(2000))
+            .send()
+            .await;
+    });
+}
+
+// ==========================================
+// Shipping: copy zones to other providers and rates between zones
+// ==========================================
+
+#[derive(Debug, Deserialize)]
+struct CopyZoneRequest {
+    provider_id: Option<Uuid>,
+    zone_name: Option<String>,
+}
+
+const COPY_RATES_SQL: &str = "INSERT INTO shipping_rates (id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm)
+     SELECT gen_random_uuid(), $1, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm
+     FROM shipping_rates WHERE zone_id = $2 AND ($3::uuid[] IS NULL OR id = ANY($3)) ORDER BY price_cents";
+
+/// Duplicates a zone (countries and all its rates), e.g. for another shipping provider.
+async fn admin_copy_shipping_zone(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<CopyZoneRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let db = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let zone = sqlx::query_as::<_, ShippingZone>("SELECT id, provider_id, zone_name, country_codes, is_default, created_at FROM shipping_zones WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(db)?
+        .ok_or((StatusCode::NOT_FOUND, "Zone not found".to_string()))?;
+    let provider_id = payload.provider_id.or(zone.provider_id);
+    let name = payload
+        .zone_name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| if provider_id == zone.provider_id { format!("{} (copy)", zone.zone_name) } else { zone.zone_name.clone() });
+
+    let mut tx = pool.begin().await.map_err(db)?;
+    let new_id = Uuid::new_v4();
+    // A copy is never the default zone (there is only one fallback)
+    sqlx::query("INSERT INTO shipping_zones (id, provider_id, zone_name, country_codes, is_default) VALUES ($1, $2, $3, $4, false)")
+        .bind(new_id)
+        .bind(provider_id)
+        .bind(&name)
+        .bind(&zone.country_codes)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+    let copied = sqlx::query(COPY_RATES_SQL)
+        .bind(new_id)
+        .bind(id)
+        .bind(None::<Vec<Uuid>>)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?
+        .rows_affected();
+    tx.commit().await.map_err(db)?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": new_id, "zone_name": name, "rates_copied": copied }))))
+}
+
+#[derive(Debug, Deserialize)]
+struct CopyRatesRequest {
+    source_zone_id: Uuid,
+    /// Only these rates; all rates of the source zone when missing
+    rate_ids: Option<Vec<Uuid>>,
+}
+
+/// Copies rates of another zone into this zone.
+async fn admin_copy_zone_rates(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<CopyRatesRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if payload.source_zone_id == id {
+        return Err((StatusCode::BAD_REQUEST, "Choose a different zone to copy from".to_string()));
+    }
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM shipping_zones WHERE id = $1)")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, "Zone not found".to_string()));
+    }
+    let copied = sqlx::query(COPY_RATES_SQL)
+        .bind(id)
+        .bind(payload.source_zone_id)
+        .bind(payload.rate_ids.filter(|ids| !ids.is_empty()))
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .rows_affected();
+    Ok(Json(json!({ "success": true, "rates_copied": copied })))
 }

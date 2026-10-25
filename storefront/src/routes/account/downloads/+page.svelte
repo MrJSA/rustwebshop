@@ -200,7 +200,9 @@
                       </div>
                       <div class="min-w-0">
                         <div class="text-xs font-bold text-white truncate">{file.name}</div>
-                        <div class="text-[10px] text-slate-400 truncate max-w-[200px]">Latest Build</div>
+                        <div class="text-[10px] text-slate-400 truncate max-w-[220px]">
+                          Latest version{#if file.downloads_left !== null && file.downloads_left !== undefined} · {file.downloads_left} downloads left{/if}{#if file.expires_at} · until {new Date(file.expires_at).toLocaleDateString('en-GB')}{/if}
+                        </div>
                       </div>
                     </div>
 

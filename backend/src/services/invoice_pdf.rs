@@ -254,22 +254,30 @@ fn layout(inv: &Invoice, logo: Option<&Logo>, shop_url: &str) -> Layout {
     let buyer_zip_city = format!("{} {}", b.postal_code, b.city);
     l.text(LEFT, by, 10.0, true, INK, &b.name, Align::Left);
     by += 13.5;
-    for line in [b.street.as_str(), b.extra.as_str(), buyer_zip_city.trim(), country_name(&b.country_code)] {
+    for line in [b.contact.as_str(), b.street.as_str(), b.extra.as_str(), buyer_zip_city.trim(), country_name(&b.country_code)] {
         if !line.trim().is_empty() {
             l.text(LEFT, by, 10.0, false, INK, line, Align::Left);
             by += 13.5;
         }
     }
+    if !b.vat_id.is_empty() {
+        l.text(LEFT, by, 9.0, false, MUTED, &format!("VAT ID: {}", b.vat_id), Align::Left);
+        by += 13.0;
+    }
 
     // Invoice details on the right
     let mut my = top + 18.0;
-    let details: Vec<(&str, String)> = vec![
-        ("Invoice number", inv.number.clone()),
-        ("Invoice date", date(inv.issue_date)),
+    let credit = inv.is_credit_note();
+    let mut details: Vec<(&str, String)> = vec![
+        (if credit { "Credit note number" } else { "Invoice number" }, inv.number.clone()),
+        (if credit { "Credit note date" } else { "Invoice date" }, date(inv.issue_date)),
         (if inv.has_physical_items { "Delivery date" } else { "Date of service" }, date(inv.delivery_date)),
         ("Order number", inv.order_number.clone()),
         ("Customer email", b.email.clone()),
     ];
+    if let Some(original) = &inv.referenced_invoice {
+        details.insert(2, ("Cancels invoice", original.clone()));
+    }
     for (label, value) in &details {
         if value.is_empty() {
             continue;
@@ -281,10 +289,14 @@ fn layout(inv: &Invoice, logo: Option<&Logo>, shop_url: &str) -> Layout {
 
     // Title
     l.y = by.max(my) + 34.0;
-    l.text(LEFT, l.y, 20.0, true, INK, "Invoice", Align::Left);
+    l.text(LEFT, l.y, 20.0, true, INK, if credit { "Credit note" } else { "Invoice" }, Align::Left);
     l.rect(LEFT, l.y + 7.0, 34.0, 2.2, ACCENT);
     l.y += 26.0;
-    l.text(LEFT, l.y, 9.5, false, INK, "Thank you for your order. We invoice you for the following items:", Align::Left);
+    let intro = match &inv.referenced_invoice {
+        Some(original) => format!("This credit note cancels invoice {} in full. We credit you the following items:", original),
+        None => "Thank you for your order. We invoice you for the following items:".to_string(),
+    };
+    l.text(LEFT, l.y, 9.5, false, INK, &intro, Align::Left);
     l.y += 16.0;
 
     // Items
@@ -345,7 +357,12 @@ fn layout(inv: &Invoice, logo: Option<&Logo>, shop_url: &str) -> Layout {
     if !inv.shows_gross_prices() {
         rows.push(("Total net".into(), money(inv.tax_basis_cents, sym), false));
         for g in &inv.groups {
-            rows.push((format!("VAT {}", percent(g.vat.percent)), money(g.tax_cents, sym), false));
+            let label = match g.vat.category {
+                "K" => "VAT 0 % (intra-Community supply)".to_string(),
+                "AE" => "VAT 0 % (reverse charge)".to_string(),
+                _ => format!("VAT {}", percent(g.vat.percent)),
+            };
+            rows.push((label, money(g.tax_cents, sym), false));
         }
         if inv.rounding_cents != 0 {
             rows.push(("Rounding".into(), money(inv.rounding_cents, sym), false));
@@ -353,7 +370,7 @@ fn layout(inv: &Invoice, logo: Option<&Logo>, shop_url: &str) -> Layout {
     }
     rows.push(("Total".into(), money(inv.payable_cents, sym), true));
     let mut vat_rows: Vec<String> = Vec::new();
-    if inv.tax_mode == "included" {
+    if inv.tax_mode == "included" && inv.shows_gross_prices() {
         for g in &inv.groups {
             vat_rows.push(format!(
                 "Includes {} VAT {} on {} net",
@@ -363,7 +380,9 @@ fn layout(inv: &Invoice, logo: Option<&Logo>, shop_url: &str) -> Layout {
             ));
         }
     }
-    let paid_line = if inv.paid {
+    let paid_line = if credit {
+        format!("The amount of {} has been refunded via {}.", money(inv.payable_cents, sym), inv.payment_label)
+    } else if inv.paid {
         format!("Paid on {} via {}. Amount due: {}", date(inv.issue_date), inv.payment_label, money(0, sym))
     } else {
         format!("Payment via {} is being processed.", inv.payment_label)
@@ -701,5 +720,32 @@ mod tests {
         let xml = inv.to_cii_xml();
         let pdf = render(&inv, logo.as_ref(), "https://shop.example", Some(&xml)).unwrap();
         std::fs::write(format!("{}/invoice-rounding.pdf", dir), &pdf).unwrap();
+
+        // Credit note cancelling that invoice
+        let cn = inv.credit_note(format!("{}-CN", inv.number), inv.issue_date);
+        let xml = cn.to_cii_xml();
+        let pdf = render(&cn, logo.as_ref(), "https://shop.example", Some(&xml)).unwrap();
+        std::fs::write(format!("{}/credit-note.pdf", dir), &pdf).unwrap();
+
+        // VAT-free EU business orders: goods (K) + digital (AE), with gross and net shop prices
+        for mode in ["included", "excluded"] {
+            let mut settings = sample_settings(mode);
+            settings.vat_id = "DE123456789".into();
+            let items = vec![item("Gadget", "G-1", 11900, 2, 19.0, false), item("E-Book", "E-1", 1070, 1, 7.0, true)];
+            let mut order = sample_order(mode, 2 * 11900 + 1070, 1190, 0);
+            order.reverse_charge = true;
+            order.buyer_company = Some("Exemple SARL".into());
+            order.buyer_vat_id = Some("FR12345678901".into());
+            order.billing_address = serde_json::json!({ "full_name": "Jean Dupont", "street_address": "1 Rue de Rivoli", "postal_code": "75001", "city": "Paris", "country_code": "FR" });
+            order.shipping_address = order.billing_address.clone();
+            let probe = Invoice::build(&order, &items, &settings);
+            order.total_cents = probe.grand_total_cents as i32;
+            let inv = Invoice::build(&order, &items, &settings);
+            assert_eq!(inv.tax_total_cents, 0);
+            let xml = inv.to_cii_xml();
+            assert!(xml.contains("<ram:CategoryCode>K</ram:CategoryCode>") && xml.contains("<ram:CategoryCode>AE</ram:CategoryCode>"));
+            let pdf = render(&inv, logo.as_ref(), "https://shop.example", Some(&xml)).unwrap();
+            std::fs::write(format!("{}/invoice-reverse-charge-{}.pdf", dir, mode), &pdf).unwrap();
+        }
     }
 }

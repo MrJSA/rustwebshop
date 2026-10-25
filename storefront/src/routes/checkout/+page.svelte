@@ -9,6 +9,7 @@
   import StripePaymentForm from '$lib/components/StripePaymentForm.svelte';
   import StripeExpressButton from '$lib/components/StripeExpressButton.svelte';
   import { checkoutMethods, EXPRESS_METHODS, expressButtons, expressProbeTypes } from '$lib/stripeMethods.js';
+  import { rememberNewsletterOptIn, submitRememberedNewsletterOptIn } from '$lib/newsletter.js';
 
   export let data;
   $: store = data.store || {};
@@ -92,6 +93,33 @@
   let acceptedTerms = false;
   let acceptedDigitalWaiver = false;
 
+  // Business customers: company name on the invoice; with a VAT ID from another EU country the
+  // order is VAT-free (checked with the EU VIES service)
+  let isBusiness = false;
+  let buyerCompany = '';
+  let vatId = '';
+  let vatCheck = null;
+  let vatChecking = false;
+  let newsletterOptIn = false;
+
+  async function checkVatId() {
+    vatCheck = null;
+    if (!vatId.trim()) return;
+    vatChecking = true;
+    try {
+      const res = await fetch('/api/v1/checkout/vat-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vat_id: vatId })
+      });
+      vatCheck = res.ok ? await res.json() : { valid: false, error: await readError(res, 'The VAT ID could not be checked.') };
+    } catch (_) {
+      vatCheck = { valid: false, error: 'The VAT ID could not be checked.' };
+    } finally {
+      vatChecking = false;
+    }
+  }
+
   // Promo / Coupon Code State
   let couponInput = '';
   let appliedCoupon = null;
@@ -161,24 +189,31 @@
     { code: 'CA', name: 'Canada' }
   ];
 
-  async function fetchShippingRates() {
-    isFetchingRates = true;
+  $: selectedRateEstimate = (availableRates.find((r) => r.id === selectedShippingRateId)?.estimated_delivery_days || '').trim();
+  const countryName = (code) => {
+    const known = countries.find((c) => c.code === code);
+    if (known) return known.name.replace(' (Domestic)', '');
     try {
-      const res = await fetch(`/api/v1/shipping/rates?country_code=${countryCode}`);
-      if (res.ok) {
-        const result = await res.json();
-        availableRates = result.rates || [];
-        // A rate from the previous country's zone is not valid for the new destination
-        if (!availableRates.some((r) => r.id === selectedShippingRateId)) {
-          selectedShippingRateId = availableRates.length > 0 ? availableRates[0].id : '';
-        }
-      }
-    } catch (e) {
-      console.warn('Could not fetch rates:', e);
-    } finally {
-      isFetchingRates = false;
+      return new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code;
+    } catch (_) {
+      return code;
+    }
+  };
+
+  // Shipping options come with the server quote: only packages the cart fits into (weight and
+  // size) for the chosen country, cheapest first. Changing the address simply asks for a new quote.
+  function fetchShippingRates() {
+    scheduleQuote();
+  }
+
+  function applyShippingOptions(options) {
+    availableRates = options;
+    // A rate for another country or a parcel that no longer fits is not valid any more
+    if (!options.some((r) => r.id === selectedShippingRateId)) {
+      selectedShippingRateId = options.length > 0 ? options[0].id : '';
     }
   }
+  $: if (quote) applyShippingOptions(quote.shipping_options || []);
 
   function selectSavedAddress(addr) {
     if (!addr) return;
@@ -273,6 +308,8 @@
       },
       shipping_rate_id: hasPhysicalItems ? selectedShippingRateId || null : null,
       coupon_code: appliedCoupon ? appliedCoupon.code : null,
+      buyer_company: isBusiness && buyerCompany.trim() ? buyerCompany.trim() : null,
+      vat_id: isBusiness && vatId.trim() ? vatId.trim() : null,
       items: $cart.map((i) => ({ variant_id: i.variant_id, quantity: i.quantity }))
     };
   }
@@ -287,7 +324,9 @@
     items: $cart.map((i) => [i.variant_id, i.quantity]),
     country: countryCode,
     rate: hasPhysicalItems ? selectedShippingRateId : null,
-    coupon: appliedCoupon ? appliedCoupon.code : null
+    coupon: appliedCoupon ? appliedCoupon.code : null,
+    company: isBusiness ? buyerCompany.trim() : '',
+    vat: isBusiness ? vatId.trim() : ''
   });
   $: if (browser && $cart.length > 0) scheduleQuote(quoteKey);
 
@@ -321,6 +360,10 @@
   }
 
   onDestroy(() => clearTimeout(quoteTimer));
+
+  $: reverseCharge = !!quote?.reverse_charge;
+  // Remembered until the order is complete (also across a payment redirect)
+  $: if (browser) rememberNewsletterOptIn(newsletterOptIn && store.newsletter_enabled ? customerEmail.trim() : null);
 
   $: itemsSubtotalCents = quote ? quote.items_subtotal_cents : $cartSubtotal;
   $: discountCents = quote ? quote.discount_cents : 0;
@@ -483,6 +526,7 @@
   }
 
   function finishOrder(order) {
+    submitRememberedNewsletterOptIn();
     try {
       localStorage.setItem(
         'rustwebshop_last_shipping',
@@ -716,6 +760,39 @@
               />
             </div>
           </div>
+
+          <!-- Business customers -->
+          <div class="mt-4 space-y-3">
+            <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+              <input type="checkbox" bind:checked={isBusiness} class="w-4 h-4 accent-orange-600" />
+              I am ordering for a company
+            </label>
+            {#if isBusiness}
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label for="checkout-company" class="block text-xs font-semibold text-slate-400 mb-1">Company name</label>
+                  <input id="checkout-company" bind:value={buyerCompany} autocomplete="organization" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none focus:border-orange-500" />
+                </div>
+                {#if store.eu_business_vat_free}
+                  <div>
+                    <label for="checkout-vat" class="block text-xs font-semibold text-slate-400 mb-1">VAT ID (EU businesses outside {store.address_country || 'our country'})</label>
+                    <div class="flex gap-2">
+                      <input id="checkout-vat" bind:value={vatId} on:blur={checkVatId} placeholder="e.g. FR12345678901" class="flex-1 min-w-0 px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm font-mono focus:outline-none focus:border-orange-500" />
+                      <button type="button" on:click={checkVatId} disabled={vatChecking || !vatId.trim()} class="px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white text-xs font-bold">{vatChecking ? '…' : 'Check'}</button>
+                    </div>
+                    {#if vatCheck}
+                      <p class="mt-1 text-[11px] {vatCheck.valid ? 'text-emerald-400' : 'text-rose-400'}">
+                        {#if vatCheck.valid}✓ Valid{#if vatCheck.name && vatCheck.name !== '---'} · {vatCheck.name}{/if}{:else}{vatCheck.error || 'This VAT ID is not valid according to the EU VIES service.'}{/if}
+                      </p>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+              {#if store.eu_business_vat_free}
+                <p class="text-[11px] text-slate-500">With a valid VAT ID from another EU country the order is VAT-free (reverse charge / intra-Community supply). The ID is checked with the EU VIES service.</p>
+              {/if}
+            {/if}
+          </div>
         </div>
 
         <!-- 2. Shipping Address & Country Zone -->
@@ -851,7 +928,7 @@
               {#if isFetchingRates}
                 <div class="text-xs text-slate-400 py-2">Recalculating zone rates...</div>
               {:else if availableRates.length === 0}
-                <div class="text-xs text-slate-400 py-2">Standard International Rate: 4.99 €</div>
+                <div class="text-xs text-slate-400 py-2">Shipping: {shippingCents > 0 ? formatEuro(shippingCents) : 'free of charge'}</div>
               {:else}
                 <div class="space-y-2">
                   {#each availableRates as rate}
@@ -873,6 +950,12 @@
                     </label>
                   {/each}
                 </div>
+              {/if}
+              <!-- The delivery time for the chosen country is part of the pre-contractual information -->
+              {#if selectedRateEstimate || store.default_delivery_time}
+                <p class="mt-2 text-[11px] text-slate-300">
+                  Delivery time to {countryName(countryCode)}: {selectedRateEstimate || store.default_delivery_time}
+                </p>
               {/if}
             </div>
           {:else}
@@ -1092,9 +1175,17 @@
                 <span class="font-mono text-slate-400">0.00 €</span>
               </div>
               <p class="text-[10px] text-slate-500 italic">{store.tax_notice || 'According to § 19 UStG, no value-added tax is charged (small business regulation).'}</p>
+            {:else if reverseCharge}
+              {#if taxMode === 'included' && itemsSubtotalCents - discountCents + shippingCents > totalCents}
+                <div class="flex justify-between text-emerald-400">
+                  <span>VAT not charged</span>
+                  <span class="font-mono">−{formatEuro(itemsSubtotalCents - discountCents + shippingCents - totalCents)}</span>
+                </div>
+              {/if}
+              <p class="text-[10px] text-emerald-300/80">VAT-free EU business order (reverse charge / intra-Community supply) — VAT ID {vatId.trim().toUpperCase()}</p>
             {:else}
               <div class="flex justify-between text-slate-400">
-                <span>{taxMode === 'included' ? 'Included VAT' : 'VAT'} ({taxRatePercent}%)</span>
+                <span>{taxMode === 'included' ? 'Included VAT' : 'VAT'}</span>
                 <span class="font-mono text-slate-200">{formatEuro(taxCents)}</span>
               </div>
             {/if}
@@ -1120,7 +1211,7 @@
                 class="mt-0.5 w-4 h-4 rounded bg-slate-950 border border-slate-700 text-orange-600 focus:ring-orange-500 accent-orange-600 flex-shrink-0 cursor-pointer"
               />
               <span class="text-[11px] text-slate-400 leading-relaxed">
-                I have read and agree to the <a href="/policies/terms" target="_blank" class="text-orange-400 underline hover:text-orange-300">Terms & Conditions (AGB)</a> and acknowledge the <a href="/policies/revocation-policy" target="_blank" class="text-orange-400 underline hover:text-orange-300">Revocation Policy (Widerrufsbelehrung)</a>.
+                I have read and agree to the <a href="/policies/terms-conditions" target="_blank" class="text-orange-400 underline hover:text-orange-300">Terms & Conditions (AGB)</a> and acknowledge the <a href="/policies/revocation-policy" target="_blank" class="text-orange-400 underline hover:text-orange-300">Revocation Policy (Widerrufsbelehrung)</a>.
               </span>
             </label>
 
@@ -1134,6 +1225,16 @@
                 />
                 <span class="text-[11px] text-sky-300/90 leading-relaxed">
                   I expressly agree and demand that the execution of the contract for digital content begins before the expiration of the 14-day statutory revocation period. I confirm my knowledge that I lose my right of revocation with the start of execution (§ 356 Abs. 5 BGB).
+                </span>
+              </label>
+            {/if}
+
+            {#if store.newsletter_enabled}
+              <!-- Optional and unticked by default; confirmed by email (double opt-in) -->
+              <label class="flex items-start gap-2.5 cursor-pointer text-xs">
+                <input type="checkbox" bind:checked={newsletterOptIn} class="mt-0.5 w-4 h-4 accent-orange-600 flex-shrink-0 cursor-pointer" />
+                <span class="text-[11px] text-slate-400 leading-relaxed">
+                  Optional: I would like to receive the newsletter by email. I will get an email to confirm the subscription and can unsubscribe at any time.
                 </span>
               </label>
             {/if}

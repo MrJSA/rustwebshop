@@ -1,29 +1,20 @@
 import { json } from '@sveltejs/kit';
 import { pageCache } from '$lib/server/pageCache.js';
 
+// Called by the backend after a policy page or the shop settings changed. It only forgets cached
+// pages (they are reloaded from the backend with all placeholders filled in), so a call from
+// anywhere else can do no harm.
 export async function POST({ request }) {
+  let slug = '*';
   try {
-    const data = await request.json();
-    const { slug, title, content_markdown, is_published } = data;
-
-    if (!slug) {
-      return json({ error: 'Missing slug' }, { status: 400 });
-    }
-
-    const cached = pageCache.get(slug) || {};
-    pageCache.set(slug, {
-      page: {
-        slug,
-        title: title || cached.page?.title || slug,
-        content_markdown: content_markdown !== undefined ? content_markdown : cached.page?.content_markdown || '',
-        is_published: is_published !== undefined ? is_published : true,
-        updated_at: new Date().toISOString()
-      },
-      providers: cached.providers || []
-    });
-
-    return json({ success: true, cached_slug: slug });
-  } catch (e) {
-    return json({ error: e.message }, { status: 500 });
+    slug = (await request.json())?.slug || '*';
+  } catch (_) {
+    // no body: forget everything
   }
+  if (slug === '*') {
+    pageCache.clear();
+  } else {
+    pageCache.delete(String(slug));
+  }
+  return json({ success: true });
 }

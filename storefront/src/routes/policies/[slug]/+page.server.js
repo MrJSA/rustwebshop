@@ -1,24 +1,22 @@
 import { error } from '@sveltejs/kit';
-import { pageCache } from '$lib/server/pageCache.js';
+import { pageCache, PAGE_CACHE_MS } from '$lib/server/pageCache.js';
 
 export async function load({ params, fetch, setHeaders }) {
   const { slug } = params;
   const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://backend:8000';
 
-  // Cache-Control headers for lightning-fast edge & browser caching
+  // Legal texts must reflect changes quickly: short browser cache
   setHeaders({
-    'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400'
+    'Cache-Control': 'public, max-age=300, stale-while-revalidate=600'
   });
 
-  // Check in-memory server cache first (0ms load)
-  if (pageCache.has(slug)) {
-    const cached = pageCache.get(slug);
-    if (cached && cached.page) {
-      return {
-        page: cached.page,
-        providers: cached.providers || []
-      };
-    }
+  // In-memory server cache (cleared by the backend when pages or settings change)
+  const cached = pageCache.get(slug);
+  if (cached && cached.page && Date.now() - (cached.at || 0) < PAGE_CACHE_MS) {
+    return {
+      page: cached.page,
+      providers: cached.providers || []
+    };
   }
 
   try {
@@ -29,8 +27,7 @@ export async function load({ params, fetch, setHeaders }) {
         page: data.page,
         providers: data.providers || []
       };
-      // Populate memory cache
-      pageCache.set(slug, payload);
+      pageCache.set(slug, { ...payload, at: Date.now() });
       return payload;
     }
   } catch (e) {

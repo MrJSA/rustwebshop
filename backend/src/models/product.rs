@@ -26,6 +26,48 @@ pub struct Product {
     pub images: JsonValue,
     pub has_multiple_variants: bool,
     pub tax_rate_percent: Option<f64>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub weight_grams: Option<i32>,
+    /// Overrides the shop's default delivery time
+    #[serde(default)]
+    #[sqlx(default)]
+    pub delivery_time: Option<String>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub sale_starts_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub sale_ends_at: Option<DateTime<Utc>>,
+    /// GPSR: manufacturer name, postal and electronic address
+    #[serde(default)]
+    #[sqlx(default)]
+    pub gpsr_manufacturer: Option<String>,
+    /// GPSR: responsible person in the EU (if the manufacturer is outside the EU)
+    #[serde(default)]
+    #[sqlx(default)]
+    pub gpsr_responsible_person: Option<String>,
+    /// GPSR: warnings and safety information
+    #[serde(default)]
+    #[sqlx(default)]
+    pub gpsr_safety_info: Option<String>,
+    /// Net content for the unit price (§ 4 PAngV), e.g. 0.25 with unit "kg"
+    #[serde(default)]
+    #[sqlx(default)]
+    pub unit_content: Option<f64>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub unit_content_unit: Option<String>,
+    /// Package size in mm (for choosing the shipping package)
+    #[serde(default)]
+    #[sqlx(default)]
+    pub length_mm: Option<i32>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub width_mm: Option<i32>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub height_mm: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -42,6 +84,25 @@ pub struct ProductVariant {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub images: JsonValue,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub weight_grams: Option<i32>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub sale_price_cents: Option<i32>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub length_mm: Option<i32>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub width_mm: Option<i32>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub height_mm: Option<i32>,
+    /// Effective price for the storefront (sale, regular and lowest price of the last 30 days)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(skip)]
+    pub pricing: Option<crate::services::pricing::VariantPricing>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +131,39 @@ pub struct CreateProductRequest {
     pub has_multiple_variants: Option<bool>,
     pub tax_rate_percent: Option<f64>,
     pub variants: Option<Vec<CreateVariantRequest>>,
+    #[serde(default)]
+    pub extras: Option<ProductExtras>,
+}
+
+/// Shipping weight, delivery time, sale window, product safety (GPSR) and unit price data.
+/// When sent, every field is saved as given (null clears it).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ProductExtras {
+    pub weight_grams: Option<i32>,
+    pub length_mm: Option<i32>,
+    pub width_mm: Option<i32>,
+    pub height_mm: Option<i32>,
+    pub delivery_time: Option<String>,
+    pub sale_starts_at: Option<DateTime<Utc>>,
+    pub sale_ends_at: Option<DateTime<Utc>>,
+    pub gpsr_manufacturer: Option<String>,
+    pub gpsr_responsible_person: Option<String>,
+    pub gpsr_safety_info: Option<String>,
+    pub unit_content: Option<f64>,
+    pub unit_content_unit: Option<String>,
+}
+
+/// Variant weight and sale price; when sent, both are saved as given (null clears).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct VariantExtras {
+    pub weight_grams: Option<i32>,
+    #[serde(default)]
+    pub length_mm: Option<i32>,
+    #[serde(default)]
+    pub width_mm: Option<i32>,
+    #[serde(default)]
+    pub height_mm: Option<i32>,
+    pub sale_price_cents: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +184,8 @@ pub struct UpdateProductRequest {
     pub images: Option<JsonValue>,
     pub has_multiple_variants: Option<bool>,
     pub tax_rate_percent: Option<f64>,
+    #[serde(default)]
+    pub extras: Option<ProductExtras>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -165,6 +261,8 @@ pub struct UpdateVariantRequest {
     pub low_stock_threshold: Option<i32>,
     pub image_url: Option<String>,
     pub images: Option<JsonValue>,
+    #[serde(default)]
+    pub extras: Option<VariantExtras>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,6 +275,8 @@ pub struct CreateVariantRequest {
     pub low_stock_threshold: Option<i32>,
     pub image_url: Option<String>,
     pub images: Option<JsonValue>,
+    #[serde(default)]
+    pub extras: Option<VariantExtras>,
 }
 
 #[derive(Debug, Deserialize)]

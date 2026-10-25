@@ -2,6 +2,10 @@
   import { cart, isCartOpen } from '$lib/stores/cart.js';
   import { customer } from '$lib/stores/customer.js';
   import ProductCard from '$lib/components/ProductCard.svelte';
+  import PriceNote from '$lib/components/PriceNote.svelte';
+  import ProductReviews from '$lib/components/ProductReviews.svelte';
+  import { variantPricing, formatEuro, reductionPercent, deliveryTime, deliveryForCountry, formatWeight } from '$lib/pricing.js';
+  import { browser } from '$app/environment';
   import Seo from '$lib/components/Seo.svelte';
   import { page } from '$app/stores';
   import { absoluteUrl, toDescription } from '$lib/seo.js';
@@ -17,7 +21,9 @@
     X,
     ChevronLeft,
     ChevronRight,
-    Sparkles
+    Sparkles,
+    ShieldAlert,
+    Truck
   } from 'lucide-svelte';
 
   export let data;
@@ -36,7 +42,38 @@
   let stockNotificationSuccess = false;
 
   $: currentVariant = variants[selectedVariantIndex] || {};
-  $: currentPriceCents = currentVariant.price_override_cents || product.base_price_cents;
+  $: pricing = variantPricing(product, currentVariant);
+  $: currentPriceCents = pricing.price_cents;
+  $: weightGrams = currentVariant.weight_grams ?? product.weight_grams;
+  $: manufacturer = (product.gpsr_manufacturer || store.gpsr_default_manufacturer || '').trim();
+
+  // Country-specific delivery time only for logged-in customers with a saved address (no guessing
+  // the location; everyone else sees the delivery time for their country at checkout)
+  let shippingInfo = null;
+  let shippingInfoKey = '';
+  $: if (browser && $customer?.token && currentVariant.id && !isDigital) loadShippingInfo(currentVariant.id);
+
+  async function loadShippingInfo(key) {
+    if (key === shippingInfoKey) return;
+    shippingInfoKey = key;
+    try {
+      const res = await fetch('/api/v1/customer/addresses', { headers: { Authorization: `Bearer ${$customer.token}` } });
+      if (!res.ok) return;
+      const list = await res.json();
+      const address = (Array.isArray(list) && (list.find((a) => a.is_default) || list[0])) || null;
+      if (!address?.country_code) return;
+      const info = await deliveryForCountry(address.country_code, key);
+      if (info && key === shippingInfoKey) {
+        let countryName = address.country_code;
+        try {
+          countryName = new Intl.DisplayNames(['en'], { type: 'region' }).of(address.country_code) || address.country_code;
+        } catch (_) {}
+        shippingInfo = { ...info, countryName };
+      }
+    } catch (_) {
+      // optional information; the checkout shows it in any case
+    }
+  }
   $: isDigital = product.product_type === 'digital';
   $: inStock = isDigital || (currentVariant.stock_quantity && currentVariant.stock_quantity > 0);
   $: isLowStock = !isDigital && currentVariant.stock_quantity > 0 && currentVariant.stock_quantity <= currentVariant.low_stock_threshold;
@@ -59,7 +96,7 @@
   $: storeName = store.store_name || 'Shop';
   $: origin = $page.url.origin;
   $: productUrl = `${origin}/products/${product.slug}`;
-  $: variantPrice = (v) => v.price_override_cents || product.base_price_cents || 0;
+  $: variantPrice = (v) => variantPricing(product, v).price_cents || 0;
   $: variantInStock = (v) => isDigital || (v.stock_quantity || 0) > 0;
   $: offerVariants = variants.length > 0 ? variants : [{}];
   $: productJsonLd = {
@@ -349,11 +386,26 @@
           </p>
         {/if}
 
-        <div class="mt-4 flex items-baseline gap-3">
-          <span class="text-3xl font-black text-white font-mono">
-            {(currentPriceCents / 100).toFixed(2)} €
-          </span>
-          <span class="text-xs text-slate-400 font-mono">Incl. VAT / Taxes</span>
+        <div class="mt-4 space-y-1">
+          <div class="flex items-baseline gap-3 flex-wrap">
+            <span class="text-3xl font-black font-mono {pricing.on_sale ? 'text-rose-400' : 'text-white'}">
+              {formatEuro(currentPriceCents)}
+            </span>
+            {#if pricing.on_sale}
+              <span class="text-lg font-mono text-slate-500 line-through" aria-label="Previous lowest price">{formatEuro(pricing.reference_cents)}</span>
+              <span class="px-2 py-0.5 rounded-md bg-rose-600 text-white text-xs font-black">−{reductionPercent(pricing)} %</span>
+            {/if}
+          </div>
+          {#if pricing.on_sale}
+            <!-- § 11 PAngV: the reduction refers to the lowest price of the 30 days before it -->
+            <p class="text-[11px] text-slate-400">
+              Lowest price in the 30 days before the reduction: {formatEuro(pricing.reference_cents)}{#if pricing.sale_ends_at} · Offer ends {new Date(pricing.sale_ends_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}{/if}
+            </p>
+          {/if}
+          {#if pricing.unit_price}
+            <p class="text-xs text-slate-400 font-mono">({pricing.unit_price})</p>
+          {/if}
+          <PriceNote {store} digital={isDigital} />
         </div>
 
         <!-- Short Description Next to Image -->
@@ -388,8 +440,8 @@
                     <div class="text-[11px] font-mono text-slate-400 mt-0.5">{variant.sku}</div>
                   </div>
                   <div class="text-right flex-shrink-0">
-                    <div class="text-xs font-mono font-bold">
-                      {((variant.price_override_cents || product.base_price_cents) / 100).toFixed(2)} €
+                    <div class="text-xs font-mono font-bold {variantPricing(product, variant).on_sale ? 'text-rose-400' : ''}">
+                      {formatEuro(variantPricing(product, variant).price_cents)}
                     </div>
                     {#if !isDigital}
                       <div class="text-[10px] {variant.stock_quantity <= 0 ? 'text-rose-400' : variant.stock_quantity <= variant.low_stock_threshold ? 'text-amber-400 font-bold' : 'text-slate-400'}">
@@ -420,6 +472,32 @@
             {/if}
           </div>
         </div>
+
+        <!-- Delivery time must be stated before the order (Art. 246a § 1 Nr. 7 EGBGB) -->
+        {#if deliveryTime(product) || shippingInfo || formatWeight(weightGrams)}
+          <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
+            {#if deliveryTime(product)}
+              <span class="flex items-center gap-1.5"><Truck size={14} class="text-slate-500" /> {deliveryTime(product)}</span>
+            {/if}
+            {#if shippingInfo && !deliveryTime(product)}
+              <span class="flex items-center gap-1.5 {shippingInfo.ships ? '' : 'text-amber-300'}">
+                <Truck size={14} class="text-slate-500" />
+                {#if !shippingInfo.ships}
+                  We currently don't ship to {shippingInfo.countryName}.
+                {:else if !shippingInfo.fits}
+                  Too large for our standard parcels to {shippingInfo.countryName} — please contact us for shipping.
+                {:else if shippingInfo.estimate}
+                  Delivery to {shippingInfo.countryName}: {shippingInfo.estimate}
+                {:else}
+                  Ships to {shippingInfo.countryName} — delivery time shown at checkout
+                {/if}
+              </span>
+            {/if}
+            {#if !isDigital && formatWeight(weightGrams)}
+              <span>Weight: {formatWeight(weightGrams)}</span>
+            {/if}
+          </div>
+        {/if}
       </div>
 
       <!-- Add to Cart Action -->
@@ -521,6 +599,46 @@
         </div>
       </div>
     </div>
+  {/if}
+
+  <!-- Product safety information (EU General Product Safety Regulation, Art. 19 GPSR) -->
+  {#if !isDigital && (manufacturer || product.gpsr_responsible_person || product.gpsr_safety_info)}
+    <div class="mt-16 pt-10 border-t border-slate-800">
+      <div class="max-w-4xl mx-auto">
+        <div class="flex items-center gap-2 mb-4">
+          <ShieldAlert size={18} class="text-orange-400" />
+          <h2 class="text-xl font-black text-white tracking-tight">Product safety</h2>
+        </div>
+        <dl class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+          {#if manufacturer}
+            <div class="p-4 rounded-2xl bg-slate-900/50 border border-slate-800">
+              <dt class="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1">Manufacturer</dt>
+              <dd class="text-slate-300 whitespace-pre-line">{manufacturer}</dd>
+            </div>
+          {/if}
+          {#if product.gpsr_responsible_person}
+            <div class="p-4 rounded-2xl bg-slate-900/50 border border-slate-800">
+              <dt class="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1">Responsible person in the EU</dt>
+              <dd class="text-slate-300 whitespace-pre-line">{product.gpsr_responsible_person}</dd>
+            </div>
+          {/if}
+          <div class="p-4 rounded-2xl bg-slate-900/50 border border-slate-800">
+            <dt class="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1">Product identification</dt>
+            <dd class="text-slate-300">{product.title}{#if currentVariant.sku} · SKU {currentVariant.sku}{/if}</dd>
+          </div>
+          {#if product.gpsr_safety_info}
+            <div class="p-4 rounded-2xl bg-slate-900/50 border border-slate-800 md:col-span-2">
+              <dt class="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1">Warnings and safety information</dt>
+              <dd class="text-slate-300 whitespace-pre-line">{product.gpsr_safety_info}</dd>
+            </div>
+          {/if}
+        </dl>
+      </div>
+    </div>
+  {/if}
+
+  {#if product.id}
+    <ProductReviews productId={product.id} />
   {/if}
 
   <!-- 5-Products Wide Carousel Underneath Description: "Related Products" -->

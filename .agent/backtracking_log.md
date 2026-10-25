@@ -532,3 +532,14 @@ This log tracks architectural decisions, state checkpoints, implementation miles
 - **Issue**: Checkout computed VAT only on products; with net pricing shipping was charged without VAT, with gross pricing its contained VAT was missing from `tax_cents`.
 - **Decision**: `checkout::compute_tax` taxes shipping with the main delivery's rate (shared `invoice::main_rate_index`); invoices treat shipping as net with net pricing. Test proves checkout and invoice agree in all three tax modes.
 - **Status**: Completed.
+
+### [2026-10-25] Reviews, newsletter, sale prices, protected downloads, weights, EU B2B, legal compliance
+- **Added**: optional reviews (verified buyers, approval), double opt-in newsletter with campaigns, optional sale prices with 30-day lowest price from an effective-price history, protected digital downloads (tokens, limits, expiry, `/uploads` guard), product/variant weights with weight-based shipping rates, EU VAT ID check (VIES) with intra-Community supply / reverse charge (categories K/AE, validated with Mustang), withdrawal button, delivery times, GPSR product safety fields, unit prices, stored invoices + credit notes on refund, automatic privacy sections, ODR removal.
+- **Fixed on the way**: public `/api/cache/page` let anyone overwrite cached legal pages (now invalidate-only, 5 min TTL); broken AGB link at checkout (`/policies/terms`); misleading "Incl. VAT" for § 19 shops; fallback "4.99 €" shipping text while 0 € was charged; customer order list exposed download links of unpaid orders; download proxy buffered whole files and lost the file name.
+- **Verified**: 36 backend tests; end-to-end on the dev stack (sale/30-day logic incl. consecutive sales, weight filtering, downloads + limits, upload guard, review flow, stored invoice + credit note email, withdrawal + emails, newsletter DOI/campaign/unsubscribe, live VIES with reverse-charge quote); Mustang: credit note and K/AE invoices PDF/A-3b + EN 16931 valid.
+- **Status**: Completed.
+
+### [2026-10-25] Package sizes, country picker, copying zones and rates
+- **Decision**: products/variants get L×W×H, shipping rates a maximum package size (migration 0026). Checkout estimates the parcel (`services::packing`) and offers only fitting rates, cheapest first; the quote carries `shipping_options`, so the storefront no longer queries rates separately (one source of truth). Zones are edited by country name (ISO codes stored), zones can be copied to other providers and rates between zones.
+- **Verified**: packing unit tests (stacking, rotation by volume, weight); E2E: Päckchen vs. Paket chosen by quantity, overweight message with parcel size, zone copy to another provider incl. rates/sizes, selective rate copy, self-copy refused.
+- **Status**: Completed.

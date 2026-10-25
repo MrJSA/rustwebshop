@@ -28,4 +28,4 @@ export function jsonLdScript(data) {
 }
 
 /** Paths that must never appear in search results (customer data, checkout, order status). */
-export const PRIVATE_PATH = /^\/(account|checkout|order-success|track)(\/|$)/;
+export const PRIVATE_PATH = /^\/(account|checkout|order-success|track|withdraw|newsletter)(\/|$)/;

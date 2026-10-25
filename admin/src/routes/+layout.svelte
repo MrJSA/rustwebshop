@@ -35,7 +35,8 @@
         { href: '/products?tab=catalog', label: 'Products & BOM', tab: 'catalog', match: (p, t) => (p === '/products' && (!t || t === 'catalog')) },
         { href: '/products?tab=categories', label: 'Categories Tree', tab: 'categories', match: (p, t) => p === '/categories' || (p === '/products' && t === 'categories') },
         { href: '/products?tab=stock', label: 'Logistics & Stock', tab: 'stock', match: (p, t) => p === '/logistics' || (p === '/products' && t === 'stock') },
-        { href: '/products?tab=coupons', label: 'Promo & Discount Codes', tab: 'coupons', match: (p, t) => (p === '/products' && t === 'coupons') }
+        { href: '/products?tab=coupons', label: 'Promo & Discount Codes', tab: 'coupons', match: (p, t) => (p === '/products' && t === 'coupons') },
+        { href: '/products/reviews', label: 'Product Reviews', tab: 'reviews', match: (p) => p === '/products/reviews' }
       ]
     },
     {
@@ -44,19 +45,23 @@
       icon: ShoppingCart,
       href: '/orders',
       match: (p) => p.startsWith('/orders'),
-      subItems: []
+      subItems: [
+        { href: '/orders', label: 'All Orders', tab: 'orders', match: (p) => p === '/orders' },
+        { href: '/orders/withdrawals', label: 'Withdrawals', tab: 'withdrawals', match: (p) => p === '/orders/withdrawals' }
+      ]
     },
     {
       id: 'storefront',
       label: 'Storefront & Design',
       icon: Sliders,
       href: '/settings/system',
-      match: (p) => p === '/settings/system' || p === '/settings/menu' || p === '/settings/pages',
+      match: (p) => p === '/settings/system' || p.startsWith('/settings/system/') || p === '/settings/menu' || p === '/settings/pages',
       subItems: [
         { href: '/settings/system?tab=hero', label: 'Hero & Carousels', tab: 'hero', match: (p, t) => (p === '/settings/system' && (!t || t === 'hero')) },
         { href: '/settings/system?tab=menu', label: 'Navigation Menus', tab: 'menu', match: (p, t) => p === '/settings/menu' || (p === '/settings/system' && t === 'menu') },
         { href: '/settings/system?tab=policies', label: 'Policy CMS (Markdown)', tab: 'policies', match: (p, t) => p === '/settings/pages' || (p === '/settings/system' && t === 'policies') },
-        { href: '/settings/system?tab=cookie', label: 'Cookie Consent', tab: 'cookie', match: (p, t) => (p === '/settings/system' && t === 'cookie') }
+        { href: '/settings/system?tab=cookie', label: 'Cookie Consent', tab: 'cookie', match: (p, t) => (p === '/settings/system' && t === 'cookie') },
+        { href: '/settings/system/newsletter', label: 'Newsletter', tab: 'newsletter', match: (p) => p === '/settings/system/newsletter' }
       ]
     },
     {
@@ -73,7 +78,8 @@
         { href: '/settings?tab=media', label: 'Media Library', tab: 'media', match: (p, t) => p === '/settings/media' || (p === '/settings' && t === 'media') },
         { href: '/settings?tab=users', label: 'Admin Users & Access', tab: 'users', match: (p, t) => (p === '/settings' && t === 'users') },
         { href: '/settings?tab=export', label: 'Export & Backups', tab: 'export', match: (p, t) => (p === '/settings' && t === 'export') },
-        { href: '/settings?tab=system', label: 'System & Updates', tab: 'system', match: (p, t) => (p === '/settings' && t === 'system') }
+        { href: '/settings?tab=system', label: 'System & Updates', tab: 'system', match: (p, t) => (p === '/settings' && t === 'system') },
+        { href: '/settings?tab=features', label: 'Shop Features & Legal', tab: 'features', match: (p, t) => (p === '/settings' && t === 'features') }
       ]
     }
   ];

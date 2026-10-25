@@ -96,8 +96,14 @@ pub fn required_access(method: &Method, path: &str) -> Access {
     if starts("/products") || starts("/variants") || starts("/parts") || starts("/bom-parts") || starts("/categories") || starts("/coupons") || starts("/logistics") {
         return Access::AnyOf(&["products"]);
     }
-    if starts("/orders") {
+    if starts("/orders") || starts("/withdrawals") {
         return Access::AnyOf(&["orders"]);
+    }
+    if starts("/reviews") {
+        return Access::AnyOf(&["products"]);
+    }
+    if starts("/newsletter") {
+        return Access::AnyOf(&["storefront"]);
     }
     if starts("/menu") || starts("/pages") {
         return Access::AnyOf(&["storefront"]);
@@ -179,6 +185,9 @@ mod tests {
         assert_eq!(required_access(&Method::PUT, "/settings/payments/stripe"), Access::AnyOf(&["settings"]));
         assert_eq!(required_access(&Method::GET, "/export/store-data"), Access::AnyOf(&["settings"]));
         assert_eq!(required_access(&Method::PUT, "/backup/settings"), Access::AnyOf(&["settings"]));
+        assert_eq!(required_access(&Method::PUT, "/reviews/abc"), Access::AnyOf(&["products"]));
+        assert_eq!(required_access(&Method::POST, "/newsletter/campaigns"), Access::AnyOf(&["storefront"]));
+        assert_eq!(required_access(&Method::GET, "/withdrawals"), Access::AnyOf(&["orders"]));
         assert_eq!(required_access(&Method::GET, "/settings/system"), Access::Always);
         assert_eq!(required_access(&Method::PUT, "/settings/system"), Access::Handler);
         assert_eq!(required_access(&Method::GET, "/orders"), Access::AnyOf(&["orders"]));

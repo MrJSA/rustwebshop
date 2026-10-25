@@ -6,6 +6,8 @@ export function GET({ url }) {
     'Disallow: /checkout',
     'Disallow: /order-success',
     'Disallow: /track',
+    'Disallow: /withdraw',
+    'Disallow: /newsletter',
     'Disallow: /api/',
     'Disallow: /*?search=',
     '',

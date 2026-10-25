@@ -35,12 +35,17 @@ struct PricedOrder {
     coupon: Option<(Uuid, String)>,
     /// Physical order whose destination zone has rates but none was selected
     missing_shipping_rate: bool,
+    total_weight_g: i32,
+    /// Rates the parcel fits into for the destination (cheapest first)
+    shipping_options: Vec<crate::models::ShippingRate>,
+    /// VIES-confirmed VAT ID of a VAT-free EU business order
+    reverse_charge: Option<crate::services::vies::VatCheck>,
 }
 
 /// VAT and total of an order. Product VAT is reduced pro rata by product discounts; shipping is taxed
 /// with the VAT rate of the main delivery (largest share) — included in the price with gross pricing,
 /// added on top with net pricing. Small businesses (§ 19 UStG) charge no VAT.
-pub fn compute_tax(tax_mode: &str, rate_amounts: &[(f64, i64)], items_subtotal: i32, subtotal: i32, shipping: i32) -> (i32, i32) {
+pub fn compute_tax(tax_mode: &str, rate_amounts: &[(f64, i64)], items_subtotal: i32, subtotal: i32, shipping: i32, reverse_charge: bool) -> (i32, i32) {
     let discount_factor = if items_subtotal > 0 { subtotal as f64 / items_subtotal as f64 } else { 0.0 };
     let amounts: Vec<i64> = rate_amounts.iter().map(|(_, a)| *a).collect();
     let shipping_rate = crate::services::invoice::main_rate_index(&amounts).map(|i| rate_amounts[i].0).unwrap_or(0.0) / 100.0;
@@ -54,6 +59,19 @@ pub fn compute_tax(tax_mode: &str, rate_amounts: &[(f64, i64)], items_subtotal: 
             })
             .sum()
     };
+    // VAT-free EU business order: the customer pays the net amounts
+    if reverse_charge && tax_mode != "kleingewerbe" {
+        return match tax_mode {
+            "included" => {
+                let items_net: f64 = rate_amounts
+                    .iter()
+                    .map(|(rate, amount)| *amount as f64 * discount_factor / (1.0 + rate / 100.0))
+                    .sum();
+                (0, (items_net + shipping as f64 / (1.0 + shipping_rate)).round() as i32)
+            }
+            _ => (0, subtotal + shipping),
+        };
+    }
     match tax_mode {
         "included" => {
             let shipping_vat = if shipping_rate > 0.0 { shipping as f64 - shipping as f64 / (1.0 + shipping_rate) } else { 0.0 };
@@ -134,25 +152,34 @@ impl CheckoutService {
 
     /// Single source of truth for pricing. With `lock_rows` the variant and coupon rows are locked
     /// (`SELECT ... FOR UPDATE`) so the caller can safely decrement stock / increment coupon usage.
-    async fn price_order(conn: &mut PgConnection, req: &CheckoutRequest, lock_rows: bool) -> Result<PricedOrder> {
+    async fn price_order(
+        conn: &mut PgConnection,
+        req: &CheckoutRequest,
+        lock_rows: bool,
+        reverse_charge: Option<&crate::services::vies::VatCheck>,
+    ) -> Result<PricedOrder> {
         if req.items.is_empty() {
             return Err(anyhow!("Cart cannot be empty for checkout"));
         }
-        let (store_tax_rate, tax_mode): (f64, String) = sqlx::query_as(
-            "SELECT tax_rate_percent, COALESCE(tax_mode, 'kleingewerbe') FROM store_settings WHERE id = 1",
+        let (store_tax_rate, tax_mode, sales_enabled): (f64, String, bool) = sqlx::query_as(
+            "SELECT tax_rate_percent, COALESCE(tax_mode, 'kleingewerbe'), sale_prices_enabled FROM store_settings WHERE id = 1",
         )
         .fetch_one(&mut *conn)
         .await
-        .unwrap_or((19.0, "kleingewerbe".to_string()));
+        .unwrap_or((19.0, "kleingewerbe".to_string(), false));
+        let now = Utc::now();
 
         let lock_clause = if lock_rows { "FOR UPDATE OF pv" } else { "" };
         let variant_sql = format!(
             r#"
             SELECT
                 pv.id, pv.product_id, pv.sku, pv.title as variant_title,
-                pv.price_override_cents, pv.stock_quantity,
+                pv.price_override_cents, pv.stock_quantity, pv.sale_price_cents, pv.weight_grams AS variant_weight,
                 p.title as product_title, p.base_price_cents, p.product_type,
-                p.digital_download_url, p.tax_rate_percent, p.is_active
+                p.digital_download_url, p.tax_rate_percent, p.is_active,
+                p.weight_grams AS product_weight, p.sale_starts_at, p.sale_ends_at,
+                pv.length_mm AS v_length, pv.width_mm AS v_width, pv.height_mm AS v_height,
+                p.length_mm AS p_length, p.width_mm AS p_width, p.height_mm AS p_height
             FROM product_variants pv
             JOIN products p ON p.id = pv.product_id
             WHERE pv.id = $1
@@ -164,6 +191,7 @@ impl CheckoutService {
         let mut lines = Vec::new();
         let mut digital_downloads = Vec::new();
         let mut items_subtotal_cents = 0;
+        let mut parcel = crate::services::packing::Parcel::default();
         // Line totals per VAT rate (first appearance order) — shipping is taxed with the main rate
         let mut rate_amounts: Vec<(f64, i64)> = Vec::new();
 
@@ -197,9 +225,23 @@ impl CheckoutService {
                 ));
             }
 
-            let unit_price = row
+            let regular_price = row
                 .get::<Option<i32>, _>("price_override_cents")
                 .unwrap_or_else(|| row.get::<i32, _>("base_price_cents"));
+            // An active sale price is what the customer pays
+            let unit_price = crate::services::pricing::sale_applies(
+                sales_enabled,
+                regular_price,
+                row.get("sale_price_cents"),
+                row.get("sale_starts_at"),
+                row.get("sale_ends_at"),
+                now,
+            )
+            .unwrap_or(regular_price);
+            if !is_digital {
+                let weight = crate::services::pricing::weight_grams(row.get("product_weight"), row.get("variant_weight"));
+                parcel.add(weight, Self::item_dims(&row), item.quantity);
+            }
             let line_total = unit_price * item.quantity;
             items_subtotal_cents += line_total;
 
@@ -266,43 +308,27 @@ impl CheckoutService {
 
         let is_digital_only = lines.iter().all(|l| l.is_digital);
 
-        // Shipping: the selected rate must belong to the zone that serves the destination country
+        // Shipping: only rates of the zone serving the destination country whose weight and package
+        // size fit the parcel; the selected one must be among them
         let mut shipping_cost_cents = 0;
         let mut missing_shipping_rate = false;
+        let mut shipping_options = Vec::new();
         if !is_digital_only {
             let country = req.shipping_address.country_code.trim().to_uppercase();
-            let country_json = json!([country]).to_string();
-            // Zones listing the country explicitly; the default zone only if none does
-            const SERVING_ZONES: &str = r#"
-                WITH matched AS (SELECT id FROM shipping_zones WHERE country_codes @> $1::jsonb)
-                SELECT id FROM matched
-                UNION ALL
-                SELECT id FROM shipping_zones WHERE is_default = true AND NOT EXISTS (SELECT 1 FROM matched)
-            "#;
-
-            match req.shipping_rate_id {
-                Some(rate_id) => {
-                    shipping_cost_cents = sqlx::query_scalar(&format!(
-                        "SELECT price_cents FROM shipping_rates WHERE id = $2 AND zone_id IN ({})",
-                        SERVING_ZONES
-                    ))
-                    .bind(&country_json)
-                    .bind(rate_id)
-                    .fetch_optional(&mut *conn)
-                    .await?
-                    .ok_or_else(|| anyhow!("The selected shipping option is not available for {}", country))?;
-                }
-                None => {
-                    let available: i64 = sqlx::query_scalar(&format!(
-                        "SELECT COUNT(*) FROM shipping_rates WHERE zone_id IN ({})",
-                        SERVING_ZONES
-                    ))
-                    .bind(&country_json)
-                    .fetch_one(&mut *conn)
-                    .await?;
-                    missing_shipping_rate = available > 0;
-                }
+            let (fitting, any_rates) = Self::fitting_rates(&mut *conn, &country, &parcel).await?;
+            if fitting.is_empty() && any_rates {
+                return Err(anyhow!(
+                    "No shipping option fits this parcel ({}). Please contact us for a shipping quote.",
+                    parcel.describe()
+                ));
             }
+            match req.shipping_rate_id.and_then(|id| fitting.iter().find(|r| r.id == id)) {
+                Some(rate) => shipping_cost_cents = rate.price_cents,
+                // None chosen, or one for another country / parcel: the customer has to choose
+                // (the quote still answers with the matching options)
+                None => missing_shipping_rate = !fitting.is_empty(),
+            }
+            shipping_options = fitting;
         }
 
         // Coupon
@@ -360,8 +386,14 @@ impl CheckoutService {
             coupon = Some((c.get::<Uuid, _>("id"), c.get::<String, _>("code")));
         }
 
-        let (tax_cents, total_cents) =
-            compute_tax(&tax_mode, &rate_amounts, items_subtotal_cents, subtotal_cents, shipping_cost_cents);
+        let (tax_cents, total_cents) = compute_tax(
+            &tax_mode,
+            &rate_amounts,
+            items_subtotal_cents,
+            subtotal_cents,
+            shipping_cost_cents,
+            reverse_charge.is_some(),
+        );
 
         Ok(PricedOrder {
             lines,
@@ -376,6 +408,9 @@ impl CheckoutService {
             is_digital_only,
             coupon,
             missing_shipping_rate,
+            total_weight_g: parcel.weight_g,
+            shipping_options,
+            reverse_charge: reverse_charge.cloned(),
         })
     }
 
@@ -402,8 +437,9 @@ impl CheckoutService {
 
     /// Prices the cart without locking. With `strict` the customer details are validated as well.
     pub async fn quote(pool: &PgPool, req: &CheckoutRequest, strict: bool) -> Result<CheckoutQuote> {
+        let reverse_charge = Self::reverse_charge(pool, req).await?;
         let mut conn = pool.acquire().await?;
-        let priced = Self::price_order(&mut *conn, req, false).await?;
+        let priced = Self::price_order(&mut *conn, req, false, reverse_charge.as_ref()).await?;
         if strict {
             Self::validate_for_order(req, &priced)?;
         }
@@ -417,13 +453,82 @@ impl CheckoutService {
             is_digital_only: priced.is_digital_only,
             coupon_code: priced.coupon.map(|(_, code)| code),
             currency: "EUR".to_string(),
+            total_weight_g: priced.total_weight_g,
+            shipping_options: priced.shipping_options.iter().map(|r| json!({ "id": r.id, "name": r.name, "price_cents": r.price_cents, "estimated_delivery_days": r.estimated_delivery_days })).collect(),
+            reverse_charge: priced.reverse_charge.is_some(),
         })
+    }
+
+    /// Package size of a cart line: the variant's own dimensions, otherwise the product's.
+    fn item_dims(row: &sqlx::postgres::PgRow) -> Option<crate::services::packing::Dims> {
+        use crate::services::packing::sorted_dims;
+        sorted_dims(row.get("v_length"), row.get("v_width"), row.get("v_height"))
+            .or_else(|| sorted_dims(row.get("p_length"), row.get("p_width"), row.get("p_height")))
+    }
+
+    /// Rates of the zone serving `country` that the parcel fits into (cheapest first), and whether
+    /// that zone has any rates at all.
+    async fn fitting_rates(
+        conn: &mut PgConnection,
+        country: &str,
+        parcel: &crate::services::packing::Parcel,
+    ) -> Result<(Vec<crate::models::ShippingRate>, bool)> {
+        // Zones listing the country explicitly; the default zone only if none does
+        let rates = sqlx::query_as::<_, crate::models::ShippingRate>(
+            r#"
+            WITH matched AS (SELECT id FROM shipping_zones WHERE country_codes @> $1::jsonb),
+                 serving AS (SELECT id FROM matched UNION ALL SELECT id FROM shipping_zones WHERE is_default = true AND NOT EXISTS (SELECT 1 FROM matched))
+            SELECT id, zone_id, name, package_type, min_weight_g, max_weight_g, price_cents, estimated_delivery_days, max_length_mm, max_width_mm, max_height_mm
+            FROM shipping_rates WHERE zone_id IN (SELECT id FROM serving) ORDER BY price_cents, name
+            "#,
+        )
+        .bind(json!([country]).to_string())
+        .fetch_all(&mut *conn)
+        .await?;
+        let any = !rates.is_empty();
+        Ok((rates.into_iter().filter(|r| parcel.fits(&r.limits())).collect(), any))
+    }
+
+    /// Shipping options for some products to a country (product page: "delivery to …").
+    pub async fn shipping_options(pool: &PgPool, country: &str, items: &[crate::models::CartItemInput]) -> Result<(Vec<crate::models::ShippingRate>, bool)> {
+        let mut conn = pool.acquire().await?;
+        let mut parcel = crate::services::packing::Parcel::default();
+        for item in items.iter().filter(|i| i.quantity > 0) {
+            let row = sqlx::query(
+                "SELECT p.product_type, p.weight_grams AS product_weight, pv.weight_grams AS variant_weight,
+                        pv.length_mm AS v_length, pv.width_mm AS v_width, pv.height_mm AS v_height,
+                        p.length_mm AS p_length, p.width_mm AS p_width, p.height_mm AS p_height
+                 FROM product_variants pv JOIN products p ON p.id = pv.product_id WHERE pv.id = $1",
+            )
+            .bind(item.variant_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if let Some(row) = row.filter(|r| r.get::<String, _>("product_type") != "digital") {
+                let weight = crate::services::pricing::weight_grams(row.get("product_weight"), row.get("variant_weight"));
+                parcel.add(weight, Self::item_dims(&row), item.quantity);
+            }
+        }
+        Self::fitting_rates(&mut *conn, &country.trim().to_uppercase(), &parcel).await
+    }
+
+    /// VIES-confirmed VAT-free EU business order, `None` for a normal order.
+    pub async fn reverse_charge(pool: &PgPool, req: &CheckoutRequest) -> Result<Option<crate::services::vies::VatCheck>> {
+        if req.vat_id.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            return Ok(None);
+        }
+        let settings = sqlx::query_as::<_, crate::models::StoreSettings>("SELECT * FROM store_settings WHERE id = 1").fetch_one(pool).await?;
+        crate::services::vies::reverse_charge_for(pool, &settings, req).await.map_err(|e| anyhow!(e))
     }
 
     /// Creates the order inside the caller's transaction for a payment that was already verified.
     /// Re-prices with row locks and refuses if the verified amount differs from the order total.
-    pub async fn create_order(conn: &mut PgConnection, req: &CheckoutRequest, payment: &VerifiedPayment) -> Result<CheckoutResponse> {
-        let priced = Self::price_order(conn, req, true).await?;
+    pub async fn create_order(
+        conn: &mut PgConnection,
+        req: &CheckoutRequest,
+        payment: &VerifiedPayment,
+        reverse_charge: Option<&crate::services::vies::VatCheck>,
+    ) -> Result<CheckoutResponse> {
+        let priced = Self::price_order(conn, req, true, reverse_charge).await?;
         Self::validate_for_order(req, &priced)?;
 
         if priced.total_cents != payment.amount_cents {
@@ -491,9 +596,11 @@ impl CheckoutService {
                 shipping_address, billing_address, shipping_rate_id,
                 shipping_cost_cents, subtotal_cents, tax_cents, total_cents,
                 payment_provider, payment_status, order_status, coupon_code, discount_cents,
-                payment_reference, access_token, is_test, tax_mode
+                payment_reference, access_token, is_test, tax_mode,
+                buyer_company, buyer_vat_id, reverse_charge, vat_check, paid_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                    $21, $22, $23, $24, CASE WHEN $25 THEN NOW() END)
             "#,
         )
         .bind(order_id)
@@ -516,6 +623,11 @@ impl CheckoutService {
         .bind(&access_token)
         .bind(payment.is_test)
         .bind(&priced.tax_mode)
+        .bind(req.buyer_company.as_deref().map(str::trim).filter(|c| !c.is_empty()))
+        .bind(req.vat_id.as_deref().map(crate::services::vies::normalize).filter(|v| !v.is_empty()))
+        .bind(priced.reverse_charge.is_some())
+        .bind(priced.reverse_charge.as_ref().map(crate::services::vies::proof_json))
+        .bind(payment.status == "paid")
         .execute(&mut *conn)
         .await?;
 
@@ -646,7 +758,10 @@ impl CheckoutService {
                 payment.amount_cents as f64 / 100.0,
                 expected as f64 / 100.0
             )),
-            Ok(req) => Self::create_order(&mut *tx, &req, &payment).await,
+            Ok(req) => match Self::reverse_charge(pool, &req).await {
+                Ok(rc) => Self::create_order(&mut *tx, &req, &payment, rc.as_ref()).await,
+                Err(e) => Err(e),
+            },
         };
 
         match result {
@@ -679,6 +794,7 @@ impl CheckoutService {
             r#"
             UPDATE orders o
             SET payment_status = 'paid',
+                paid_at = NOW(),
                 order_status = CASE
                     WHEN NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id AND NOT oi.is_digital) THEN 'completed'
                     ELSE o.order_status
@@ -744,6 +860,7 @@ impl CheckoutService {
 
     /// Orders whose total is 0 € (e.g. 100 % coupon) need no payment provider.
     pub async fn create_free_order(pool: &PgPool, req: &CheckoutRequest) -> Result<CheckoutResponse> {
+        let reverse_charge = Self::reverse_charge(pool, req).await?;
         let mut tx = pool.begin().await?;
         let payment = VerifiedPayment {
             provider: "free".to_string(),
@@ -753,7 +870,7 @@ impl CheckoutService {
             // No payment provider involved — a 100 % coupon is a real order
             is_test: false,
         };
-        let response = Self::create_order(&mut *tx, req, &payment).await?;
+        let response = Self::create_order(&mut *tx, req, &payment, reverse_charge.as_ref()).await?;
         tx.commit().await?;
         Ok(response)
     }
@@ -770,14 +887,14 @@ mod tests {
         // 100 € at 19 % + 20 € at 7 %, 10 € shipping
         let rates = [(19.0, 10000), (7.0, 2000)];
         // Net prices: VAT on items (19.00 + 1.40) plus 19 % on shipping (1.90)
-        assert_eq!(compute_tax("excluded", &rates, 12000, 12000, 1000), (2230, 15230));
+        assert_eq!(compute_tax("excluded", &rates, 12000, 12000, 1000, false), (2230, 15230));
         // Gross prices: total unchanged, contained VAT includes the shipping share
-        let (tax, total) = compute_tax("included", &rates, 12000, 12000, 1000);
+        let (tax, total) = compute_tax("included", &rates, 12000, 12000, 1000, false);
         assert_eq!(total, 13000);
         assert_eq!(tax, (10000.0 - 10000.0 / 1.19 + 2000.0 - 2000.0 / 1.07 + 1000.0 - 1000.0 / 1.19_f64).round() as i32);
-        assert_eq!(compute_tax("kleingewerbe", &rates, 12000, 12000, 1000), (0, 13000));
+        assert_eq!(compute_tax("kleingewerbe", &rates, 12000, 12000, 1000, false), (0, 13000));
         // Equal shares: the first rate wins (same rule as the invoice)
-        assert_eq!(compute_tax("excluded", &[(7.0, 1000), (19.0, 1000)], 2000, 2000, 1000).0, 70 + 190 + 70);
+        assert_eq!(compute_tax("excluded", &[(7.0, 1000), (19.0, 1000)], 2000, 2000, 1000, false).0, 70 + 190 + 70);
     }
 
     #[test]
@@ -787,7 +904,7 @@ mod tests {
             let items_sum = 3 * 1999 + 2 * 1099;
             let subtotal = items_sum - 815; // coupon
             let rates = [(19.0, 3 * 1999), (7.0, 2 * 1099)];
-            let (tax, total) = compute_tax(mode, &rates, items_sum, subtotal, 495);
+            let (tax, total) = compute_tax(mode, &rates, items_sum, subtotal, 495, false);
             let mut order = sample_order(mode, subtotal, 495, total);
             order.tax_cents = tax;
             let inv = Invoice::build(&order, &items, &sample_settings(mode));

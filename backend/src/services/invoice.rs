@@ -13,6 +13,9 @@ use std::fmt::Write;
 #[derive(Debug, Clone, Default)]
 pub struct Party {
     pub name: String,
+    /// Contact person when the party is a company
+    pub contact: String,
+    pub vat_id: String,
     pub street: String,
     pub extra: String,
     pub postal_code: String,
@@ -20,6 +23,13 @@ pub struct Party {
     pub country_code: String,
     pub email: String,
     pub phone: String,
+}
+
+impl Party {
+    /// Name to greet: the contact person of a company, otherwise the name
+    pub fn person(&self) -> &str {
+        if self.contact.is_empty() { &self.name } else { &self.contact }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +88,14 @@ pub struct TaxGroup {
 #[derive(Debug, Clone)]
 pub struct Invoice {
     pub number: String,
+    /// 380 = invoice, 381 = credit note
+    pub type_code: u16,
+    /// Credit notes: number of the corrected invoice (BT-25)
+    pub referenced_invoice: Option<String>,
+    /// VAT-free EU business order
+    pub reverse_charge: bool,
+    /// Country the goods were shipped to (BT-80)
+    pub ship_to_country: Option<String>,
     pub order_number: String,
     pub issue_date: NaiveDate,
     pub delivery_date: NaiveDate,
@@ -124,6 +142,17 @@ pub fn main_rate_index(amounts: &[i64]) -> Option<usize> {
 }
 
 pub const SMALL_BUSINESS_REASON: &str = "Kleinunternehmer gemäß § 19 UStG – es wird keine Umsatzsteuer berechnet.";
+pub const INTRA_COMMUNITY_REASON: &str = "Tax-free intra-Community supply – steuerfreie innergemeinschaftliche Lieferung (§ 4 Nr. 1b, § 6a UStG; Art. 138 VAT Directive).";
+pub const REVERSE_CHARGE_REASON: &str = "Reverse charge – Steuerschuldnerschaft des Leistungsempfängers (§ 13b UStG; Art. 196 VAT Directive).";
+
+fn exemption_reason(category: &str) -> Option<(&'static str, &'static str)> {
+    match category {
+        "E" => Some((SMALL_BUSINESS_REASON, "VATEX-EU-132")),
+        "K" => Some((INTRA_COMMUNITY_REASON, "VATEX-EU-IC")),
+        "AE" => Some((REVERSE_CHARGE_REASON, "VATEX-EU-AE")),
+        _ => None,
+    }
+}
 
 fn net_of(gross: i64, percent: f64) -> i64 {
     if percent <= 0.0 {
@@ -197,6 +226,8 @@ pub fn seller_from_settings(s: &StoreSettings) -> Seller {
         .collect::<Vec<_>>()
         .join(" ");
     let mut party = Party {
+        contact: String::new(),
+        vat_id: s.vat_id.trim().to_string(),
         name: if s.legal_name.trim().is_empty() { s.store_name.trim().to_string() } else { s.legal_name.trim().to_string() },
         street,
         extra: s.address_extra.trim().to_string(),
@@ -232,9 +263,12 @@ pub fn seller_from_settings(s: &StoreSettings) -> Seller {
 fn buyer_from_order(order: &Order) -> Party {
     let addr = if order.billing_address.is_object() { &order.billing_address } else { &order.shipping_address };
     let get = |k: &str| addr.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    let name = Some(get("full_name")).filter(|n| !n.is_empty()).unwrap_or_else(|| order.customer_name.trim().to_string());
+    let person = Some(get("full_name")).filter(|n| !n.is_empty()).unwrap_or_else(|| order.customer_name.trim().to_string());
+    let company = order.buyer_company.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
     Party {
-        name,
+        name: company.clone().unwrap_or_else(|| person.clone()),
+        contact: if company.is_some() { person } else { String::new() },
+        vat_id: order.buyer_vat_id.clone().unwrap_or_default(),
         street: get("street_address"),
         extra: get("apartment_suite"),
         postal_code: get("postal_code"),
@@ -250,6 +284,11 @@ impl Invoice {
         let tax_mode = order.tax_mode.clone().filter(|m| !m.is_empty()).unwrap_or_else(|| settings.tax_mode.clone());
         let small_business = tax_mode == "kleingewerbe";
         let gross_prices = tax_mode != "excluded";
+        // VAT-free EU business order: net amounts, category K (goods) / AE (digital, reverse charge)
+        let reverse_charge = order.reverse_charge && !small_business;
+        // Amounts on the invoice include VAT
+        let shown_gross = gross_prices && !reverse_charge;
+        let product_rate = |item: &OrderItem| if small_business { 0.0 } else { item.tax_rate_percent.unwrap_or(settings.tax_rate_percent).max(0.0) };
 
         let vat_for = |percent: Option<f64>| -> VatRate {
             if small_business {
@@ -263,10 +302,16 @@ impl Invoice {
             .iter()
             .enumerate()
             .map(|(i, item)| {
-                let vat = vat_for(item.tax_rate_percent);
+                let vat = if reverse_charge {
+                    VatRate { category: if item.is_digital { "AE" } else { "K" }, percent: 0.0 }
+                } else {
+                    vat_for(item.tax_rate_percent)
+                };
                 let qty = item.quantity.max(1) as i64;
-                let display = item.total_price_cents as i64;
-                let line_net = if gross_prices { net_of(display, vat.percent) } else { display };
+                let charged = item.total_price_cents as i64;
+                let line_net = if gross_prices { net_of(charged, product_rate(item)) } else { charged };
+                let display = if shown_gross { charged } else { line_net };
+                let unit_display = if display == charged { item.unit_price_cents as i64 } else { (line_net as f64 / qty as f64).round() as i64 };
                 let variant = Some(item.variant_title.trim().to_string())
                     .filter(|v| !v.is_empty() && !["standard", "default"].contains(&v.to_lowercase().as_str()));
                 InvoiceLine {
@@ -277,7 +322,7 @@ impl Invoice {
                     is_digital: item.is_digital,
                     quantity: qty,
                     vat,
-                    unit_display_cents: item.unit_price_cents as i64,
+                    unit_display_cents: unit_display,
                     line_display_cents: display,
                     unit_net_e4: ((line_net as f64) * 100.0 / qty as f64).round() as i64,
                     line_net_cents: line_net,
@@ -295,15 +340,22 @@ impl Invoice {
         }
         let items_sum: i64 = lines.iter().map(|l| l.line_display_cents).sum();
 
-        // Product discounts lower the subtotal; a free-shipping coupon only zeroes the shipping
-        let discount = (items_sum - order.subtotal_cents as i64).max(0);
+        // Product discounts lower the subtotal; a free-shipping coupon only zeroes the shipping.
+        // Business orders without VAT state the discount net (scaled like the lines).
+        let charged_sum: i64 = items.iter().map(|i| i.total_price_cents as i64).sum();
+        let charged_discount = (charged_sum - order.subtotal_cents as i64).max(0);
+        let discount = if charged_sum > 0 && items_sum != charged_sum {
+            (charged_discount as f64 * items_sum as f64 / charged_sum as f64).round() as i64
+        } else {
+            charged_discount
+        };
         let mut allowances = Vec::new();
         if discount > 0 && items_sum > 0 {
             let mut left = discount;
             for (i, (vat, amount)) in rates.iter().enumerate() {
                 let share = if i + 1 == rates.len() { left } else { (discount as f64 * *amount as f64 / items_sum as f64).round() as i64 };
                 left -= share;
-                let net = if gross_prices { net_of(share, vat.percent) } else { share };
+                let net = if shown_gross { net_of(share, vat.percent) } else { share };
                 if net > 0 {
                     allowances.push(DocumentAmount { vat: *vat, net_cents: net });
                 }
@@ -314,11 +366,30 @@ impl Invoice {
         let shipping_charged = order.shipping_cost_cents.max(0) as i64;
         let amounts: Vec<i64> = rates.iter().map(|(_, a)| *a).collect();
         let main_rate = main_rate_index(&amounts).map(|i| rates[i].0).unwrap_or_else(|| vat_for(None));
+        // The main delivery's product VAT rate (same rule as the checkout) for the net shipping price
+        let mut product_rates: Vec<(f64, i64)> = Vec::new();
+        for item in items {
+            let r = product_rate(item);
+            match product_rates.iter_mut().find(|(x, _)| (*x - r).abs() < 1e-9) {
+                Some((_, a)) => *a += item.total_price_cents as i64,
+                None => product_rates.push((r, item.total_price_cents as i64)),
+            }
+        }
+        let product_amounts: Vec<i64> = product_rates.iter().map(|(_, a)| *a).collect();
+        let main_product_rate = main_rate_index(&product_amounts).map(|i| product_rates[i].0).unwrap_or(main_rate.percent);
+        let shipping_vat = if reverse_charge {
+            VatRate { category: if lines.iter().any(|l| !l.is_digital) { "K" } else { "AE" }, percent: 0.0 }
+        } else {
+            main_rate
+        };
         let shipping = (shipping_charged > 0).then(|| DocumentAmount {
-            vat: main_rate,
-            net_cents: if gross_prices { net_of(shipping_charged, main_rate.percent) } else { shipping_charged },
+            vat: shipping_vat,
+            net_cents: if gross_prices { net_of(shipping_charged, main_product_rate) } else { shipping_charged },
         });
-        let shipping_display_cents = shipping_charged;
+        let shipping_display_cents = match (&shipping, shown_gross) {
+            (Some(s), false) => s.net_cents,
+            _ => shipping_charged,
+        };
 
         let mut groups: Vec<TaxGroup> = rates.iter().map(|(vat, _)| TaxGroup { vat: *vat, basis_cents: 0, tax_cents: 0 }).collect();
         if let Some(s) = &shipping {
@@ -357,10 +428,27 @@ impl Invoice {
             let notice = settings.tax_notice.trim();
             notes.push(if notice.is_empty() || !notice.contains("19") { SMALL_BUSINESS_REASON.to_string() } else { notice.to_string() });
         }
-        let date = order.created_at.date_naive();
+        if reverse_charge {
+            if lines.iter().any(|l| !l.is_digital) {
+                notes.push(INTRA_COMMUNITY_REASON.to_string());
+            }
+            if lines.iter().any(|l| l.is_digital) {
+                notes.push(REVERSE_CHARGE_REASON.to_string());
+            }
+        }
+        // Issued when the payment was confirmed; goods/services are delivered from that day on
+        let date = order.paid_at.unwrap_or(order.created_at).date_naive();
 
         Invoice {
             number: order.order_number.clone(),
+            type_code: 380,
+            referenced_invoice: None,
+            reverse_charge,
+            ship_to_country: lines
+                .iter()
+                .any(|l| !l.is_digital)
+                .then(|| order.shipping_address.get("country_code").and_then(|v| v.as_str()).map(country_code))
+                .flatten(),
             order_number: order.order_number.clone(),
             issue_date: date,
             delivery_date: date,
@@ -397,13 +485,28 @@ impl Invoice {
     }
 
     pub fn shows_gross_prices(&self) -> bool {
-        self.tax_mode != "excluded"
+        self.tax_mode != "excluded" && !self.reverse_charge
+    }
+
+    pub fn is_credit_note(&self) -> bool {
+        self.type_code == 381
+    }
+
+    /// Credit note (Stornorechnung) cancelling this invoice in full, e.g. after a refund.
+    pub fn credit_note(&self, number: String, issue_date: NaiveDate) -> Invoice {
+        let mut cn = self.clone();
+        cn.type_code = 381;
+        cn.referenced_invoice = Some(self.number.clone());
+        cn.number = number;
+        cn.issue_date = issue_date;
+        cn.paid = true;
+        cn
     }
 
     /// File name used for attachments and downloads
     pub fn file_stem(&self) -> String {
         let safe: String = self.number.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
-        format!("Invoice-{}", safe)
+        format!("{}-{}", if self.is_credit_note() { "Credit-Note" } else { "Invoice" }, safe)
     }
 
     /// UN/CEFACT Cross Industry Invoice D16B, guideline EN 16931 (ZUGFeRD 2.x "EN 16931" / Factur-X "EN 16931").
@@ -509,9 +612,15 @@ impl Invoice {
         }
         x.push_str("      </ram:SellerTradeParty>\n      <ram:BuyerTradeParty>\n");
         let _ = writeln!(x, "        <ram:Name>{}</ram:Name>", esc(&self.buyer.name));
+        if !self.buyer.contact.is_empty() {
+            let _ = writeln!(x, "        <ram:DefinedTradeContact>\n          <ram:PersonName>{}</ram:PersonName>\n        </ram:DefinedTradeContact>", esc(&self.buyer.contact));
+        }
         address_xml(&mut x, &self.buyer);
         if !self.buyer.email.is_empty() {
             let _ = writeln!(x, "        <ram:URIUniversalCommunication>\n          <ram:URIID schemeID=\"EM\">{}</ram:URIID>\n        </ram:URIUniversalCommunication>", esc(&self.buyer.email));
+        }
+        if !self.buyer.vat_id.is_empty() {
+            let _ = writeln!(x, "        <ram:SpecifiedTaxRegistration>\n          <ram:ID schemeID=\"VA\">{}</ram:ID>\n        </ram:SpecifiedTaxRegistration>", esc(&self.buyer.vat_id));
         }
         x.push_str("      </ram:BuyerTradeParty>\n");
         let _ = writeln!(
@@ -521,10 +630,19 @@ impl Invoice {
         );
         x.push_str("    </ram:ApplicableHeaderTradeAgreement>\n");
 
-        // Delivery
+        // Delivery (the destination country is required for intra-Community supplies, BR-IC-12)
+        x.push_str("    <ram:ApplicableHeaderTradeDelivery>\n");
+        if let Some(country) = &self.ship_to_country {
+            let _ = writeln!(
+                x,
+                "      <ram:ShipToTradeParty>\n        <ram:Name>{}</ram:Name>\n        <ram:PostalTradeAddress>\n          <ram:CountryID>{}</ram:CountryID>\n        </ram:PostalTradeAddress>\n      </ram:ShipToTradeParty>",
+                esc(&self.buyer.name),
+                esc(country)
+            );
+        }
         let _ = writeln!(
             x,
-            "    <ram:ApplicableHeaderTradeDelivery>\n      <ram:ActualDeliverySupplyChainEvent>\n        <ram:OccurrenceDateTime>{}</ram:OccurrenceDateTime>\n      </ram:ActualDeliverySupplyChainEvent>\n    </ram:ApplicableHeaderTradeDelivery>",
+            "      <ram:ActualDeliverySupplyChainEvent>\n        <ram:OccurrenceDateTime>{}</ram:OccurrenceDateTime>\n      </ram:ActualDeliverySupplyChainEvent>\n    </ram:ApplicableHeaderTradeDelivery>",
             date102(self.delivery_date)
         );
 
@@ -542,16 +660,15 @@ impl Invoice {
         }
         for g in &self.groups {
             let _ = write!(x, "      <ram:ApplicableTradeTax>\n        <ram:CalculatedAmount>{}</ram:CalculatedAmount>\n        <ram:TypeCode>VAT</ram:TypeCode>\n", fmt2(g.tax_cents));
-            if g.vat.category == "E" {
-                let _ = writeln!(x, "        <ram:ExemptionReason>{}</ram:ExemptionReason>", esc(SMALL_BUSINESS_REASON));
+            let exemption = exemption_reason(g.vat.category);
+            if let Some((reason, _)) = exemption {
+                let _ = writeln!(x, "        <ram:ExemptionReason>{}</ram:ExemptionReason>", esc(reason));
             }
-            let _ = write!(
-                x,
-                "        <ram:BasisAmount>{}</ram:BasisAmount>\n        <ram:CategoryCode>{}</ram:CategoryCode>\n        <ram:RateApplicablePercent>{}</ram:RateApplicablePercent>\n      </ram:ApplicableTradeTax>\n",
-                fmt2(g.basis_cents),
-                g.vat.category,
-                fmt_rate(g.vat.percent)
-            );
+            let _ = write!(x, "        <ram:BasisAmount>{}</ram:BasisAmount>\n        <ram:CategoryCode>{}</ram:CategoryCode>\n", fmt2(g.basis_cents), g.vat.category);
+            if let Some((_, code)) = exemption {
+                let _ = writeln!(x, "        <ram:ExemptionReasonCode>{}</ram:ExemptionReasonCode>", code);
+            }
+            let _ = write!(x, "        <ram:RateApplicablePercent>{}</ram:RateApplicablePercent>\n      </ram:ApplicableTradeTax>\n", fmt_rate(g.vat.percent));
         }
         for a in &self.allowances {
             let reason = match &self.discount_code {
@@ -574,7 +691,9 @@ impl Invoice {
                 category_trade_tax(&sh.vat)
             );
         }
-        let terms = if self.paid {
+        let terms = if self.is_credit_note() {
+            format!("Refunded via {}.", self.payment_label)
+        } else if self.paid {
             format!("Paid via {}.", self.payment_label)
         } else {
             format!("Payment via {} is being processed.", self.payment_label)
@@ -598,7 +717,11 @@ impl Invoice {
         let _ = writeln!(x, "        <ram:GrandTotalAmount>{}</ram:GrandTotalAmount>", fmt2(self.grand_total_cents));
         let _ = writeln!(x, "        <ram:TotalPrepaidAmount>{}</ram:TotalPrepaidAmount>", fmt2(prepaid));
         let _ = writeln!(x, "        <ram:DuePayableAmount>{}</ram:DuePayableAmount>", fmt2(self.payable_cents - prepaid));
-        x.push_str("      </ram:SpecifiedTradeSettlementHeaderMonetarySummation>\n    </ram:ApplicableHeaderTradeSettlement>\n  </rsm:SupplyChainTradeTransaction>\n</rsm:CrossIndustryInvoice>\n");
+        x.push_str("      </ram:SpecifiedTradeSettlementHeaderMonetarySummation>\n");
+        if let Some(original) = &self.referenced_invoice {
+            let _ = writeln!(x, "      <ram:InvoiceReferencedDocument>\n        <ram:IssuerAssignedID>{}</ram:IssuerAssignedID>\n      </ram:InvoiceReferencedDocument>", esc(original));
+        }
+        x.push_str("    </ram:ApplicableHeaderTradeSettlement>\n  </rsm:SupplyChainTradeTransaction>\n</rsm:CrossIndustryInvoice>\n");
         x
     }
 }

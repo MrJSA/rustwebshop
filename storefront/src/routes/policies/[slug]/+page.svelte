@@ -7,6 +7,19 @@
   $: providers = data.providers || [];
   $: storeName = data.store?.store_name || 'Shop';
 
+  let regionNames = null;
+  try {
+    regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
+  } catch (_) {}
+  function countryName(code) {
+    try {
+      return (code === 'XK' ? 'Kosovo' : regionNames?.of(code)) || code;
+    } catch (_) {
+      return code;
+    }
+  }
+  const countryNames = (codes) => (Array.isArray(codes) ? codes.map(countryName).sort((a, b) => a.localeCompare(b)) : []);
+
   // Simple and safe client markdown renderer
   function parseMarkdown(md) {
     if (!md) return '';
@@ -102,16 +115,21 @@
                             <Globe size={14} class="text-orange-400 flex-shrink-0" />
                             <span class="text-xs font-bold text-white">{zone.zone_name}</span>
                           </div>
-                          <!-- Country Tags -->
-                          <div class="flex flex-wrap gap-1">
-                            {#if Array.isArray(zone.country_codes)}
-                              {#each zone.country_codes as cc}
-                                <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 border border-slate-700 text-slate-300">
-                                  {cc}
-                                </span>
-                              {/each}
-                            {/if}
-                          </div>
+                          <!-- Countries: count only; all names on hover and when opened -->
+                          {#if Array.isArray(zone.country_codes) && zone.country_codes.length > 0}
+                            {@const names = countryNames(zone.country_codes)}
+                            <details class="group sm:text-right">
+                              <summary title={names.join(', ')} class="cursor-pointer list-none inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-800 border border-slate-700 text-[11px] text-slate-300 hover:text-white">
+                                {names.length === 1 ? names[0] : `Ships to ${names.length} countries`}
+                                {#if names.length > 1}<span class="text-slate-500 group-open:rotate-180 transition-transform">▾</span>{/if}
+                              </summary>
+                              {#if names.length > 1}
+                                <p class="mt-2 max-w-md text-[11px] leading-relaxed text-slate-400 text-left">{names.join(', ')}</p>
+                              {/if}
+                            </details>
+                          {:else if zone.is_default}
+                            <span class="text-[11px] text-slate-400">All other countries</span>
+                          {/if}
                         </div>
 
                         <!-- Price Categories / Rates -->

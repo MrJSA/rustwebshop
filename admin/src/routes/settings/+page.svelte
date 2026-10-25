@@ -43,6 +43,7 @@
   import PaymentsManager from '$lib/components/PaymentsManager.svelte';
   import SystemManager from '$lib/components/SystemManager.svelte';
   import CloudBackupManager from '$lib/components/CloudBackupManager.svelte';
+  import ShopFeaturesManager from '$lib/components/ShopFeaturesManager.svelte';
 
   export let data;
   let settings = data.settings || {};
@@ -73,8 +74,7 @@
   let taxNumber = settings.tax_number || '';
   let taxNotice = settings.tax_notice || 'Value added tax is not collected, as small businesses according to §19 (1) UStG.';
   let commercialRegister = settings.commercial_register || '';
-  let odrUrl = settings.odr_url || 'https://ec.europa.eu/odr';
-  let disputeResolutionNotice = settings.dispute_resolution_notice || 'The European Commission provides a platform for the out-of-court resolution of disputes (ODR platform), which can be viewed under https://ec.europa.eu/odr. We are not willing and not obligated to enter into dispute resolution proceedings before the consumer arbitration board.';
+  let disputeResolutionNotice = settings.dispute_resolution_notice || '';
   let currency = settings.currency || 'EUR';
   let currencySymbol = settings.currency_symbol || '€';
   let taxRatePercent = settings.tax_rate_percent !== undefined ? settings.tax_rate_percent : 19.0;
@@ -154,7 +154,6 @@
         tax_notice: taxNotice,
         tax_mode: taxMode,
         commercial_register: commercialRegister,
-        odr_url: odrUrl,
         dispute_resolution_notice: disputeResolutionNotice,
         currency,
         currency_symbol: currencySymbol,
@@ -591,6 +590,15 @@
       <Server size={15} />
       <span>System & Updates</span>
     </button>
+
+    <button
+      type="button"
+      on:click={() => setTab('features')}
+      class="px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 {activeTab === 'features' ? 'bg-orange-600 text-white shadow-lg shadow-orange-600/25 ring-1 ring-orange-500' : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'}"
+    >
+      <Sparkles size={15} />
+      <span>Shop Features & Legal</span>
+    </button>
   </div>
 
   <!-- TAB 1: Store Identity & Legal -->
@@ -949,25 +957,16 @@
               <div class="sm:col-span-4 pt-2 border-t border-slate-800 space-y-3">
                 <div class="flex items-center gap-2 text-white font-semibold">
                   <Scale size={15} class="text-orange-400" />
-                  <span>EU Consumer Dispute Resolution (ODR Platform)</span>
+                  <span>Consumer Dispute Resolution (§ 36 VSBG)</span>
                 </div>
-
-                <div>
-                  <label class="block text-slate-300 font-semibold mb-1">Online Dispute Resolution Platform URL</label>
-                  <input
-                    type="text"
-                    bind:value={odrUrl}
-                    placeholder="https://ec.europa.eu/odr"
-                    class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-                  />
-                </div>
+                <p class="text-[11px] text-slate-400">The EU online dispute resolution (ODR) platform was shut down on 20 July 2025, so the shop no longer links to it. State whether you take part in consumer arbitration proceedings.</p>
 
                 <div>
                   <label class="block text-slate-300 font-semibold mb-1">Dispute Resolution Statement / Arbitration Notice</label>
                   <textarea
                     bind:value={disputeResolutionNotice}
                     rows="2"
-                    placeholder="The European Commission provides a platform for out-of-court resolution of disputes..."
+                    placeholder="We are neither willing nor obliged to participate in dispute resolution proceedings before a consumer arbitration board (§ 36 VSBG)."
                     class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs leading-relaxed focus:outline-none focus:border-orange-500"
                   ></textarea>
                 </div>
@@ -1671,6 +1670,10 @@
   <!-- System, updates & domains -->
   {:else if activeTab === 'system'}
     <SystemManager />
+
+  <!-- Optional features & legal requirements -->
+  {:else if activeTab === 'features'}
+    <ShopFeaturesManager {settings} />
   {/if}
 </div>
 

@@ -105,6 +105,52 @@
   let singleVariantStock = 20;
   let singleVariantSku = '';
 
+  // Weight, delivery time, unit price, sale window and product safety (GPSR)
+  let weightGrams = '';
+  let lengthCm = '';
+  let widthCm = '';
+  let heightCm = '';
+  const cmToMm = (v) => (v === '' || v === null || v === undefined || isNaN(parseFloat(v)) || parseFloat(v) <= 0 ? null : Math.round(parseFloat(v) * 10));
+  const mmToCm = (v) => (v ? String(v / 10) : '');
+  let deliveryTime = '';
+  let unitContent = '';
+  let unitContentUnit = '';
+  let saleStartsAt = '';
+  let saleEndsAt = '';
+  let gpsrManufacturer = '';
+  let gpsrResponsiblePerson = '';
+  let gpsrSafetyInfo = '';
+  let singleVariantSaleEuros = '';
+
+  // <input type="datetime-local"> works in local time without zone
+  const toLocalInput = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null);
+  const intOrNull = (v) => (v === '' || v === null || v === undefined || isNaN(parseInt(v)) ? null : parseInt(v));
+  const centsOrNull = (v) => (v === '' || v === null || v === undefined || isNaN(parseFloat(v)) ? null : Math.round(parseFloat(v) * 100));
+
+  function productExtras() {
+    const content = parseFloat(unitContent);
+    return {
+      weight_grams: intOrNull(weightGrams),
+      length_mm: cmToMm(lengthCm),
+      width_mm: cmToMm(widthCm),
+      height_mm: cmToMm(heightCm),
+      delivery_time: deliveryTime.trim() || null,
+      sale_starts_at: fromLocalInput(saleStartsAt),
+      sale_ends_at: fromLocalInput(saleEndsAt),
+      gpsr_manufacturer: gpsrManufacturer.trim() || null,
+      gpsr_responsible_person: gpsrResponsiblePerson.trim() || null,
+      gpsr_safety_info: gpsrSafetyInfo.trim() || null,
+      unit_content: content > 0 && unitContentUnit ? content : null,
+      unit_content_unit: content > 0 && unitContentUnit ? unitContentUnit : null
+    };
+  }
+
   // New variant in create form
   let variantSku = '';
   let variantTitle = '';
@@ -418,10 +464,23 @@
     if (currentProductVariants.length > 0) {
       singleVariantStock = currentProductVariants[0].stock_quantity;
       singleVariantSku = currentProductVariants[0].sku;
+      singleVariantSaleEuros = currentProductVariants[0].sale_price_cents ? (currentProductVariants[0].sale_price_cents / 100).toFixed(2) : '';
     } else {
       singleVariantStock = productType === 'digital' ? 999999 : 20;
       singleVariantSku = 'PRD-' + (product.id ? product.id.substring(0, 4).toUpperCase() : '0000');
     }
+    weightGrams = product.weight_grams ?? '';
+    lengthCm = mmToCm(product.length_mm);
+    widthCm = mmToCm(product.width_mm);
+    heightCm = mmToCm(product.height_mm);
+    deliveryTime = product.delivery_time || '';
+    unitContent = product.unit_content ?? '';
+    unitContentUnit = product.unit_content_unit || '';
+    saleStartsAt = toLocalInput(product.sale_starts_at);
+    saleEndsAt = toLocalInput(product.sale_ends_at);
+    gpsrManufacturer = product.gpsr_manufacturer || '';
+    gpsrResponsiblePerson = product.gpsr_responsible_person || '';
+    gpsrSafetyInfo = product.gpsr_safety_info || '';
     uploadSavingsText = '';
 
     // Load parts for this product
@@ -523,7 +582,8 @@
           image_url: primaryImg,
           images: productImages.length > 0 ? productImages : [primaryImg],
           has_multiple_variants: hasMultipleVariants,
-          is_active: true
+          is_active: true,
+          extras: productExtras()
         })
       });
 
@@ -531,7 +591,7 @@
         // If single variant product, synchronize the single variant SKU and stock
         if (!hasMultipleVariants && currentProductVariants.length > 0) {
           const v = currentProductVariants[0];
-          await fetch(`/api/v1/admin/variants/${v.id}`, {
+          const vr = await fetch(`/api/v1/admin/variants/${v.id}`, {
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
@@ -544,9 +604,15 @@
               stock_quantity: productType === 'digital' ? 999999 : (parseInt(singleVariantStock) || 0),
               low_stock_threshold: 5,
               image_url: primaryImg,
-              images: productImages.length > 0 ? productImages : [primaryImg]
+              images: productImages.length > 0 ? productImages : [primaryImg],
+              extras: { weight_grams: null, sale_price_cents: centsOrNull(singleVariantSaleEuros) }
             })
           });
+          if (!vr.ok) {
+            const err = await vr.json().catch(() => ({}));
+            alert('The product was saved, but its price details were not: ' + (err.error || vr.statusText));
+            return;
+          }
         }
 
         await reloadProducts();
@@ -617,6 +683,12 @@
   let addVariantSku = '';
   let addVariantPriceEuros = 49.99;
   let addVariantStock = 20;
+  let addVariantWeight = '';
+  let editVariantWeight = '';
+  let editVariantSaleEuros = '';
+  let editVariantLengthCm = '';
+  let editVariantWidthCm = '';
+  let editVariantHeightCm = '';
 
   async function handleAddVariant() {
     try {
@@ -630,7 +702,8 @@
           attributes: { version: addVariantTitle },
           stock_quantity: addVariantStock,
           low_stock_threshold: 5,
-          image_url: imageUrl
+          image_url: imageUrl,
+          extras: { weight_grams: intOrNull(addVariantWeight), sale_price_cents: null }
         })
       });
       if (res.ok) {
@@ -652,6 +725,11 @@
     editVariantSku = v.sku;
     editVariantPriceEuros = (v.price_override_cents ? v.price_override_cents / 100 : basePriceEuros);
     editVariantStock = v.stock_quantity;
+    editVariantWeight = v.weight_grams ?? '';
+    editVariantSaleEuros = v.sale_price_cents ? (v.sale_price_cents / 100).toFixed(2) : '';
+    editVariantLengthCm = mmToCm(v.length_mm);
+    editVariantWidthCm = mmToCm(v.width_mm);
+    editVariantHeightCm = mmToCm(v.height_mm);
     editVariantImageUrl = v.image_url || imageUrl || '';
     editVariantImages = v.images && Array.isArray(v.images) && v.images.length > 0
       ? [...v.images]
@@ -674,7 +752,14 @@
           stock_quantity: parseInt(editVariantStock) || 0,
           low_stock_threshold: 5,
           image_url: primaryImg,
-          images: editVariantImages.length > 0 ? editVariantImages : [primaryImg]
+          images: editVariantImages.length > 0 ? editVariantImages : [primaryImg],
+          extras: {
+            weight_grams: intOrNull(editVariantWeight),
+            sale_price_cents: centsOrNull(editVariantSaleEuros),
+            length_mm: cmToMm(editVariantLengthCm),
+            width_mm: cmToMm(editVariantWidthCm),
+            height_mm: cmToMm(editVariantHeightCm)
+          }
         })
       });
       if (res.ok) {
@@ -682,6 +767,9 @@
         const updated = products.find((p) => p.id === editingProductId);
         if (updated) currentProductVariants = updated.variants || [];
         isEditVariantOpen = false;
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('Failed to save the variant: ' + (err.error || res.statusText));
       }
     } catch (e) {
       console.error('Failed to update variant:', e);
@@ -2186,6 +2274,10 @@
                   <input type="number" bind:value={singleVariantStock} min="0" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
                 {/if}
               </div>
+              <div class="sm:col-span-2">
+                <label class="block text-slate-300 font-semibold mb-1">Sale price (EUR, empty = no sale)</label>
+                <input type="number" step="0.01" min="0" bind:value={singleVariantSaleEuros} placeholder="e.g. 39.99" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+              </div>
             </div>
           {:else}
             <div>
@@ -2193,6 +2285,80 @@
               <input type="text" bind:value={variantSelectorLabel} placeholder="e.g. Choose Color or Choose Mainboard Type (Default: Choose Variant / Model:)" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
             </div>
           {/if}
+
+          <!-- Shipping, delivery, unit price, sale period and product safety -->
+          <div class="p-4 rounded-2xl bg-slate-950/60 border border-slate-800 space-y-4">
+            <div class="text-white font-semibold">Shipping, pricing & legal information</div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {#if productType !== 'digital'}
+                <div>
+                  <label class="block text-slate-400 mb-1">Weight (g) — for shipping rates</label>
+                  <input type="number" min="0" bind:value={weightGrams} placeholder="e.g. 850" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+                </div>
+                <div class="sm:col-span-3">
+                  <span class="block text-slate-400 mb-1">Package size L × W × H (cm, packed) — the shop picks the shipping package that fits</span>
+                  <div class="grid grid-cols-3 gap-2 sm:max-w-md">
+                    <input type="number" step="0.1" min="0" bind:value={lengthCm} placeholder="Length" aria-label="Length in cm" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+                    <input type="number" step="0.1" min="0" bind:value={widthCm} placeholder="Width" aria-label="Width in cm" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+                    <input type="number" step="0.1" min="0" bind:value={heightCm} placeholder="Height" aria-label="Height in cm" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+                  </div>
+                </div>
+                <div class="sm:col-span-2">
+                  <label class="block text-slate-400 mb-1">Own delivery time (optional — e.g. made to order; otherwise the times of the shipping rates apply)</label>
+                  <input type="text" bind:value={deliveryTime} maxlength="120" placeholder="e.g. 5–7 business days (made to order)" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
+                </div>
+              {/if}
+              <div>
+                <label class="block text-slate-400 mb-1">Net content (for the unit price)</label>
+                <div class="flex gap-2">
+                  <input type="number" step="0.001" min="0" bind:value={unitContent} placeholder="e.g. 250" class="flex-1 min-w-0 px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+                  <select bind:value={unitContentUnit} class="px-2 rounded-xl bg-slate-950 border border-slate-800 text-white">
+                    <option value="">–</option>
+                    <option value="g">g</option><option value="kg">kg</option><option value="ml">ml</option><option value="l">l</option>
+                    <option value="cm">cm</option><option value="m">m</option><option value="m2">m²</option>
+                  </select>
+                </div>
+                <p class="text-[10px] text-slate-500 mt-1">Only for goods sold by weight, volume, length or area (§ 4 PAngV) — the price per kg / l / m / m² is shown.</p>
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Sale starts (optional)</label>
+                <input type="datetime-local" bind:value={saleStartsAt} class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Sale ends (optional)</label>
+                <input type="datetime-local" bind:value={saleEndsAt} class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
+              </div>
+            </div>
+            {#if !data.settings?.sale_prices_enabled}
+              <p class="text-[10px] text-amber-300">Sale prices are switched off in Settings → Shop Features & Legal — saved sale prices are not applied.</p>
+            {/if}
+
+            {#if productType !== 'digital'}
+              <div class="pt-3 border-t border-slate-800 space-y-3">
+                <div>
+                  <div class="text-slate-300 font-semibold">Product safety (GPSR)</div>
+                  <p class="text-[10px] text-slate-500">Required for physical products sold in the EU. Leave the manufacturer empty to use the shop default from Settings → Shop Features & Legal.</p>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-slate-400 mb-1">Manufacturer (name, postal & electronic address)</label>
+                    <textarea bind:value={gpsrManufacturer} rows="3" placeholder={data.settings?.gpsr_default_manufacturer || 'Company, street, postcode city, country, email'} class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"></textarea>
+                    {#if !gpsrManufacturer.trim() && !(data.settings?.gpsr_default_manufacturer || '').trim()}
+                      <p class="text-[10px] text-amber-300 mt-1">No manufacturer details yet — please add them here or as shop default.</p>
+                    {/if}
+                  </div>
+                  <div>
+                    <label class="block text-slate-400 mb-1">Responsible person in the EU (if manufacturer is outside the EU)</label>
+                    <textarea bind:value={gpsrResponsiblePerson} rows="3" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"></textarea>
+                  </div>
+                  <div class="sm:col-span-2">
+                    <label class="block text-slate-400 mb-1">Warnings & safety information (in German / the customer's language)</label>
+                    <textarea bind:value={gpsrSafetyInfo} rows="3" placeholder="e.g. Not suitable for children under 3 years. Contains small parts." class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-orange-500"></textarea>
+                  </div>
+                </div>
+              </div>
+            {/if}
+          </div>
 
           <div>
             <label class="block text-slate-300 font-semibold mb-1">Product Subtitle (Under Title)</label>
@@ -2328,6 +2494,10 @@
                   <div>
                     <label class="block text-slate-400 mb-1">Warehouse Stock</label>
                     <input type="number" bind:value={addVariantStock} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono" />
+                  </div>
+                  <div>
+                    <label class="block text-slate-400 mb-1">Weight (g, empty = product weight)</label>
+                    <input type="number" min="0" bind:value={addVariantWeight} class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white font-mono" />
                   </div>
                 </div>
                 <div class="flex justify-end gap-2 pt-1">
@@ -2637,6 +2807,26 @@
           <label class="block font-semibold text-slate-300 mb-1">Stock Quantity</label>
           <input type="number" bind:value={editVariantStock} required class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
         </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block font-semibold text-slate-300 mb-1">Weight (g)</label>
+            <input type="number" min="0" bind:value={editVariantWeight} placeholder="Product weight" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-300 mb-1">Sale price (EUR)</label>
+            <input type="number" step="0.01" min="0" bind:value={editVariantSaleEuros} placeholder="No sale" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+          </div>
+        </div>
+        <div>
+          <span class="block font-semibold text-slate-300 mb-1">Package size (cm, empty = product size)</span>
+          <div class="grid grid-cols-3 gap-2">
+            <input type="number" step="0.1" min="0" bind:value={editVariantLengthCm} placeholder="Length" aria-label="Length in cm" class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+            <input type="number" step="0.1" min="0" bind:value={editVariantWidthCm} placeholder="Width" aria-label="Width in cm" class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+            <input type="number" step="0.1" min="0" bind:value={editVariantHeightCm} placeholder="Height" aria-label="Height in cm" class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+          </div>
+        </div>
+        <p class="text-[10px] text-slate-500">Empty weight = the product's weight. The sale price applies during the product's sale period when sale prices are switched on.</p>
 
         <!-- Variant Pictures Multi-Gallery -->
         <div class="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">

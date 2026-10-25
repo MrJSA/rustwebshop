@@ -1,11 +1,21 @@
 <script>
   import { Download, AlertTriangle, ArrowRight, Layers, Bell } from "lucide-svelte";
+  import { page } from "$app/stores";
+  import { lowestPricing, formatEuro, reductionPercent } from "$lib/pricing.js";
+  import PriceNote from "$lib/components/PriceNote.svelte";
 
   export let item;
   export let variants = [];
+  // Store settings for the VAT note (taken from the layout when not passed)
+  export let store = null;
 
-  $: isOutOfStock = item.product_type === 'physical' && variants && variants.length > 0 && variants.every(v => v.stock_quantity <= 0);
-  $: hasLowStock = item.product_type === 'physical' && variants && variants.some(v => v.stock_quantity > 0 && v.stock_quantity <= v.low_stock_threshold);
+  $: allVariants = variants && variants.length ? variants : item.variants || [];
+  $: pricing = lowestPricing(item, allVariants);
+  $: priceVaries = new Set(allVariants.map((v) => v.pricing?.price_cents ?? v.price_override_cents ?? item.base_price_cents)).size > 1;
+  $: storeInfo = store || $page.data?.store || {};
+
+  $: isOutOfStock = item.product_type === 'physical' && allVariants.length > 0 && allVariants.every(v => v.stock_quantity <= 0);
+  $: hasLowStock = item.product_type === 'physical' && allVariants.some(v => v.stock_quantity > 0 && v.stock_quantity <= v.low_stock_threshold);
 </script>
 
 <div class="group relative rounded-2xl bg-slate-900/60 border border-slate-800/80 hover:border-orange-500/40 transition-all duration-300 flex flex-col overflow-hidden hover:shadow-2xl hover:shadow-orange-950/20 h-full">
@@ -29,6 +39,11 @@
 
     <!-- Badges -->
     <div class="absolute top-2.5 left-2.5 flex flex-col gap-1 z-10">
+      {#if pricing.on_sale}
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-[9px] font-black bg-rose-600 text-white shadow-sm">
+          Sale −{reductionPercent(pricing)} %
+        </span>
+      {/if}
       {#if item.product_type === "digital"}
         <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold bg-sky-500/90 text-white backdrop-blur-md shadow-sm">
           <Download size={10} /> Digital
@@ -71,11 +86,22 @@
     </div>
 
     <div class="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2">
-      <div>
-        <span class="text-[9px] text-slate-400 block uppercase font-mono tracking-wider">From</span>
-        <span class="text-sm sm:text-base font-black text-white font-mono">
-          {(item.base_price_cents / 100).toFixed(2)} €
+      <div class="min-w-0">
+        {#if priceVaries}
+          <span class="text-[9px] text-slate-400 block uppercase font-mono tracking-wider">From</span>
+        {/if}
+        <span class="text-sm sm:text-base font-black font-mono {pricing.on_sale ? 'text-rose-400' : 'text-white'}">
+          {formatEuro(pricing.price_cents)}
         </span>
+        {#if pricing.on_sale}
+          <span class="block text-[10px] text-slate-500 font-mono" title="Lowest price in the 30 days before the reduction">
+            <span class="line-through">{formatEuro(pricing.reference_cents)}</span> · −{reductionPercent(pricing)} %
+          </span>
+        {/if}
+        {#if pricing.unit_price}
+          <span class="block text-[10px] text-slate-500 font-mono">({pricing.unit_price})</span>
+        {/if}
+        <PriceNote store={storeInfo} digital={item.product_type === 'digital'} compact />
       </div>
 
       <a

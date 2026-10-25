@@ -1,8 +1,10 @@
 <script>
   import { onMount } from 'svelte';
+  import CountryPicker from '$lib/components/CountryPicker.svelte';
+  import { countryName } from '$lib/countries.js';
   import { 
     Truck, Plus, Trash2, Globe, Box, Save, Check, Edit3, X, 
-    ChevronRight, Layers, AlertCircle, CheckCircle2, ExternalLink
+    ChevronRight, Layers, AlertCircle, CheckCircle2, ExternalLink, Copy
   } from 'lucide-svelte';
 
   export let initialProviders = [];
@@ -41,7 +43,7 @@
 
   // Zone Form State
   let zoneName = '';
-  let countryCodesStr = 'DE, AT, CH';
+  let zoneCodes = ['DE'];
   let zoneIsDefault = false;
 
   // Rate Form State
@@ -51,6 +53,28 @@
   let deliveryDays = '2-4 business days';
   let minWeightG = 0;
   let maxWeightG = 5000;
+  // Maximum package size in cm (empty = no size limit)
+  let maxLengthCm = '';
+  let maxWidthCm = '';
+  let maxHeightCm = '';
+  const toMm = (cm) => (cm === '' || cm === null || isNaN(parseFloat(cm)) ? 0 : Math.round(parseFloat(cm) * 10));
+  const toCm = (mm) => (mm ? String(mm / 10) : '');
+  function rateSizeFields() {
+    return { max_length_mm: toMm(maxLengthCm), max_width_mm: toMm(maxWidthCm), max_height_mm: toMm(maxHeightCm) };
+  }
+
+  // Copy dialogs
+  let isCopyZoneOpen = false;
+  let copyZoneSource = null;
+  let copyTargetProviderId = '';
+  let copyZoneName = '';
+  let isCopyRatesOpen = false;
+  let copyRatesTarget = null;
+  let copySourceZoneId = '';
+  let copySelectedRateIds = [];
+
+  $: allZones = (providers || []).flatMap((p) => (p.zones || []).map((z) => ({ ...z, providerName: p.name })));
+  $: copySourceZone = allZones.find((z) => z.id === copySourceZoneId);
 
   onMount(() => {
     reloadProviders();
@@ -221,7 +245,7 @@
   function openAddZone(providerId) {
     selectedProviderId = providerId;
     zoneName = '';
-    countryCodesStr = 'DE, AT, CH';
+    zoneCodes = ['DE'];
     zoneIsDefault = false;
     modalError = '';
     isSubmitting = false;
@@ -230,9 +254,9 @@
 
   async function handleCreateZone() {
     modalError = '';
-    const countryCodes = countryCodesStr.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+    const countryCodes = [...zoneCodes];
     if (!zoneName.trim() || countryCodes.length === 0) {
-      modalError = 'Please provide a zone name and at least one country code.';
+      modalError = 'Please provide a zone name and at least one country.';
       return;
     }
     isSubmitting = true;
@@ -264,7 +288,7 @@
   function openEditZone(zone) {
     editingZone = zone;
     zoneName = zone.zone_name;
-    countryCodesStr = Array.isArray(zone.country_codes) ? zone.country_codes.join(', ') : '';
+    zoneCodes = Array.isArray(zone.country_codes) ? [...zone.country_codes] : [];
     zoneIsDefault = Boolean(zone.is_default);
     modalError = '';
     isSubmitting = false;
@@ -274,7 +298,11 @@
   async function handleUpdateZone() {
     if (!editingZone) return;
     modalError = '';
-    const countryCodes = countryCodesStr.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+    const countryCodes = [...zoneCodes];
+    if (countryCodes.length === 0 && !zoneIsDefault) {
+      modalError = 'Please add at least one country.';
+      return;
+    }
     isSubmitting = true;
     try {
       const res = await fetch(`/api/v1/admin/settings/shipping/zones/${editingZone.id}`, {
@@ -327,6 +355,7 @@
     packageType = 'standard';
     priceEuros = 6.99;
     deliveryDays = '2-4 business days';
+    maxLengthCm = maxWidthCm = maxHeightCm = '';
     minWeightG = 0;
     maxWeightG = 5000;
     modalError = '';
@@ -348,7 +377,8 @@
           price_cents: priceCents,
           estimated_delivery_days: deliveryDays.trim(),
           min_weight_g: parseInt(minWeightG) || 0,
-          max_weight_g: parseInt(maxWeightG) || 5000
+          max_weight_g: parseInt(maxWeightG) || 0,
+          ...rateSizeFields()
         })
       });
       if (res.ok) {
@@ -373,7 +403,10 @@
     priceEuros = ((rate.price_cents || 0) / 100).toFixed(2);
     deliveryDays = rate.estimated_delivery_days || '';
     minWeightG = rate.min_weight_g || 0;
-    maxWeightG = rate.max_weight_g || 5000;
+    maxWeightG = rate.max_weight_g || 0;
+    maxLengthCm = toCm(rate.max_length_mm);
+    maxWidthCm = toCm(rate.max_width_mm);
+    maxHeightCm = toCm(rate.max_height_mm);
     modalError = '';
     isSubmitting = false;
     isEditRateOpen = true;
@@ -394,7 +427,8 @@
           price_cents: priceCents,
           estimated_delivery_days: deliveryDays.trim(),
           min_weight_g: parseInt(minWeightG) || 0,
-          max_weight_g: parseInt(maxWeightG) || 5000
+          max_weight_g: parseInt(maxWeightG) || 0,
+          ...rateSizeFields()
         })
       });
       if (res.ok) {
@@ -408,6 +442,73 @@
       }
     } catch (e) {
       modalError = 'Failed to update rate.';
+    } finally {
+      isSubmitting = false;
+    }
+  }
+
+  // --- Copy zones and rates ---
+  function openCopyZone(zone, providerId) {
+    copyZoneSource = zone;
+    copyTargetProviderId = (providers.find((p) => p.id !== providerId) || providers.find((p) => p.id === providerId) || {}).id || '';
+    copyZoneName = zone.zone_name;
+    modalError = '';
+    isSubmitting = false;
+    isCopyZoneOpen = true;
+  }
+
+  async function handleCopyZone() {
+    modalError = '';
+    isSubmitting = true;
+    try {
+      const res = await fetch(`/api/v1/admin/settings/shipping/zones/${copyZoneSource.id}/copy`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ provider_id: copyTargetProviderId || null, zone_name: copyZoneName.trim() || null })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'Copying the zone failed');
+      isCopyZoneOpen = false;
+      showNotice(`Zone "${body.zone_name}" created with ${body.rates_copied} rate(s).`);
+      await reloadProviders();
+    } catch (e) {
+      modalError = e.message;
+    } finally {
+      isSubmitting = false;
+    }
+  }
+
+  function openCopyRates(zone) {
+    copyRatesTarget = zone;
+    copySourceZoneId = (allZones.find((z) => z.id !== zone.id && (z.rates || []).length > 0) || {}).id || '';
+    copySelectedRateIds = [];
+    modalError = '';
+    isSubmitting = false;
+    isCopyRatesOpen = true;
+  }
+  // Selecting another source zone selects all of its rates
+  $: if (copySourceZone) copySelectedRateIds = (copySourceZone.rates || []).map((r) => r.id);
+
+  async function handleCopyRates() {
+    modalError = '';
+    if (copySelectedRateIds.length === 0) {
+      modalError = 'Select at least one rate to copy.';
+      return;
+    }
+    isSubmitting = true;
+    try {
+      const res = await fetch(`/api/v1/admin/settings/shipping/zones/${copyRatesTarget.id}/copy-rates`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ source_zone_id: copySourceZoneId, rate_ids: copySelectedRateIds })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'Copying the rates failed');
+      isCopyRatesOpen = false;
+      showNotice(`${body.rates_copied} rate(s) copied into "${copyRatesTarget.zone_name}".`);
+      await reloadProviders();
+    } catch (e) {
+      modalError = e.message;
     } finally {
       isSubmitting = false;
     }
@@ -457,6 +558,7 @@
       </h2>
       <p class="text-xs text-slate-400 mt-1">
         Manage logistics providers (DHL, Hermes, UPS), country zones, and weight/package pricing tiers directly.
+        At checkout the weights of the products in the cart (Products → weight) are added up and only rates whose weight range fits are offered.
       </p>
     </div>
 
@@ -565,16 +667,37 @@
                         {/if}
                         <div class="flex flex-wrap gap-1 ml-2">
                           {#if Array.isArray(zone.country_codes)}
-                            {#each zone.country_codes as cc}
-                              <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                            <!-- At most 3 countries here; the full list is in the edit dialog -->
+                            {#each zone.country_codes.slice(0, 3) as cc}
+                              <span class="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-300 border border-slate-700" title={countryName(cc)}>
                                 {cc}
                               </span>
                             {/each}
+                            {#if zone.country_codes.length > 3}
+                              <span class="px-1.5 py-0.5 text-[10px] font-bold text-slate-500" title="{zone.country_codes.length} countries — edit the zone to see all">… ({zone.country_codes.length})</span>
+                            {/if}
                           {/if}
                         </div>
                       </div>
 
                       <div class="flex items-center gap-1.5 self-end sm:self-auto">
+                        <button
+                          type="button"
+                          on:click={() => openCopyRates(zone)}
+                          class="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[11px] font-semibold flex items-center gap-1 border border-slate-700 transition-colors"
+                          title="Copy rates from another zone into this zone"
+                        >
+                          <Copy size={11} class="text-sky-400" />
+                          <span>Copy rates in</span>
+                        </button>
+                        <button
+                          type="button"
+                          on:click={() => openCopyZone(zone, prov.id)}
+                          class="p-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors"
+                          title="Copy this zone (with its rates) to a provider"
+                        >
+                          <Copy size={12} class="text-emerald-400" />
+                        </button>
                         <button
                           type="button"
                           on:click={() => openAddRate(zone.id)}
@@ -631,7 +754,10 @@
                                 </td>
                                 <td class="py-2 text-slate-400">{rate.estimated_delivery_days || '—'}</td>
                                 <td class="py-2 font-mono text-[11px] text-slate-400">
-                                  {(rate.min_weight_g / 1000).toFixed(1)}kg - {(rate.max_weight_g / 1000).toFixed(1)}kg
+                                  {(rate.min_weight_g / 1000).toFixed(1)}–{rate.max_weight_g > 0 ? `${(rate.max_weight_g / 1000).toFixed(1)} kg` : '∞'}
+                                  {#if rate.max_length_mm > 0 && rate.max_width_mm > 0 && rate.max_height_mm > 0}
+                                    <span class="block text-[10px] text-slate-500">max {rate.max_length_mm / 10} × {rate.max_width_mm / 10} × {rate.max_height_mm / 10} cm</span>
+                                  {/if}
                                 </td>
                                 <td class="py-2 text-right font-bold text-emerald-400 font-mono">
                                   {((rate.price_cents || 0) / 100).toFixed(2)} €
@@ -676,7 +802,7 @@
 <!-- MODAL 1: Add Shipping Carrier -->
 {#if isAddProviderOpen}
   <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
-    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
+    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
           <Truck size={16} class="text-orange-500" />
@@ -752,7 +878,7 @@
 <!-- MODAL 2: Edit Shipping Carrier -->
 {#if isEditProviderOpen && editingProvider}
   <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
-    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
+    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
           <Edit3 size={16} class="text-orange-500" />
@@ -825,7 +951,7 @@
 <!-- MODAL 3: Add Zone -->
 {#if isAddZoneOpen}
   <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
-    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
+    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
           <Globe size={16} class="text-blue-400" />
@@ -856,20 +982,8 @@
         </div>
 
         <div>
-          <label class="block text-slate-300 font-semibold mb-1">Country Codes (Comma Separated)</label>
-          <input
-            type="text"
-            bind:value={countryCodesStr}
-            required
-            placeholder="DE, AT, CH, NL, FR, IT"
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-          />
-          <div class="flex flex-wrap gap-1 mt-1.5">
-            <button type="button" on:click={() => countryCodesStr = 'DE'} class="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300 hover:text-white">🇩🇪 DE</button>
-            <button type="button" on:click={() => countryCodesStr = 'DE, AT, CH'} class="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300 hover:text-white">DACH</button>
-            <button type="button" on:click={() => countryCodesStr = 'DE, AT, NL, FR, IT, ES, PL, BE, SE, DK, FI, CZ'} class="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300 hover:text-white">EU Core</button>
-            <button type="button" on:click={() => countryCodesStr = 'US, CA, GB, AU, JP'} class="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300 hover:text-white">International</button>
-          </div>
+          <label for="add-zone-countries" class="block text-slate-300 font-semibold mb-1">Countries</label>
+          <CountryPicker bind:codes={zoneCodes} id="add-zone-countries" />
         </div>
 
         <div class="flex items-center gap-2">
@@ -891,7 +1005,7 @@
 <!-- MODAL 4: Edit Zone -->
 {#if isEditZoneOpen && editingZone}
   <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
-    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
+    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
           <Edit3 size={16} class="text-blue-400" />
@@ -921,13 +1035,8 @@
         </div>
 
         <div>
-          <label class="block text-slate-300 font-semibold mb-1">Country Codes (Comma Separated)</label>
-          <input
-            type="text"
-            bind:value={countryCodesStr}
-            required
-            class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
-          />
+          <label for="edit-zone-countries" class="block text-slate-300 font-semibold mb-1">Countries</label>
+          <CountryPicker bind:codes={zoneCodes} id="edit-zone-countries" />
         </div>
 
         <div class="flex items-center gap-2">
@@ -949,7 +1058,7 @@
 <!-- MODAL 5: Add Rate -->
 {#if isAddRateOpen}
   <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
-    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
+    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
           <Box size={16} class="text-orange-500" />
@@ -1021,13 +1130,23 @@
             />
           </div>
           <div>
-            <label class="block text-slate-300 font-semibold mb-1">Max Weight (grams)</label>
+            <label class="block text-slate-300 font-semibold mb-1">Max Weight (grams, 0 = no limit)</label>
             <input
               type="number"
               bind:value={maxWeightG}
               class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
             />
           </div>
+        </div>
+
+        <div>
+          <span class="block text-slate-300 font-semibold mb-1">Max. package size (cm, empty = no size limit)</span>
+          <div class="grid grid-cols-3 gap-2">
+            <input type="number" step="0.1" min="0" bind:value={maxLengthCm} placeholder="Length" aria-label="Maximum length in cm" class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+            <input type="number" step="0.1" min="0" bind:value={maxWidthCm} placeholder="Width" aria-label="Maximum width in cm" class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+            <input type="number" step="0.1" min="0" bind:value={maxHeightCm} placeholder="Height" aria-label="Maximum height in cm" class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+          </div>
+          <p class="text-[10px] text-slate-500 mt-1">The order of the sides does not matter. Checkout only offers packages the cart fits into (by weight and size) and picks the cheapest.</p>
         </div>
 
         <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
@@ -1042,7 +1161,7 @@
 <!-- MODAL 6: Edit Rate -->
 {#if isEditRateOpen && editingRate}
   <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
-    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4">
+    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
           <Edit3 size={16} class="text-orange-500" />
@@ -1112,7 +1231,7 @@
             />
           </div>
           <div>
-            <label class="block text-slate-300 font-semibold mb-1">Max Weight (grams)</label>
+            <label class="block text-slate-300 font-semibold mb-1">Max Weight (grams, 0 = no limit)</label>
             <input
               type="number"
               bind:value={maxWeightG}
@@ -1121,11 +1240,94 @@
           </div>
         </div>
 
+        <div>
+          <span class="block text-slate-300 font-semibold mb-1">Max. package size (cm, empty = no size limit)</span>
+          <div class="grid grid-cols-3 gap-2">
+            <input type="number" step="0.1" min="0" bind:value={maxLengthCm} placeholder="Length" aria-label="Maximum length in cm" class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+            <input type="number" step="0.1" min="0" bind:value={maxWidthCm} placeholder="Width" aria-label="Maximum width in cm" class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+            <input type="number" step="0.1" min="0" bind:value={maxHeightCm} placeholder="Height" aria-label="Maximum height in cm" class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500" />
+          </div>
+          <p class="text-[10px] text-slate-500 mt-1">The order of the sides does not matter. Checkout only offers packages the cart fits into (by weight and size) and picks the cheapest.</p>
+        </div>
+
         <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
           <button type="button" on:click={() => isEditRateOpen = false} class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 hover:text-white">Cancel</button>
           <button type="submit" class="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold shadow-lg shadow-orange-600/25">Save Rate</button>
         </div>
       </form>
+    </div>
+  </div>
+{/if}
+
+<!-- MODAL 7: Copy zone to a provider -->
+{#if isCopyZoneOpen && copyZoneSource}
+  <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+    <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto text-xs">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-sm font-bold text-white flex items-center gap-2"><Copy size={16} class="text-emerald-400" /> Copy zone "{copyZoneSource.zone_name}"</h3>
+        <button on:click={() => (isCopyZoneOpen = false)} class="text-slate-400 hover:text-white" aria-label="Close"><X size={16} /></button>
+      </div>
+      {#if modalError}<div class="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400">{modalError}</div>{/if}
+      <p class="text-slate-400">Creates a new zone with the same countries and all {(copyZoneSource.rates || []).length} rate(s). You can change prices afterwards.</p>
+      <div>
+        <label for="copy-zone-provider" class="block text-slate-300 font-semibold mb-1">Copy to provider</label>
+        <select id="copy-zone-provider" bind:value={copyTargetProviderId} class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500">
+          {#each providers as p}
+            <option value={p.id}>{p.name}</option>
+          {/each}
+        </select>
+      </div>
+      <div>
+        <label for="copy-zone-name" class="block text-slate-300 font-semibold mb-1">Name of the new zone</label>
+        <input id="copy-zone-name" bind:value={copyZoneName} class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500" />
+      </div>
+      <div class="flex justify-end gap-2 pt-3 border-t border-slate-800">
+        <button type="button" on:click={() => (isCopyZoneOpen = false)} class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 hover:text-white">Cancel</button>
+        <button type="button" on:click={handleCopyZone} disabled={isSubmitting || !copyTargetProviderId} class="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white font-bold">{isSubmitting ? 'Copying…' : 'Copy zone'}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- MODAL 8: Copy rates from another zone into this zone -->
+{#if isCopyRatesOpen && copyRatesTarget}
+  <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+    <div class="w-full max-w-lg rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto text-xs">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-sm font-bold text-white flex items-center gap-2"><Copy size={16} class="text-sky-400" /> Copy rates into "{copyRatesTarget.zone_name}"</h3>
+        <button on:click={() => (isCopyRatesOpen = false)} class="text-slate-400 hover:text-white" aria-label="Close"><X size={16} /></button>
+      </div>
+      {#if modalError}<div class="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400">{modalError}</div>{/if}
+      <div>
+        <label for="copy-rates-source" class="block text-slate-300 font-semibold mb-1">Copy from zone</label>
+        <select id="copy-rates-source" bind:value={copySourceZoneId} class="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500">
+          {#each allZones.filter((z) => z.id !== copyRatesTarget.id) as z}
+            <option value={z.id}>{z.providerName} · {z.zone_name} ({(z.rates || []).length} rates)</option>
+          {/each}
+        </select>
+      </div>
+      {#if copySourceZone}
+        {#if (copySourceZone.rates || []).length === 0}
+          <p class="text-slate-500">This zone has no rates.</p>
+        {:else}
+          <div class="max-h-64 overflow-auto rounded-xl border border-slate-800 divide-y divide-slate-800">
+            {#each copySourceZone.rates as r}
+              <label class="flex items-center justify-between gap-3 px-3 py-2 cursor-pointer hover:bg-slate-800/50">
+                <span class="flex items-center gap-2">
+                  <input type="checkbox" value={r.id} bind:group={copySelectedRateIds} class="accent-orange-500" />
+                  <span class="text-white">{r.name}</span>
+                  <span class="text-slate-500">{r.estimated_delivery_days}</span>
+                </span>
+                <span class="font-mono text-emerald-400">{((r.price_cents || 0) / 100).toFixed(2)} €</span>
+              </label>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+      <div class="flex justify-end gap-2 pt-3 border-t border-slate-800">
+        <button type="button" on:click={() => (isCopyRatesOpen = false)} class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 hover:text-white">Cancel</button>
+        <button type="button" on:click={handleCopyRates} disabled={isSubmitting || !copySourceZoneId} class="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white font-bold">{isSubmitting ? 'Copying…' : `Copy ${copySelectedRateIds.length} rate(s)`}</button>
+      </div>
     </div>
   </div>
 {/if}

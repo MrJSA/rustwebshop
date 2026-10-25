@@ -35,6 +35,26 @@ pub struct ShippingRate {
     pub max_weight_g: i32,
     pub price_cents: i32,
     pub estimated_delivery_days: String,
+    /// Maximum package size in mm (0 = no limit)
+    #[serde(default)]
+    #[sqlx(default)]
+    pub max_length_mm: i32,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub max_width_mm: i32,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub max_height_mm: i32,
+}
+
+impl ShippingRate {
+    pub fn limits(&self) -> crate::services::packing::RateLimits {
+        crate::services::packing::RateLimits {
+            min_weight_g: self.min_weight_g,
+            max_weight_g: self.max_weight_g,
+            max_dims: crate::services::packing::sorted_dims(Some(self.max_length_mm), Some(self.max_width_mm), Some(self.max_height_mm)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +121,9 @@ pub struct CreateShippingRateRequest {
     pub max_weight_g: Option<i32>,
     pub price_cents: i32,
     pub estimated_delivery_days: String,
+    pub max_length_mm: Option<i32>,
+    pub max_width_mm: Option<i32>,
+    pub max_height_mm: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,5 +134,8 @@ pub struct UpdateShippingRateRequest {
     pub max_weight_g: Option<i32>,
     pub price_cents: Option<i32>,
     pub estimated_delivery_days: Option<String>,
+    pub max_length_mm: Option<i32>,
+    pub max_width_mm: Option<i32>,
+    pub max_height_mm: Option<i32>,
 }
 

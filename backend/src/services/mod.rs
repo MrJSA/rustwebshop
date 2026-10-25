@@ -7,4 +7,8 @@ pub mod email;
 pub mod inventory;
 pub mod invoice;
 pub mod invoice_pdf;
+pub mod invoice_store;
+pub mod packing;
 pub mod payments;
+pub mod pricing;
+pub mod vies;
