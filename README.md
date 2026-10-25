@@ -74,4 +74,6 @@ Database migrations run automatically when the backend starts.
 - Roles: `superadmin`, `admin` and `editor`, with per-section permissions. Each account can have an email address, used for alerts.
 - Export and import of store data as JSON: settings, catalogue incl. parts and stock, pages, menus, shipping, coupons and payment settings. The import also works on a different installation. Passwords and API keys are never exported.
 - Media library with download of all files as ZIP. Images are converted to WebP on upload.
+- Invoices as PDF, attached automatically to the payment confirmation email. Optional EN 16931 e-invoices (ZUGFeRD / Factur-X, PDF/A-3 with embedded XML); the XML can also be downloaded per order.
+- Automatic daily, weekly or monthly backups of the complete database and all uploads to a private GitHub repository (see [BACKUP.md](BACKUP.md)).
 - Updates from the admin with an automatic database backup (see [INSTALL.md](INSTALL.md#11-updates)).

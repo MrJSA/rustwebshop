@@ -302,7 +302,10 @@
               <tbody class="divide-y divide-slate-800/60 font-medium">
                 {#each recentOrders as ord}
                   <tr class="hover:bg-slate-800/40 transition-colors">
-                    <td class="py-3 px-3 font-mono font-bold text-white">{ord.order_number}</td>
+                    <td class="py-3 px-3 font-mono font-bold text-white">
+                      {ord.order_number}
+                      {#if ord.is_test}<span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-black uppercase bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Paid in test mode — not counted in analytics">Test</span>{/if}
+                    </td>
                     <td class="py-3 px-3 text-slate-300">{ord.customer_name || ord.customer_email}</td>
                     <td class="py-3 px-3 text-slate-400">{new Date(ord.created_at).toLocaleDateString()}</td>
                     <td class="py-3 px-3 font-mono font-bold text-orange-400">{formatPrice(ord.total_cents)}</td>

@@ -31,6 +31,14 @@ pub struct Order {
     #[serde(default)]
     #[sqlx(default)]
     pub payment_reference: Option<String>,
+    /// Paid in test mode (Stripe test keys / PayPal sandbox) — excluded from analytics
+    #[serde(default)]
+    #[sqlx(default)]
+    pub is_test: bool,
+    /// Tax mode at the time of purchase (kleingewerbe / included / excluded)
+    #[serde(default)]
+    #[sqlx(default)]
+    pub tax_mode: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -49,6 +57,10 @@ pub struct OrderItem {
     pub total_price_cents: i32,
     pub is_digital: bool,
     pub download_url: Option<String>,
+    /// VAT rate of this line at the time of purchase
+    #[serde(default)]
+    #[sqlx(default)]
+    pub tax_rate_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,4 +1,5 @@
-FROM rust:latest AS builder
+# Same Debian release as the runtime stage — a newer builder links against a glibc the runtime doesn't have
+FROM rust:1-bookworm AS builder
 
 WORKDIR /usr/src/backend
 
@@ -11,6 +12,7 @@ RUN rm -rf src
 # Copy real source code and migrations
 COPY src ./src
 COPY migrations ./migrations
+COPY assets ./assets
 RUN touch src/main.rs
 RUN cargo build --release
 
@@ -21,6 +23,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
     curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# pg_dump for the automatic backups — its major version must match the db image (postgres:16)
+RUN install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends postgresql-client-16 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

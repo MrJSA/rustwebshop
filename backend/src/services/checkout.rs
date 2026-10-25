@@ -18,10 +18,12 @@ struct PricedLine {
     total_price_cents: i32,
     is_digital: bool,
     download_url: Option<String>,
+    tax_rate_percent: f64,
 }
 
 struct PricedOrder {
     lines: Vec<PricedLine>,
+    tax_mode: String,
     digital_downloads: Vec<DigitalDownloadItem>,
     items_subtotal_cents: i32,
     discount_cents: i32,
@@ -35,6 +37,36 @@ struct PricedOrder {
     missing_shipping_rate: bool,
 }
 
+/// VAT and total of an order. Product VAT is reduced pro rata by product discounts; shipping is taxed
+/// with the VAT rate of the main delivery (largest share) — included in the price with gross pricing,
+/// added on top with net pricing. Small businesses (§ 19 UStG) charge no VAT.
+pub fn compute_tax(tax_mode: &str, rate_amounts: &[(f64, i64)], items_subtotal: i32, subtotal: i32, shipping: i32) -> (i32, i32) {
+    let discount_factor = if items_subtotal > 0 { subtotal as f64 / items_subtotal as f64 } else { 0.0 };
+    let amounts: Vec<i64> = rate_amounts.iter().map(|(_, a)| *a).collect();
+    let shipping_rate = crate::services::invoice::main_rate_index(&amounts).map(|i| rate_amounts[i].0).unwrap_or(0.0) / 100.0;
+    let items_vat = |gross: bool| -> f64 {
+        rate_amounts
+            .iter()
+            .map(|(rate, amount)| {
+                let r = rate / 100.0;
+                let a = *amount as f64 * discount_factor;
+                if r <= 0.0 { 0.0 } else if gross { a - a / (1.0 + r) } else { a * r }
+            })
+            .sum()
+    };
+    match tax_mode {
+        "included" => {
+            let shipping_vat = if shipping_rate > 0.0 { shipping as f64 - shipping as f64 / (1.0 + shipping_rate) } else { 0.0 };
+            ((items_vat(true) + shipping_vat).round() as i32, subtotal + shipping)
+        }
+        "excluded" => {
+            let vat = (items_vat(false) + shipping as f64 * shipping_rate).round() as i32;
+            (vat, subtotal + shipping + vat)
+        }
+        _ => (0, subtotal + shipping),
+    }
+}
+
 /// A payment that has been verified with the provider and may be turned into an order.
 pub struct VerifiedPayment {
     pub provider: String,
@@ -43,6 +75,8 @@ pub struct VerifiedPayment {
     pub amount_cents: i32,
     /// 'paid' or 'pending' (e.g. PayPal capture under review)
     pub status: String,
+    /// Paid in test mode (Stripe `livemode: false`, PayPal sandbox): kept out of analytics
+    pub is_test: bool,
 }
 
 pub enum FinalizeError {
@@ -130,7 +164,8 @@ impl CheckoutService {
         let mut lines = Vec::new();
         let mut digital_downloads = Vec::new();
         let mut items_subtotal_cents = 0;
-        let mut vat_before_discount = 0.0_f64;
+        // Line totals per VAT rate (first appearance order) — shipping is taxed with the main rate
+        let mut rate_amounts: Vec<(f64, i64)> = Vec::new();
 
         for item in &req.items {
             if item.quantity <= 0 {
@@ -168,11 +203,9 @@ impl CheckoutService {
             let line_total = unit_price * item.quantity;
             items_subtotal_cents += line_total;
 
-            let rate = item_tax_rate / 100.0;
-            match tax_mode.as_str() {
-                "included" if rate > 0.0 => vat_before_discount += line_total as f64 - line_total as f64 / (1.0 + rate),
-                "excluded" => vat_before_discount += line_total as f64 * rate,
-                _ => {}
+            match rate_amounts.iter_mut().find(|(r, _)| (*r - item_tax_rate).abs() < 1e-9) {
+                Some((_, sum)) => *sum += line_total as i64,
+                None => rate_amounts.push((item_tax_rate, line_total as i64)),
             }
 
             let download_url: Option<String> = if is_digital { row.get("digital_download_url") } else { None };
@@ -227,6 +260,7 @@ impl CheckoutService {
                 total_price_cents: line_total,
                 is_digital,
                 download_url,
+                tax_rate_percent: item_tax_rate,
             });
         }
 
@@ -326,23 +360,12 @@ impl CheckoutService {
             coupon = Some((c.get::<Uuid, _>("id"), c.get::<String, _>("code")));
         }
 
-        // VAT is reduced pro rata by product discounts
-        let discount_factor = if items_subtotal_cents > 0 {
-            subtotal_cents as f64 / items_subtotal_cents as f64
-        } else {
-            0.0
-        };
-        let (tax_cents, total_cents) = match tax_mode.as_str() {
-            "included" => ((vat_before_discount * discount_factor).round() as i32, subtotal_cents + shipping_cost_cents),
-            "excluded" => {
-                let vat = (vat_before_discount * discount_factor).round() as i32;
-                (vat, subtotal_cents + shipping_cost_cents + vat)
-            }
-            _ => (0, subtotal_cents + shipping_cost_cents),
-        };
+        let (tax_cents, total_cents) =
+            compute_tax(&tax_mode, &rate_amounts, items_subtotal_cents, subtotal_cents, shipping_cost_cents);
 
         Ok(PricedOrder {
             lines,
+            tax_mode: tax_mode.clone(),
             digital_downloads,
             items_subtotal_cents,
             discount_cents,
@@ -468,9 +491,9 @@ impl CheckoutService {
                 shipping_address, billing_address, shipping_rate_id,
                 shipping_cost_cents, subtotal_cents, tax_cents, total_cents,
                 payment_provider, payment_status, order_status, coupon_code, discount_cents,
-                payment_reference, access_token
+                payment_reference, access_token, is_test, tax_mode
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
             "#,
         )
         .bind(order_id)
@@ -491,6 +514,8 @@ impl CheckoutService {
         .bind(priced.discount_cents)
         .bind(&payment.reference)
         .bind(&access_token)
+        .bind(payment.is_test)
+        .bind(&priced.tax_mode)
         .execute(&mut *conn)
         .await?;
 
@@ -500,9 +525,9 @@ impl CheckoutService {
                 INSERT INTO order_items (
                     order_id, product_id, variant_id, product_title,
                     variant_title, sku, unit_price_cents, quantity,
-                    total_price_cents, is_digital, download_url
+                    total_price_cents, is_digital, download_url, tax_rate_percent
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 "#,
             )
             .bind(order_id)
@@ -516,6 +541,7 @@ impl CheckoutService {
             .bind(line.total_price_cents)
             .bind(line.is_digital)
             .bind(&line.download_url)
+            .bind(line.tax_rate_percent)
             .execute(&mut *conn)
             .await?;
         }
@@ -724,9 +750,50 @@ impl CheckoutService {
             reference: format!("free-{}", Uuid::new_v4()),
             amount_cents: 0,
             status: "paid".to_string(),
+            // No payment provider involved — a 100 % coupon is a real order
+            is_test: false,
         };
         let response = Self::create_order(&mut *tx, req, &payment).await?;
         tx.commit().await?;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_tax;
+    use crate::services::invoice::tests::{item, sample_order, sample_settings};
+    use crate::services::invoice::Invoice;
+
+    #[test]
+    fn shipping_carries_the_main_vat_rate() {
+        // 100 € at 19 % + 20 € at 7 %, 10 € shipping
+        let rates = [(19.0, 10000), (7.0, 2000)];
+        // Net prices: VAT on items (19.00 + 1.40) plus 19 % on shipping (1.90)
+        assert_eq!(compute_tax("excluded", &rates, 12000, 12000, 1000), (2230, 15230));
+        // Gross prices: total unchanged, contained VAT includes the shipping share
+        let (tax, total) = compute_tax("included", &rates, 12000, 12000, 1000);
+        assert_eq!(total, 13000);
+        assert_eq!(tax, (10000.0 - 10000.0 / 1.19 + 2000.0 - 2000.0 / 1.07 + 1000.0 - 1000.0 / 1.19_f64).round() as i32);
+        assert_eq!(compute_tax("kleingewerbe", &rates, 12000, 12000, 1000), (0, 13000));
+        // Equal shares: the first rate wins (same rule as the invoice)
+        assert_eq!(compute_tax("excluded", &[(7.0, 1000), (19.0, 1000)], 2000, 2000, 1000).0, 70 + 190 + 70);
+    }
+
+    #[test]
+    fn checkout_and_invoice_agree() {
+        for mode in ["kleingewerbe", "included", "excluded"] {
+            let items = vec![item("Gadget", "G", 1999, 3, 19.0, false), item("Book", "B", 1099, 2, 7.0, false)];
+            let items_sum = 3 * 1999 + 2 * 1099;
+            let subtotal = items_sum - 815; // coupon
+            let rates = [(19.0, 3 * 1999), (7.0, 2 * 1099)];
+            let (tax, total) = compute_tax(mode, &rates, items_sum, subtotal, 495);
+            let mut order = sample_order(mode, subtotal, 495, total);
+            order.tax_cents = tax;
+            let inv = Invoice::build(&order, &items, &sample_settings(mode));
+            assert_eq!(inv.payable_cents, total as i64, "{}", mode);
+            assert!(inv.rounding_cents.abs() <= 2, "{}: rounding {}", mode, inv.rounding_cents);
+            assert!((inv.tax_total_cents - tax as i64).abs() <= 2, "{}: invoice VAT {} vs checkout {}", mode, inv.tax_total_cents, tax);
+        }
     }
 }

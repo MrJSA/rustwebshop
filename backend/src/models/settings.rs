@@ -72,6 +72,18 @@ pub struct StoreSettings {
     pub low_stock_alert_custom_emails: String,
     #[serde(default = "default_json_array")]
     pub low_stock_alert_selected_user_ids: serde_json::Value,
+    /// Steuernummer — required on invoices without a VAT ID (e.g. small businesses)
+    #[serde(default)]
+    #[sqlx(default)]
+    pub tax_number: String,
+    /// Attach the invoice as PDF to the payment confirmation email
+    #[serde(default = "default_true")]
+    #[sqlx(default)]
+    pub email_invoice_pdf: bool,
+    /// Make that PDF a ZUGFeRD / Factur-X e-invoice (EN 16931 XML embedded)
+    #[serde(default)]
+    #[sqlx(default)]
+    pub einvoice_enabled: bool,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -189,6 +201,9 @@ pub struct UpdateStoreSettingsRequest {
     pub low_stock_alert_recipients_mode: Option<String>,
     pub low_stock_alert_custom_emails: Option<String>,
     pub low_stock_alert_selected_user_ids: Option<serde_json::Value>,
+    pub tax_number: Option<String>,
+    pub email_invoice_pdf: Option<bool>,
+    pub einvoice_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

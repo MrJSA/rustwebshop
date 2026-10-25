@@ -5,7 +5,8 @@ import { SESSION_COOKIE, backendUrl, fetchSessionAdmin } from '$lib/server/sessi
 const PUBLIC_PATHS = new Set(['/login', '/api/v1/admin/auth/login']);
 
 const SECURITY_HEADERS = {
-  'X-Frame-Options': 'DENY',
+  // SAMEORIGIN: the admin previews its own invoice PDFs and packing slips in a frame
+  'X-Frame-Options': 'SAMEORIGIN',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'same-origin',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',

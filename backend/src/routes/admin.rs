@@ -71,6 +71,7 @@ pub fn admin_router(pool: PgPool) -> Router<PgPool> {
         .route("/orders/:id/refund", post(admin_refund_order))
         .route("/orders/:id/cancel", post(admin_cancel_order))
         .route("/orders/:id/invoice", get(admin_get_order_invoice))
+        .route("/orders/:id/invoice-xml", get(admin_get_order_invoice_xml))
         .route("/orders/:id/packing-slip", get(admin_get_order_packing_slip))
         // Settings Management
         .route("/settings/payments", get(admin_get_payments))
@@ -103,6 +104,10 @@ pub fn admin_router(pool: PgPool) -> Router<PgPool> {
         .route("/export/store-data", get(admin_export_store_data))
         .route("/export/media", get(admin_export_media_library))
         .route("/import/store-data", post(admin_import_store_data))
+        .route("/backup/settings", get(admin_get_backup_settings).put(admin_update_backup_settings))
+        .route("/backup/test", post(admin_test_backup_connection))
+        .route("/backup/run", post(admin_run_backup))
+        .route("/backup/disconnect", post(admin_disconnect_backup))
         .layer(axum::middleware::from_fn_with_state(pool, crate::middleware::admin_auth_middleware));
 
     Router::new()
@@ -265,13 +270,13 @@ async fn admin_change_credentials(
 // 2. Executive Dashboard Stats & Analytics
 async fn get_dashboard_stats(State(pool): State<PgPool>) -> Result<impl IntoResponse, (StatusCode, String)> {
     let gross_sales: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(total_cents), 0)::BIGINT FROM orders WHERE payment_status != 'failed' AND payment_status != 'refunded'"
+        "SELECT COALESCE(SUM(total_cents), 0)::BIGINT FROM orders WHERE is_test = FALSE AND payment_status != 'failed' AND payment_status != 'refunded'"
     )
     .fetch_one(&pool)
     .await
     .unwrap_or(0);
 
-    let total_orders: i64 = sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM orders")
+    let total_orders: i64 = sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM orders WHERE is_test = FALSE")
         .fetch_one(&pool)
         .await
         .unwrap_or(0);
@@ -299,21 +304,21 @@ async fn get_dashboard_stats(State(pool): State<PgPool>) -> Result<impl IntoResp
     .unwrap_or(0);
 
     let pending_orders: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::BIGINT FROM orders WHERE order_status = 'pending'"
+        "SELECT COUNT(*)::BIGINT FROM orders WHERE order_status = 'pending' AND is_test = FALSE"
     )
     .fetch_one(&pool)
     .await
     .unwrap_or(0);
 
     let processing_orders: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::BIGINT FROM orders WHERE order_status = 'processing'"
+        "SELECT COUNT(*)::BIGINT FROM orders WHERE order_status = 'processing' AND is_test = FALSE"
     )
     .fetch_one(&pool)
     .await
     .unwrap_or(0);
 
     let shipped_orders: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::BIGINT FROM orders WHERE order_status = 'shipped'"
+        "SELECT COUNT(*)::BIGINT FROM orders WHERE order_status = 'shipped' AND is_test = FALSE"
     )
     .fetch_one(&pool)
     .await
@@ -339,7 +344,7 @@ async fn get_sales_analytics(State(pool): State<PgPool>) -> Result<impl IntoResp
             COUNT(*)::BIGINT AS order_count,
             COALESCE(SUM(total_cents), 0)::BIGINT AS sales_cents
         FROM orders
-        WHERE created_at >= NOW() - INTERVAL '30 days'
+        WHERE created_at >= NOW() - INTERVAL '30 days' AND is_test = FALSE
         GROUP BY DATE_TRUNC('day', created_at)
         ORDER BY day ASC
         "#
@@ -1200,7 +1205,7 @@ async fn admin_list_orders(
     let orders = match filter.status {
         Some(s) if !s.is_empty() => {
             sqlx::query_as::<_, Order>(
-                "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, created_at, updated_at FROM orders WHERE order_status = $1 ORDER BY created_at DESC"
+                "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, is_test, tax_mode, created_at, updated_at FROM orders WHERE order_status = $1 ORDER BY created_at DESC"
             )
             .bind(s)
             .fetch_all(&pool)
@@ -1208,7 +1213,7 @@ async fn admin_list_orders(
         }
         _ => {
             sqlx::query_as::<_, Order>(
-                "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, created_at, updated_at FROM orders ORDER BY created_at DESC"
+                "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, is_test, tax_mode, created_at, updated_at FROM orders ORDER BY created_at DESC"
             )
             .fetch_all(&pool)
             .await
@@ -1224,7 +1229,7 @@ async fn admin_get_order(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let order = sqlx::query_as::<_, Order>(
-        "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, created_at, updated_at FROM orders WHERE id = $1"
+        "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, is_test, tax_mode, created_at, updated_at FROM orders WHERE id = $1"
     )
     .bind(id)
     .fetch_optional(&pool)
@@ -1233,7 +1238,7 @@ async fn admin_get_order(
     .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
 
     let items = sqlx::query_as::<_, OrderItem>(
-        "SELECT id, order_id, product_id, variant_id, product_title, variant_title, sku, unit_price_cents, quantity, total_price_cents, is_digital, download_url FROM order_items WHERE order_id = $1"
+        "SELECT id, order_id, product_id, variant_id, product_title, variant_title, sku, unit_price_cents, quantity, total_price_cents, is_digital, download_url, tax_rate_percent FROM order_items WHERE order_id = $1"
     )
     .bind(id)
     .fetch_all(&pool)
@@ -1372,9 +1377,10 @@ async fn admin_cancel_order(
 async fn admin_get_order_invoice(
     State(pool): State<PgPool>,
     Path(id): Path<Uuid>,
+    Query(query): Query<InvoiceQuery>,
 ) -> Result<Response, (StatusCode, String)> {
     let order = sqlx::query_as::<_, Order>(
-        "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, created_at, updated_at FROM orders WHERE id = $1"
+        "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, is_test, tax_mode, created_at, updated_at FROM orders WHERE id = $1"
     )
     .bind(id)
     .fetch_optional(&pool)
@@ -1383,7 +1389,7 @@ async fn admin_get_order_invoice(
     .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
 
     let items = sqlx::query_as::<_, OrderItem>(
-        "SELECT id, order_id, product_id, variant_id, product_title, variant_title, sku, unit_price_cents, quantity, total_price_cents, is_digital, download_url FROM order_items WHERE order_id = $1"
+        "SELECT id, order_id, product_id, variant_id, product_title, variant_title, sku, unit_price_cents, quantity, total_price_cents, is_digital, download_url, tax_rate_percent FROM order_items WHERE order_id = $1"
     )
     .bind(id)
     .fetch_all(&pool)
@@ -1397,13 +1403,55 @@ async fn admin_get_order_invoice(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let html = DocumentGenerator::generate_invoice_html(&order, &items, &settings);
-    let mut response = Html(html).into_response();
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/html; charset=utf-8"),
-    );
-    Ok(response)
+    // The same PDF the customer receives (a ZUGFeRD / Factur-X e-invoice when enabled)
+    let (filename, pdf) = crate::services::email::render_invoice_pdf(&settings, &order, &items)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("The invoice could not be created: {}", e)))?;
+    let disposition = if query.download.unwrap_or(false) { "attachment" } else { "inline" };
+    Ok((
+        [
+            (CONTENT_TYPE, "application/pdf".to_string()),
+            (axum::http::header::CONTENT_DISPOSITION, format!("{}; filename=\"{}\"", disposition, filename)),
+        ],
+        pdf,
+    )
+        .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct InvoiceQuery {
+    download: Option<bool>,
+}
+
+/// The EN 16931 XML (UN/CEFACT CII, as embedded in ZUGFeRD / Factur-X) for accounting software.
+async fn admin_get_order_invoice_xml(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, (StatusCode, String)> {
+    let order = sqlx::query_as::<_, Order>("SELECT * FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
+    let items = sqlx::query_as::<_, OrderItem>("SELECT * FROM order_items WHERE order_id = $1")
+        .bind(id)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let settings = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let invoice = crate::services::invoice::Invoice::build(&order, &items, &settings);
+    Ok((
+        [
+            (CONTENT_TYPE, "application/xml; charset=utf-8".to_string()),
+            (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}.xml\"", invoice.file_stem())),
+        ],
+        invoice.to_cii_xml(),
+    )
+        .into_response())
 }
 
 async fn admin_get_order_packing_slip(
@@ -1411,7 +1459,7 @@ async fn admin_get_order_packing_slip(
     Path(id): Path<Uuid>,
 ) -> Result<Response, (StatusCode, String)> {
     let order = sqlx::query_as::<_, Order>(
-        "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, created_at, updated_at FROM orders WHERE id = $1"
+        "SELECT id, order_number, customer_name, customer_email, shipping_address, billing_address, shipping_rate_id, shipping_cost_cents, subtotal_cents, tax_cents, total_cents, payment_provider, payment_status, order_status, tracking_number, notes, is_test, tax_mode, created_at, updated_at FROM orders WHERE id = $1"
     )
     .bind(id)
     .fetch_optional(&pool)
@@ -1420,7 +1468,7 @@ async fn admin_get_order_packing_slip(
     .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
 
     let items = sqlx::query_as::<_, OrderItem>(
-        "SELECT id, order_id, product_id, variant_id, product_title, variant_title, sku, unit_price_cents, quantity, total_price_cents, is_digital, download_url FROM order_items WHERE order_id = $1"
+        "SELECT id, order_id, product_id, variant_id, product_title, variant_title, sku, unit_price_cents, quantity, total_price_cents, is_digital, download_url, tax_rate_percent FROM order_items WHERE order_id = $1"
     )
     .bind(id)
     .fetch_all(&pool)
@@ -1847,6 +1895,32 @@ async fn admin_update_system_settings(
     .execute(&pool)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if payload.tax_number.is_some() || payload.email_invoice_pdf.is_some() || payload.einvoice_enabled.is_some() {
+        if payload.einvoice_enabled == Some(true) {
+            let s = sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let tax_number = payload.tax_number.as_deref().unwrap_or(&s.tax_number);
+            if s.vat_id.trim().is_empty() && tax_number.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "E-invoices need your VAT ID or your tax number (Steuernummer). Enter one under Store Identity & Legal first.".to_string(),
+                ));
+            }
+        }
+        sqlx::query(
+            "UPDATE store_settings SET tax_number = COALESCE($1, tax_number), email_invoice_pdf = COALESCE($2, email_invoice_pdf),
+             einvoice_enabled = COALESCE($3, einvoice_enabled) WHERE id = 1",
+        )
+        .bind(payload.tax_number.as_deref().map(str::trim))
+        .bind(payload.email_invoice_pdf)
+        .bind(payload.einvoice_enabled)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     // The structured address is the source; company_address is its single-line form for documents
     let address = [
@@ -3099,7 +3173,7 @@ async fn admin_get_purchase_analysis(
             COUNT(*)::BIGINT AS total_orders
         FROM orders
         WHERE created_at >= $1 AND created_at <= $2
-          AND payment_status != 'failed' AND payment_status != 'refunded'
+          AND is_test = FALSE AND payment_status != 'failed' AND payment_status != 'refunded'
         "#
     )
     .bind(start_dt)
@@ -3123,7 +3197,7 @@ async fn admin_get_purchase_analysis(
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         WHERE o.created_at >= $1 AND o.created_at <= $2
-          AND o.payment_status != 'failed' AND o.payment_status != 'refunded'
+          AND o.is_test = FALSE AND o.payment_status != 'failed' AND o.payment_status != 'refunded'
         "#
     )
     .bind(start_dt)
@@ -3161,7 +3235,7 @@ async fn admin_get_purchase_analysis(
             COALESCE(SUM((SELECT SUM(quantity) FROM order_items WHERE order_id = orders.id)), 0)::BIGINT AS items_count
         FROM orders
         WHERE created_at >= $1 AND created_at <= $2
-          AND payment_status != 'failed' AND payment_status != 'refunded'
+          AND is_test = FALSE AND payment_status != 'failed' AND payment_status != 'refunded'
         GROUP BY DATE_TRUNC('day', created_at)
         ORDER BY day ASC
         "#
@@ -3200,7 +3274,7 @@ async fn admin_get_purchase_analysis(
         JOIN orders o ON o.id = oi.order_id
         LEFT JOIN products p ON p.id = oi.product_id
         WHERE o.created_at >= $1 AND o.created_at <= $2
-          AND o.payment_status != 'failed' AND o.payment_status != 'refunded'
+          AND o.is_test = FALSE AND o.payment_status != 'failed' AND o.payment_status != 'refunded'
         GROUP BY p.category
         ORDER BY items_sold DESC
         LIMIT 10
@@ -3237,7 +3311,7 @@ async fn admin_get_purchase_analysis(
         JOIN orders o ON o.id = oi.order_id
         LEFT JOIN products p ON p.id = oi.product_id
         WHERE o.created_at >= $1 AND o.created_at <= $2
-          AND o.payment_status != 'failed' AND o.payment_status != 'refunded'
+          AND o.is_test = FALSE AND o.payment_status != 'failed' AND o.payment_status != 'refunded'
         GROUP BY oi.product_id, oi.product_title, p.image_url
         ORDER BY items_sold DESC
         LIMIT 10
@@ -3546,6 +3620,9 @@ async fn admin_import_store_data(
                 address_postal_code = COALESCE($50, address_postal_code),
                 address_city = COALESCE($51, address_city),
                 address_country = COALESCE($52, address_country),
+                tax_number = COALESCE($53, tax_number),
+                email_invoice_pdf = COALESCE($54, email_invoice_pdf),
+                einvoice_enabled = COALESCE($55, einvoice_enabled),
                 updated_at = NOW()
             WHERE id = 1
             "#
@@ -3603,6 +3680,9 @@ async fn admin_import_store_data(
         .bind(str_field("address_postal_code").or(legacy_address.clone()))
         .bind(str_field("address_city").or(legacy_address.clone()))
         .bind(str_field("address_country").or(legacy_address.clone()))
+        .bind(str_field("tax_number"))
+        .bind(bool_field("email_invoice_pdf"))
+        .bind(bool_field("einvoice_enabled"))
         .execute(&mut *tx)
         .await
         .map_err(|e| import_error("store settings".to_string(), e))?;
@@ -4387,6 +4467,190 @@ async fn admin_put_domains(
     require_superadmin(&admin)?;
     tracing::warn!("Domain settings changed by admin '{}'", admin.username);
     updater_request(reqwest::Method::PUT, "/config", Some(payload)).await
+}
+
+// ==========================================
+// Automatic backups to a private GitHub repository (superadmins only — a backup contains everything)
+// ==========================================
+
+fn require_backup_admin(admin: &CurrentAdmin) -> Result<(), (StatusCode, String)> {
+    if admin.is_superadmin() {
+        Ok(())
+    } else {
+        Err((StatusCode::FORBIDDEN, "Only a superadmin can manage backups".to_string()))
+    }
+}
+
+fn backup_db_err(e: sqlx::Error) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateBackupSettingsRequest {
+    enabled: Option<bool>,
+    github_repo: Option<String>,
+    /// Empty or missing keeps the saved token
+    github_token: Option<String>,
+    frequency: Option<String>,
+    backup_hour_utc: Option<i16>,
+    keep_count: Option<i32>,
+    include_media: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TestBackupConnectionRequest {
+    github_repo: Option<String>,
+    github_token: Option<String>,
+}
+
+async fn admin_get_backup_settings(
+    State(pool): State<PgPool>,
+    Extension(admin): Extension<CurrentAdmin>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_backup_admin(&admin)?;
+    let s = crate::services::backup::BackupSettings::load(&pool).await.map_err(backup_db_err)?;
+    Ok(Json(s.public_json()))
+}
+
+async fn admin_update_backup_settings(
+    State(pool): State<PgPool>,
+    Extension(admin): Extension<CurrentAdmin>,
+    Json(payload): Json<UpdateBackupSettingsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use crate::services::backup::{self, BackupSettings, GitHub};
+    require_backup_admin(&admin)?;
+    let current = BackupSettings::load(&pool).await.map_err(backup_db_err)?;
+
+    let repo = match payload.github_repo.as_deref().map(str::trim) {
+        Some("") => String::new(),
+        Some(r) => backup::normalize_repo(r).map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+        None => current.github_repo.clone(),
+    };
+    let token = match payload.github_token.as_deref().map(str::trim) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => current.github_token.clone(),
+    };
+    let frequency = payload.frequency.unwrap_or(current.frequency.clone());
+    if !backup::FREQUENCIES.contains(&frequency.as_str()) {
+        return Err((StatusCode::BAD_REQUEST, "Frequency must be daily, weekly or monthly".to_string()));
+    }
+    let hour = payload.backup_hour_utc.unwrap_or(current.backup_hour_utc);
+    if !(0..=23).contains(&hour) {
+        return Err((StatusCode::BAD_REQUEST, "The backup hour must be between 0 and 23".to_string()));
+    }
+    let keep_count = payload.keep_count.unwrap_or(current.keep_count);
+    if !(1..=365).contains(&keep_count) {
+        return Err((StatusCode::BAD_REQUEST, "Keep between 1 and 365 backups".to_string()));
+    }
+    let enabled = payload.enabled.unwrap_or(current.enabled);
+    let include_media = payload.include_media.unwrap_or(current.include_media);
+
+    // Switching on (or changing the target) only works with a repository that really accepts backups
+    let target_changed = repo != current.github_repo || token != current.github_token;
+    let mut token_expires_at = current.token_expires_at.clone();
+    if enabled && (target_changed || !current.enabled) {
+        if repo.is_empty() || token.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "Enter the GitHub repository and an access token first".to_string()));
+        }
+        let gh = GitHub::new(&repo, &token);
+        let info = gh.check_repo().await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        gh.ensure_initialized().await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        gh.check_write_access().await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        token_expires_at = info.token_expires_at;
+    }
+
+    sqlx::query(
+        "UPDATE backup_settings SET enabled = $1, github_repo = $2, github_token = $3, frequency = $4, backup_hour_utc = $5,
+         keep_count = $6, include_media = $7, token_expires_at = $8, updated_at = NOW() WHERE id = 1",
+    )
+    .bind(enabled)
+    .bind(&repo)
+    .bind(&token)
+    .bind(&frequency)
+    .bind(hour)
+    .bind(keep_count)
+    .bind(include_media)
+    .bind(&token_expires_at)
+    .execute(&pool)
+    .await
+    .map_err(backup_db_err)?;
+    tracing::info!("Backup settings changed by admin '{}' (enabled: {}, repo: {}, {})", admin.username, enabled, repo, frequency);
+
+    let saved = BackupSettings::load(&pool).await.map_err(backup_db_err)?;
+    // A backup that is due right away (e.g. the very first one) starts immediately
+    if saved.is_due(Utc::now()) && !backup::is_running() {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let _ = backup::run_backup(&pool).await;
+        });
+    }
+    let mut body = saved.public_json();
+    body["running"] = json!(backup::is_running() || saved.is_due(Utc::now()));
+    Ok(Json(body))
+}
+
+async fn admin_test_backup_connection(
+    State(pool): State<PgPool>,
+    Extension(admin): Extension<CurrentAdmin>,
+    Json(payload): Json<TestBackupConnectionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use crate::services::backup::{self, BackupSettings, GitHub};
+    require_backup_admin(&admin)?;
+    let current = BackupSettings::load(&pool).await.map_err(backup_db_err)?;
+    let repo = match payload.github_repo.as_deref().map(str::trim) {
+        Some(r) if !r.is_empty() => backup::normalize_repo(r).map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+        _ => current.github_repo,
+    };
+    let token = payload.github_token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or(current.github_token);
+    if repo.is_empty() || token.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Enter the GitHub repository and an access token first".to_string()));
+    }
+    let gh = GitHub::new(&repo, &token);
+    let info = gh.check_repo().await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    gh.ensure_initialized().await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    gh.check_write_access().await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({
+        "ok": true,
+        "github_repo": repo,
+        "html_url": info.html_url,
+        "token_expires_at": info.token_expires_at,
+        "message": format!("Connected: {} is private and the token can store backups there.", repo),
+    })))
+}
+
+async fn admin_run_backup(
+    State(pool): State<PgPool>,
+    Extension(admin): Extension<CurrentAdmin>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use crate::services::backup::{self, BackupSettings};
+    require_backup_admin(&admin)?;
+    let s = BackupSettings::load(&pool).await.map_err(backup_db_err)?;
+    if !s.is_configured() {
+        return Err((StatusCode::BAD_REQUEST, "Connect a GitHub repository first".to_string()));
+    }
+    if backup::is_running() {
+        return Err((StatusCode::CONFLICT, "A backup is already running".to_string()));
+    }
+    tracing::info!("Manual backup started by admin '{}'", admin.username);
+    tokio::spawn(async move {
+        let _ = backup::run_backup(&pool).await;
+    });
+    Ok((StatusCode::ACCEPTED, Json(json!({ "started": true }))))
+}
+
+/// Removes the token and switches automatic backups off. Existing backups on GitHub stay untouched.
+async fn admin_disconnect_backup(
+    State(pool): State<PgPool>,
+    Extension(admin): Extension<CurrentAdmin>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_backup_admin(&admin)?;
+    sqlx::query("UPDATE backup_settings SET enabled = FALSE, github_token = '', token_expires_at = NULL, updated_at = NOW() WHERE id = 1")
+        .execute(&pool)
+        .await
+        .map_err(backup_db_err)?;
+    tracing::info!("Backup repository disconnected by admin '{}'", admin.username);
+    let s = crate::services::backup::BackupSettings::load(&pool).await.map_err(backup_db_err)?;
+    Ok(Json(s.public_json()))
 }
 
 /// Which enabled Stripe methods are actually activated in the Stripe account.

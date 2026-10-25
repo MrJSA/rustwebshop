@@ -190,6 +190,11 @@ Database migrations run automatically when the backend starts.
 
 ## 12. Backups & restore
 
+**Recommended:** switch on the automatic daily/weekly/monthly backups to a private GitHub repository in
+*Settings → Export & Backups*. Setup and restore are described step by step in [BACKUP.md](BACKUP.md).
+
+Manual backups on the server:
+
 ```bash
 # Database
 docker compose exec -T db pg_dump -U shop_user shop_db | gzip > backups/shop-$(date +%F).sql.gz

@@ -256,6 +256,7 @@ fn verified_from_intent(intent: &JsonValue) -> Result<VerifiedPayment, String> {
         reference: id.to_string(),
         amount_cents: amount.unwrap_or(0) as i32,
         status: status.to_string(),
+        is_test: intent["livemode"].as_bool() == Some(false),
     })
 }
 
@@ -280,6 +281,7 @@ fn verified_from_session(session: &JsonValue) -> Result<VerifiedPayment, String>
         reference: pi.to_string(),
         amount_cents: session["amount_total"].as_i64().unwrap_or(0) as i32,
         status: status.to_string(),
+        is_test: session["livemode"].as_bool() == Some(false),
     })
 }
 
@@ -429,6 +431,7 @@ async fn paypal_capture(State(pool): State<PgPool>, Json(body): Json<PaypalCaptu
         reference: capture_id,
         amount_cents,
         status: status.to_string(),
+        is_test: cfg.is_sandbox,
     };
     let outcome = finalize_or_refund(&pool, &body.order_id, payment).await?;
     Ok(Json(outcome.response))

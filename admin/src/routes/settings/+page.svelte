@@ -42,6 +42,7 @@
   import AdminUsersManager from '$lib/components/AdminUsersManager.svelte';
   import PaymentsManager from '$lib/components/PaymentsManager.svelte';
   import SystemManager from '$lib/components/SystemManager.svelte';
+  import CloudBackupManager from '$lib/components/CloudBackupManager.svelte';
 
   export let data;
   let settings = data.settings || {};
@@ -69,6 +70,7 @@
   let supportEmail = settings.support_email || '';
   let phone = settings.phone || '';
   let vatId = settings.vat_id || '';
+  let taxNumber = settings.tax_number || '';
   let taxNotice = settings.tax_notice || 'Value added tax is not collected, as small businesses according to §19 (1) UStG.';
   let commercialRegister = settings.commercial_register || '';
   let odrUrl = settings.odr_url || 'https://ec.europa.eu/odr';
@@ -148,6 +150,7 @@
         support_email: supportEmail,
         phone,
         vat_id: vatId,
+        tax_number: taxNumber,
         tax_notice: taxNotice,
         tax_mode: taxMode,
         commercial_register: commercialRegister,
@@ -880,6 +883,17 @@
               </div>
 
               <div>
+                <label class="block text-slate-300 font-semibold mb-1">Tax number (Steuernummer)</label>
+                <input
+                  type="text"
+                  bind:value={taxNumber}
+                  placeholder="e.g. 12/345/67890"
+                  class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-orange-500"
+                />
+                <p class="text-[10px] text-slate-500 mt-1">Shown on invoices. Required on invoices without a VAT ID (e.g. small businesses) and for e-invoices.</p>
+              </div>
+
+              <div>
                 <label class="block text-slate-300 font-semibold mb-1">Currency Code</label>
                 <input
                   type="text"
@@ -1513,6 +1527,8 @@
   <!-- TAB 6: Export & Backups -->
   {:else if activeTab === 'export'}
     <div class="space-y-6">
+      <CloudBackupManager />
+
       <div class="p-4 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-start gap-3">
         <Info size={18} class="text-indigo-400 flex-shrink-0 mt-0.5" />
         <div class="text-xs text-slate-300 space-y-1">

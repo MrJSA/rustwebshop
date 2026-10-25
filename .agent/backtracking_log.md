@@ -509,3 +509,26 @@ This log tracks architectural decisions, state checkpoints, implementation miles
 
 
 
+
+### [2026-10-25] Automatic off-site backups to a private GitHub repository
+- **Decision**: Full disaster-recovery backups (complete `pg_dump` + `uploads/`) as one ZIP, uploaded as a **release asset** of a private GitHub repository chosen by the owner. One release per backup (tag `backup-YYYYMMDD-HHMMSS`); the oldest beyond `keep_count` are deleted (release + tag). Release assets don't grow the git history and allow up to 2 GB per file.
+- **Why GitHub only (no Google Drive)**: Drive needs an own Google Cloud project, OAuth consent screen and client — far from "simple to set up" for a shop owner; service accounts have no Drive quota for personal accounts. GitHub needs only a private repo and a fine-grained token (*Contents: Read and write* on that one repo).
+- **Implementation**: `services/backup.rs` (scheduler every 5 min, daily / weekly Sunday / monthly 1st at `backup_hour_utc`, hourly retries, one failure email per streak to superadmins), table `backup_settings` (migration 0022, token write-only), superadmin-only endpoints `/backup/settings|test|run|disconnect`, admin `CloudBackupManager.svelte` in *Settings → Export & Backups*, `pg_dump` 16 from the PGDG repo in the backend image, email type `backup_failed`. Public repositories are refused (customer data). Guide: `BACKUP.md`.
+- **Status**: Completed. `cargo test` (schedule, repo-name parsing, archive contents) and admin build pass; GitHub error mapping checked against the live API.
+
+### [2026-10-25] Test-mode orders excluded from analytics
+- **Decision**: `orders.is_test` (migration 0023) set from the provider's own answer — Stripe PaymentIntent/Checkout Session `livemode`, PayPal sandbox flag — via `VerifiedPayment.is_test`. All dashboard stats, the 30-day sales chart and the purchase analysis (summary, daily points, top categories/products) filter `is_test = FALSE`. Orders list/detail and dashboard show a *Test* badge.
+- **Also**: test orders/customers of the development database deleted and `order_number_seq` restarted at 10000 (on request).
+- **Status**: Completed.
+
+### [2026-10-25] Email redesign, invoice PDF attachments and EN 16931 e-invoices
+- **Issue**: Logo in emails was the original 4028 px PNG linked remotely (Outlook ignores max-height → huge; blocked remote images → missing; localhost URLs never load). Invoices existed only as HTML with a single shop-wide VAT rate and no VAT on shipping.
+- **Decision**: Inline CID logo (resized ×2 for retina, flattened onto white), light email layout with order summary and plain-text part. One `Invoice` model → PDF (krilla) and CII XML; optional ZUGFeRD/Factur-X (PDF/A-3b, EN 16931). Shipping is taxed with the main VAT rate as part of the charged price; any cent difference to the paid amount is stated as rounding amount (BT-114). Seller tax number (`tax_number`) added (BT-32 / BR-CO-26 seller ID for small businesses without VAT ID).
+- **Verification**: Mustang CLI 2.26.0 (veraPDF + Factur-X EN16931 schematron): PDF/A-3b valid and XML valid (0 failed rules) for small-business, gross, net, mixed-rate+discount and rounding cases, plus a real admin download. Emails checked in Mailpit (multipart/mixed → alternative → related with inline PNG + PDF attachment) and rendered with headless Chrome.
+- **Also**: admin `X-Frame-Options` DENY → SAMEORIGIN (the invoice/packing-slip preview iframe was blocked); backend builder pinned to `rust:1-bookworm` (glibc mismatch with the bookworm runtime).
+- **Status**: Completed.
+
+### [2026-10-25] VAT on shipping in checkout
+- **Issue**: Checkout computed VAT only on products; with net pricing shipping was charged without VAT, with gross pricing its contained VAT was missing from `tax_cents`.
+- **Decision**: `checkout::compute_tax` taxes shipping with the main delivery's rate (shared `invoice::main_rate_index`); invoices treat shipping as net with net pricing. Test proves checkout and invoice agree in all three tax modes.
+- **Status**: Completed.

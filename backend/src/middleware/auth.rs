@@ -178,6 +178,7 @@ mod tests {
         assert_eq!(required_access(&Method::GET, "/users"), Access::AnyOf(&["settings"]));
         assert_eq!(required_access(&Method::PUT, "/settings/payments/stripe"), Access::AnyOf(&["settings"]));
         assert_eq!(required_access(&Method::GET, "/export/store-data"), Access::AnyOf(&["settings"]));
+        assert_eq!(required_access(&Method::PUT, "/backup/settings"), Access::AnyOf(&["settings"]));
         assert_eq!(required_access(&Method::GET, "/settings/system"), Access::Always);
         assert_eq!(required_access(&Method::PUT, "/settings/system"), Access::Handler);
         assert_eq!(required_access(&Method::GET, "/orders"), Access::AnyOf(&["orders"]));

@@ -1,6 +1,6 @@
-use crate::models::StoreSettings;
+use crate::models::{Order, OrderItem, StoreSettings};
 use lettre::message::header::ContentType;
-use lettre::message::{Mailbox, SinglePart};
+use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
 use lettre::Address;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
@@ -8,11 +8,37 @@ use std::collections::{BTreeSet, HashSet};
 use tracing::{error, info};
 use uuid::Uuid;
 
+/// A file sent along with an email (e.g. the invoice PDF).
+pub struct EmailAttachment {
+    pub filename: String,
+    pub content_type: String,
+    pub data: Vec<u8>,
+}
+
+/// Content-ID of the shop logo embedded in every email (shown even when remote images are blocked).
+const LOGO_CID: &str = "shop-logo";
+const LOGO_WIDTH_TOKEN: &str = "__LOGO_WIDTH__";
+const LOGO_HEIGHT_TOKEN: &str = "__LOGO_HEIGHT__";
+/// Logo box in the email header (CSS pixels); the embedded image has twice the resolution for sharp displays
+const LOGO_MAX_H: u32 = 64;
+const LOGO_MAX_W: u32 = 200;
+
 pub async fn send_email_raw(
     settings: &StoreSettings,
     to_email: &str,
     subject: &str,
     html_body: &str,
+) -> Result<(), String> {
+    send_email(settings, to_email, subject, html_body, Vec::new()).await
+}
+
+/// Sends an HTML email with a plain-text alternative, the embedded shop logo and optional attachments.
+pub async fn send_email(
+    settings: &StoreSettings,
+    to_email: &str,
+    subject: &str,
+    html_body: &str,
+    attachments: Vec<EmailAttachment>,
 ) -> Result<(), String> {
     let host = settings.smtp_host.trim();
     if !settings.smtp_enabled || host.is_empty() {
@@ -36,11 +62,50 @@ pub async fn send_email_raw(
         .parse()
         .map_err(|_| format!("The recipient '{}' is not a valid email address.", to_email))?;
 
+    // The logo travels inside the email; if it cannot be prepared (SVG, external URL) it is linked instead
+    let mut html = html_body.to_string();
+    let mut inline_logo = None;
+    if html.contains(&format!("cid:{}", LOGO_CID)) {
+        match crate::services::branding::logo_png_async(settings, LOGO_MAX_H * 4).await {
+            Some(logo) => {
+                let scale = (LOGO_MAX_H as f32 / logo.height as f32).min(LOGO_MAX_W as f32 / logo.width as f32);
+                let (w, h) = ((logo.width as f32 * scale).round() as u32, (logo.height as f32 * scale).round() as u32);
+                html = html.replace(LOGO_WIDTH_TOKEN, &w.to_string()).replace(LOGO_HEIGHT_TOKEN, &h.to_string());
+                inline_logo = Some(logo);
+            }
+            None => {
+                html = html
+                    .replace(&format!("cid:{}", LOGO_CID), &html_escape(&absolute_logo_url(settings)))
+                    .replace(&format!(" width=\"{}\"", LOGO_WIDTH_TOKEN), "")
+                    .replace(LOGO_HEIGHT_TOKEN, &LOGO_MAX_H.to_string());
+            }
+        }
+    }
+
+    let html_part = SinglePart::builder().header(ContentType::TEXT_HTML).body(html.clone());
+    let body = match inline_logo {
+        Some(logo) => MultiPart::related().singlepart(html_part).singlepart(
+            Attachment::new_inline(LOGO_CID.to_string()).body(logo.png.clone(), ContentType::parse("image/png").expect("static mime")),
+        ),
+        None => MultiPart::related().singlepart(html_part),
+    };
+    let alternative = MultiPart::alternative().singlepart(SinglePart::plain(html_to_text(&html))).multipart(body);
+    let content = if attachments.is_empty() {
+        alternative
+    } else {
+        let mut mixed = MultiPart::mixed().multipart(alternative);
+        for a in attachments {
+            let ct = ContentType::parse(&a.content_type).unwrap_or(ContentType::TEXT_PLAIN);
+            mixed = mixed.singlepart(Attachment::new(a.filename).body(a.data, ct));
+        }
+        mixed
+    };
+
     let email = Message::builder()
         .from(from)
         .to(to)
         .subject(subject)
-        .singlepart(SinglePart::builder().header(ContentType::TEXT_HTML).body(html_body.to_string()))
+        .multipart(content)
         .map_err(|e| format!("Failed to build email message: {}", e))?;
 
     let port = u16::try_from(settings.smtp_port).unwrap_or(587);
@@ -76,7 +141,93 @@ pub async fn send_email_raw(
     Ok(())
 }
 
-/// Renders a responsive, professional HTML email wrapper with store logo/header, card layout, and compliant footer.
+fn absolute_logo_url(settings: &StoreSettings) -> String {
+    let logo_url = settings.logo_url.trim();
+    if logo_url.starts_with("http://") || logo_url.starts_with("https://") {
+        logo_url.to_string()
+    } else {
+        format!("{}/{}", shop_public_url(), logo_url.trim_start_matches('/'))
+    }
+}
+
+/// Plain-text version of an email for clients that do not show HTML (and for spam filters).
+fn html_to_text(html: &str) -> String {
+    let body = html.split_once("<body").and_then(|(_, b)| b.split_once('>')).map(|(_, b)| b).unwrap_or(html);
+    // Hidden preheader text is not part of the readable message
+    let body = match (body.find("<!--preheader-->"), body.find("<!--/preheader-->")) {
+        (Some(a), Some(b)) if b > a => format!("{}{}", &body[..a], &body[b..]),
+        _ => body.to_string(),
+    };
+    let mut out = String::new();
+    let mut in_tag = false;
+    let mut tag = String::new();
+    let mut href: Option<(String, usize)> = None;
+    for ch in body.chars() {
+        if in_tag {
+            if ch == '>' {
+                in_tag = false;
+                let t = tag.trim().to_lowercase();
+                let name = t.trim_start_matches('/').split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("");
+                if t.starts_with("a ") {
+                    href = tag.split("href=\"").nth(1).and_then(|r| r.split('"').next()).map(|h| (h.to_string(), out.len()));
+                } else if t == "/a" {
+                    // Links without text (e.g. around the logo) are left out
+                    if let Some((h, start)) = href.take().filter(|(h, start)| h.starts_with("http") && !out[*start..].trim().is_empty()) {
+                        if !out[start..].contains(&h) {
+                            out.push_str(&format!(" ({})", h));
+                        }
+                    }
+                }
+                match name {
+                    "br" | "p" | "div" | "tr" | "h1" | "h2" | "h3" | "table" | "li" => out.push('\n'),
+                    "td" if !t.starts_with('/') => out.push(' '),
+                    _ => {}
+                }
+                tag.clear();
+            } else {
+                tag.push(ch);
+            }
+        } else if ch == '<' {
+            in_tag = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&bull;", "·")
+        .replace("&times;", "×")
+        .replace("&#8199;", "")
+        .replace("&#847;", "")
+        .replace("&rarr;", "→")
+        .replace("&copy;", "©");
+    let mut lines: Vec<String> = Vec::new();
+    for line in decoded.lines() {
+        let l = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if l.is_empty() && lines.last().is_none_or(|p| p.is_empty()) {
+            continue;
+        }
+        lines.push(l);
+    }
+    lines.join("\n").trim().to_string()
+}
+
+// ------------------------------------------------------------------ layout & building blocks
+
+const FONT: &str = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+const C_TEXT: &str = "#374151";
+const C_HEAD: &str = "#111827";
+const C_MUTED: &str = "#6b7280";
+const C_LINE: &str = "#e5e7eb";
+const C_SOFT: &str = "#f9fafb";
+const C_ACCENT: &str = "#ea580c";
+
+/// Branded, responsive email: logo header, coloured accent, content card and the legal footer.
 pub fn render_email_layout(
     settings: &StoreSettings,
     preheader: &str,
@@ -88,136 +239,96 @@ pub fn render_email_layout(
     let pub_url = shop_public_url();
     let year = chrono::Utc::now().format("%Y");
 
-    // Resolve full logo URL if provided
-    let logo_url = settings.logo_url.trim();
-    let logo_img_html = if !logo_url.is_empty() {
-        let full_logo_url = if logo_url.starts_with("http://") || logo_url.starts_with("https://") {
-            logo_url.to_string()
-        } else {
-            format!("{}/{}", pub_url, logo_url.trim_start_matches('/'))
-        };
+    let brand = if !settings.logo_url.trim().is_empty() {
         format!(
-            r#"<img src="{}" alt="{}" style="max-height: 44px; max-width: 180px; height: auto; border: 0; outline: none; text-decoration: none; display: block;" />"#,
-            html_escape(&full_logo_url),
-            store_name
+            r#"<img src="cid:{cid}" width="{w}" height="{h}" alt="{name}" style="display: block; border: 0; outline: none; text-decoration: none; height: {h}px; width: auto; max-width: {mw}px;" />"#,
+            cid = LOGO_CID,
+            w = LOGO_WIDTH_TOKEN,
+            h = LOGO_HEIGHT_TOKEN,
+            name = store_name,
+            mw = LOGO_MAX_W
         )
     } else {
-        String::new()
+        format!(r#"<span style="font-size: 20px; font-weight: 800; color: {}; letter-spacing: -0.3px;">{}</span>"#, C_HEAD, store_name)
     };
 
-    let header_brand_html = if !logo_img_html.is_empty() {
-        format!(
-            r#"<table role="presentation" cellpadding="0" cellspacing="0" border="0">
-              <tr>
-                <td style="vertical-align: middle; padding-right: 14px;">{}</td>
-                <td style="vertical-align: middle;">
-                  <span style="font-size: 20px; font-weight: 800; color: #ffffff; letter-spacing: -0.3px; text-decoration: none; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">{}</span>
-                </td>
-              </tr>
-            </table>"#,
-            logo_img_html, store_name
-        )
-    } else {
-        format!(
-            r#"<table role="presentation" cellpadding="0" cellspacing="0" border="0">
-              <tr>
-                <td style="background: linear-gradient(135deg, #ea580c, #f97316); width: 36px; height: 36px; border-radius: 10px; text-align: center; vertical-align: middle; font-size: 18px; color: #ffffff;">🦀</td>
-                <td style="padding-left: 12px; vertical-align: middle;">
-                  <span style="font-size: 20px; font-weight: 800; color: #ffffff; letter-spacing: -0.3px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">{}</span>
-                </td>
-              </tr>
-            </table>"#,
-            store_name
-        )
-    };
-
-    // Legal / contact details for footer
-    let mut footer_details = Vec::new();
+    // Legal / contact details for the footer
+    let mut footer_lines = Vec::new();
+    let legal = if settings.legal_name.trim().is_empty() { settings.store_name.trim() } else { settings.legal_name.trim() };
+    footer_lines.push(format!("<strong style=\"color: {};\">{}</strong>", C_TEXT, html_escape(legal)));
     if !settings.company_address.trim().is_empty() {
-        footer_details.push(html_escape(settings.company_address.trim()));
+        footer_lines.push(html_escape(settings.company_address.trim()));
     }
-    if !settings.support_email.trim().is_empty() {
-        footer_details.push(format!("Support: <a href=\"mailto:{}\" style=\"color: #94a3b8; text-decoration: underline;\">{}</a>", html_escape(settings.support_email.trim()), html_escape(settings.support_email.trim())));
-    } else if !settings.smtp_from_email.trim().is_empty() {
-        footer_details.push(format!("Contact: <a href=\"mailto:{}\" style=\"color: #94a3b8; text-decoration: underline;\">{}</a>", html_escape(settings.smtp_from_email.trim()), html_escape(settings.smtp_from_email.trim())));
+    let mut contact = Vec::new();
+    let mail = if settings.support_email.trim().is_empty() { settings.smtp_from_email.trim() } else { settings.support_email.trim() };
+    if !mail.is_empty() {
+        contact.push(format!(r#"<a href="mailto:{0}" style="color: {1}; text-decoration: underline;">{0}</a>"#, html_escape(mail), C_MUTED));
     }
     if !settings.phone.trim().is_empty() {
-        footer_details.push(format!("Tel: {}", html_escape(settings.phone.trim())));
+        contact.push(html_escape(settings.phone.trim()));
     }
+    if !contact.is_empty() {
+        footer_lines.push(contact.join(" &bull; "));
+    }
+    let mut ids = Vec::new();
     if !settings.vat_id.trim().is_empty() {
-        footer_details.push(format!("VAT ID: {}", html_escape(settings.vat_id.trim())));
+        ids.push(format!("VAT ID {}", html_escape(settings.vat_id.trim())));
     }
-
-    let footer_details_html = if !footer_details.is_empty() {
-        format!(r#"<p style="margin: 8px 0 0; color: #64748b; font-size: 11px; line-height: 1.6;">{}</p>"#, footer_details.join(" &bull; "))
-    } else {
-        String::new()
-    };
-
-    let tax_notice_html = if !settings.tax_notice.trim().is_empty() {
-        format!(r#"<p style="margin: 8px 0 0; color: #64748b; font-size: 10px; line-height: 1.5; font-style: italic;">{}</p>"#, html_escape(settings.tax_notice.trim()))
+    if !settings.tax_number.trim().is_empty() {
+        ids.push(format!("Tax no. {}", html_escape(settings.tax_number.trim())));
+    }
+    if !settings.commercial_register.trim().is_empty() {
+        ids.push(html_escape(settings.commercial_register.trim()));
+    }
+    if !ids.is_empty() {
+        footer_lines.push(ids.join(" &bull; "));
+    }
+    let tax_notice = if settings.tax_mode == "kleingewerbe" && !settings.tax_notice.trim().is_empty() {
+        format!(r#"<p style="margin: 10px 0 0; font-size: 11px; line-height: 1.5; color: {};">{}</p>"#, C_MUTED, html_escape(settings.tax_notice.trim()))
     } else {
         String::new()
     };
 
     format!(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <title>{}</title>
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
+  <title>{title}</title>
 </head>
-<body style="margin: 0; padding: 0; background-color: #0b0f19; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; color: #f8fafc;">
-  <div style="display: none; font-size: 1px; color: #0b0f19; line-height: 1px; max-height: 0px; max-width: 0px; opacity: 0; overflow: hidden;">
-    {}
-  </div>
-
-  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #0b0f19; table-layout: fixed;">
+<body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: {font}; -webkit-font-smoothing: antialiased; color: {text};">
+  <!--preheader--><div style="display: none; font-size: 1px; line-height: 1px; max-height: 0; max-width: 0; opacity: 0; overflow: hidden; mso-hide: all;">{preheader}&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;</div><!--/preheader-->
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #f3f4f6;">
     <tr>
-      <td align="center" style="padding: 40px 16px;">
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width: 580px; background-color: #151e2e; border: 1px solid #1e293b; border-radius: 18px; overflow: hidden; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);">
+      <td align="center" style="padding: 32px 12px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width: 600px;">
           <tr>
-            <td style="padding: 26px 32px; background: linear-gradient(180deg, #182338 0%, #151e2e 100%); border-bottom: 1px solid #1e293b;">
+            <td style="padding: 0 4px 18px 4px;">
               <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
                 <tr>
-                  <td align="left">
-                    <a href="{}" target="_blank" style="text-decoration: none; display: inline-block;">
-                      {}
-                    </a>
-                  </td>
-                  <td align="right" style="vertical-align: middle;">
-                    <a href="{}" target="_blank" style="color: #ea580c; font-size: 12px; font-weight: 600; text-decoration: none;">Visit Store &rarr;</a>
-                  </td>
+                  <td align="left" style="vertical-align: middle;"><a href="{url}" target="_blank" style="text-decoration: none;">{brand}</a></td>
+                  <td align="right" style="vertical-align: middle; font-size: 13px;"><a href="{url}" target="_blank" style="color: {accent}; font-weight: 600; text-decoration: none;">Visit shop &rarr;</a></td>
                 </tr>
               </table>
             </td>
           </tr>
-
           <tr>
-            <td style="padding: 36px 32px;">
-              <h2 style="margin: 0 0 16px 0; color: {}; font-size: 22px; font-weight: 700; letter-spacing: -0.4px; line-height: 1.3;">
-                {}
-              </h2>
-              <div style="color: #cbd5e1; font-size: 14px; line-height: 1.65;">
-                {}
+            <td style="background-color: #ffffff; border: 1px solid {line}; border-top: 4px solid {color}; border-radius: 12px; padding: 36px 36px 32px 36px;">
+              <h1 style="margin: 0 0 18px 0; font-size: 22px; line-height: 1.3; font-weight: 700; color: {head}; letter-spacing: -0.3px;">{title}</h1>
+              <div style="font-size: 15px; line-height: 1.65; color: {text};">
+                {content}
               </div>
             </td>
           </tr>
-
           <tr>
-            <td style="padding: 28px 32px; background-color: #0e1524; border-top: 1px solid #1e293b; text-align: center;">
-              <p style="margin: 0; font-size: 12px; color: #94a3b8; font-weight: 600;">
-                {}
-              </p>
-              {}
-              {}
-              <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #182338;">
-                <p style="margin: 0; font-size: 11px; color: #475569;">
-                  &copy; {} {}. All rights reserved. &bull; <a href="{}" target="_blank" style="color: #ea580c; text-decoration: none;">Storefront</a>
-                </p>
-              </div>
+            <td style="padding: 26px 16px 8px 16px; text-align: center; font-size: 12px; line-height: 1.7; color: {muted};">
+              {footer}
+              {tax_notice}
+              <p style="margin: 14px 0 0; font-size: 11px; color: #9ca3af;">&copy; {year} {store} &bull; <a href="{url}" target="_blank" style="color: #9ca3af; text-decoration: underline;">{url_label}</a></p>
             </td>
           </tr>
         </table>
@@ -226,49 +337,198 @@ pub fn render_email_layout(
   </table>
 </body>
 </html>"#,
-        heading_title,
-        html_escape(preheader),
-        pub_url,
-        header_brand_html,
-        pub_url,
-        heading_color,
-        heading_title,
-        content_body_html,
-        store_name,
-        footer_details_html,
-        tax_notice_html,
-        year,
-        store_name,
-        pub_url
+        title = heading_title,
+        font = FONT,
+        text = C_TEXT,
+        preheader = html_escape(preheader),
+        url = pub_url,
+        url_label = html_escape(pub_url.trim_start_matches("https://").trim_start_matches("http://")),
+        brand = brand,
+        accent = C_ACCENT,
+        line = C_LINE,
+        color = heading_color,
+        head = C_HEAD,
+        content = content_body_html,
+        muted = C_MUTED,
+        footer = footer_lines.join("<br/>"),
+        tax_notice = tax_notice,
+        year = year,
+        store = store_name,
     )
 }
 
-pub async fn send_test_email(settings: &StoreSettings, to_email: &str) -> Result<(), String> {
-    let subject = format!("Test Email from {}", settings.store_name);
-    let content = format!(
-        r#"<p style="margin: 0 0 20px 0;">
-      This is an official test notification confirming that outgoing email delivery for <strong>{}</strong> is properly connected and functioning.
-    </p>
-    <div style="padding: 16px 20px; background-color: #0b0f19; border: 1px solid #1e293b; border-radius: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; color: #38bdf8; line-height: 1.8;">
-      <div><span style="color: #64748b;">SMTP Host:</span> {}:{}</div>
-      <div><span style="color: #64748b;">Encryption:</span> {}</div>
-      <div><span style="color: #64748b;">Sender From:</span> {} &lt;{}&gt;</div>
-    </div>"#,
-        html_escape(&settings.store_name),
-        html_escape(&settings.smtp_host),
-        settings.smtp_port,
-        html_escape(&settings.smtp_encryption),
-        html_escape(&settings.smtp_from_name),
-        html_escape(&settings.smtp_from_email)
-    );
-    let html = render_email_layout(
-        settings,
-        "SMTP test notification confirming your setup is functioning.",
-        "SMTP Test Successful!",
-        "#f97316",
-        &content,
-    );
+fn paragraph(html: &str) -> String {
+    format!(r#"<p style="margin: 0 0 16px 0;">{}</p>"#, html)
+}
 
+fn small(html: &str) -> String {
+    format!(r#"<p style="margin: 16px 0 0 0; font-size: 13px; line-height: 1.6; color: {};">{}</p>"#, C_MUTED, html)
+}
+
+/// "Bulletproof" button that renders in Outlook as well.
+fn button(url: &str, label: &str, color: &str) -> String {
+    format!(
+        r#"<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 26px 0;">
+  <tr>
+    <td align="center" bgcolor="{color}" style="border-radius: 8px; background-color: {color};">
+      <a href="{url}" target="_blank" style="display: inline-block; padding: 13px 28px; font-size: 15px; font-weight: 700; color: #ffffff; text-decoration: none; border-radius: 8px;">{label}</a>
+    </td>
+  </tr>
+</table>"#,
+        color = color,
+        url = html_escape(url),
+        label = label
+    )
+}
+
+fn link_fallback(url: &str) -> String {
+    small(&format!(
+        r#"If the button does not work, copy this link into your browser:<br/><a href="{0}" style="color: {1}; word-break: break-all;">{0}</a>"#,
+        html_escape(url),
+        C_ACCENT
+    ))
+}
+
+/// Light grey box with label/value rows.
+fn details_box(rows: &[(&str, String)]) -> String {
+    let body = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (label, value))| {
+            let border = if i > 0 { format!("border-top: 1px solid {};", C_LINE) } else { String::new() };
+            format!(
+                r#"<tr><td style="padding: 9px 0; {b} font-size: 14px; color: {m};">{l}</td><td align="right" style="padding: 9px 0; {b} font-size: 14px; color: {h}; font-weight: 600;">{v}</td></tr>"#,
+                b = border,
+                m = C_MUTED,
+                h = C_HEAD,
+                l = label,
+                v = value
+            )
+        })
+        .collect::<String>();
+    format!(
+        r#"<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin: 22px 0; background-color: {}; border: 1px solid {}; border-radius: 10px;"><tr><td style="padding: 8px 20px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">{}</table></td></tr></table>"#,
+        C_SOFT, C_LINE, body
+    )
+}
+
+fn money(cents: i64, symbol: &str) -> String {
+    crate::services::invoice_pdf::money(cents, symbol)
+}
+
+/// What an order email shows: items and totals exactly as on the invoice.
+pub struct OrderSummary {
+    pub invoice: crate::services::invoice::Invoice,
+}
+
+impl OrderSummary {
+    pub fn new(order: &Order, items: &[OrderItem], settings: &StoreSettings) -> Self {
+        OrderSummary { invoice: crate::services::invoice::Invoice::build(order, items, settings) }
+    }
+
+    fn html(&self) -> String {
+        let inv = &self.invoice;
+        let sym = inv.currency_symbol.as_str();
+        let mut rows = String::new();
+        for line in &inv.lines {
+            let mut sub = Vec::new();
+            if let Some(v) = &line.variant {
+                sub.push(html_escape(v));
+            }
+            if line.is_digital {
+                sub.push("Digital download".to_string());
+            }
+            let sub_html = if sub.is_empty() {
+                String::new()
+            } else {
+                format!(r#"<br/><span style="font-size: 12px; color: {};">{}</span>"#, C_MUTED, sub.join(" &bull; "))
+            };
+            rows.push_str(&format!(
+                r#"<tr>
+  <td style="padding: 12px 0; border-bottom: 1px solid {line}; font-size: 14px; color: {head};"><strong>{title}</strong>{sub}</td>
+  <td align="center" style="padding: 12px 8px; border-bottom: 1px solid {line}; font-size: 14px; color: {muted}; white-space: nowrap;">&times; {qty}</td>
+  <td align="right" style="padding: 12px 0; border-bottom: 1px solid {line}; font-size: 14px; color: {head}; white-space: nowrap;">{price}</td>
+</tr>"#,
+                line = C_LINE,
+                head = C_HEAD,
+                muted = C_MUTED,
+                title = html_escape(&line.name),
+                sub = sub_html,
+                qty = line.quantity,
+                price = money(line.line_display_cents, sym)
+            ));
+        }
+        let total_row = |label: &str, value: String, strong: bool| {
+            let (size, weight, color) = if strong { ("16px", "800", C_HEAD) } else { ("14px", "400", C_MUTED) };
+            format!(
+                r#"<tr><td colspan="2" style="padding: 5px 0; font-size: {s}; font-weight: {w}; color: {c};">{l}</td><td align="right" style="padding: 5px 0; font-size: {s}; font-weight: {w}; color: {c}; white-space: nowrap;">{v}</td></tr>"#,
+                s = size,
+                w = weight,
+                c = color,
+                l = label,
+                v = value
+            )
+        };
+        let items_display: i64 = inv.lines.iter().map(|l| l.line_display_cents).sum();
+        let mut totals = String::new();
+        totals.push_str(&total_row(if inv.shows_gross_prices() { "Subtotal" } else { "Subtotal (net)" }, money(items_display, sym), false));
+        if inv.discount_display_cents > 0 {
+            let label = match &inv.discount_code {
+                Some(code) => format!("Discount ({})", html_escape(code)),
+                None => "Discount".to_string(),
+            };
+            totals.push_str(&total_row(&label, money(-inv.discount_display_cents, sym), false));
+        }
+        if inv.has_physical_items || inv.shipping_display_cents > 0 {
+            totals.push_str(&total_row("Shipping", money(inv.shipping_display_cents, sym), false));
+        }
+        if !inv.shows_gross_prices() {
+            for g in &inv.groups {
+                totals.push_str(&total_row(&format!("VAT {} %", g.vat.percent), money(g.tax_cents, sym), false));
+            }
+        }
+        totals.push_str(&format!(r#"<tr><td colspan="3" style="padding-top: 6px; border-top: 2px solid {};"></td></tr>"#, C_HEAD));
+        totals.push_str(&total_row("Total", money(inv.payable_cents, sym), true));
+        if inv.tax_mode == "included" && inv.tax_total_cents > 0 {
+            totals.push_str(&format!(
+                r#"<tr><td colspan="3" align="right" style="font-size: 12px; color: {};">incl. {} VAT</td></tr>"#,
+                C_MUTED,
+                money(inv.tax_total_cents, sym)
+            ));
+        }
+        format!(
+            r#"<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin: 24px 0 8px 0;">
+<tr><td colspan="3" style="padding-bottom: 8px; border-bottom: 2px solid {head}; font-size: 12px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; color: {muted};">Order {number}</td></tr>
+{rows}
+<tr><td colspan="3" style="padding-top: 10px;"></td></tr>
+{totals}
+</table>"#,
+            head = C_HEAD,
+            muted = C_MUTED,
+            number = html_escape(&inv.order_number),
+            rows = rows,
+            totals = totals
+        )
+    }
+}
+
+// ------------------------------------------------------------------ templates
+
+pub async fn send_test_email(settings: &StoreSettings, to_email: &str) -> Result<(), String> {
+    let subject = format!("Test email from {}", settings.store_name);
+    let content = format!(
+        "{}{}",
+        paragraph(&format!(
+            "This test confirms that <strong>{}</strong> can send emails. Your customers will receive order confirmations, invoices and shipping updates.",
+            html_escape(&settings.store_name)
+        )),
+        details_box(&[
+            ("Mail server", format!("{}:{}", html_escape(&settings.smtp_host), settings.smtp_port)),
+            ("Encryption", html_escape(&settings.smtp_encryption)),
+            ("Sender", format!("{} &lt;{}&gt;", html_escape(&settings.smtp_from_name), html_escape(&settings.smtp_from_email))),
+        ])
+    );
+    let html = render_email_layout(settings, "Your shop can send emails.", "Email delivery works", "#10b981", &content);
     send_email_raw(settings, to_email, &subject, &html).await
 }
 
@@ -280,113 +540,80 @@ pub async fn send_verification_email(
     origin: &str,
 ) -> Result<(), String> {
     let verify_url = format!("{}/account/verify?token={}", origin.trim_end_matches('/'), token);
-    let subject = format!("Verify your account - {}", settings.store_name);
+    let subject = format!("Please confirm your email address - {}", settings.store_name);
     let content = format!(
-        r#"<p style="margin: 0 0 20px 0;">
-      Thank you for registering with <strong>{}</strong>. Please click the button below to verify your email address and activate your customer account.
-    </p>
-    <div style="margin: 32px 0; text-align: center;">
-      <a href="{}" target="_blank" style="background: linear-gradient(135deg, #ea580c, #f97316); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 10px; font-weight: 700; font-size: 14px; display: inline-block; box-shadow: 0 4px 12px rgba(234, 88, 12, 0.35);">
-        Verify Email Address
-      </a>
-    </div>
-    <div style="padding: 14px 16px; background-color: #0b0f19; border: 1px solid #1e293b; border-radius: 10px; font-size: 12px; color: #64748b; line-height: 1.5;">
-      If the button above does not work, copy and paste this link into your browser:<br/>
-      <a href="{}" style="color: #38bdf8; word-break: break-all; text-decoration: underline;">{}</a>
-    </div>"#,
-        html_escape(&settings.store_name),
-        verify_url,
-        verify_url,
-        verify_url
+        "{}{}{}",
+        paragraph(&format!(
+            "Thank you for creating an account at <strong>{}</strong>. Please confirm your email address to activate it.",
+            html_escape(&settings.store_name)
+        )),
+        button(&verify_url, "Confirm email address", C_ACCENT),
+        link_fallback(&verify_url)
     );
-    let heading = format!("Welcome to {}, {}!", html_escape(&settings.store_name), html_escape(customer_name));
-    let html = render_email_layout(
-        settings,
-        "Please verify your email address to activate your customer account.",
-        &heading,
-        "#f97316",
-        &content,
-    );
-
+    let heading = format!("Welcome, {}!", html_escape(customer_name));
+    let html = render_email_layout(settings, "Confirm your email address to activate your account.", &heading, C_ACCENT, &content);
     send_email_raw(settings, to_email, &subject, &html).await
 }
 
-pub async fn send_order_created_email(
-    settings: &StoreSettings,
-    to_email: &str,
-    order_number: &str,
-    total_cents: i32,
-    currency: &str,
-) -> Result<(), String> {
-    let formatted_price = format!("{:.2} {}", total_cents as f64 / 100.0, currency);
-    let subject = format!("Order Confirmation: #{}", order_number);
+pub async fn send_order_created_email(settings: &StoreSettings, to_email: &str, summary: &OrderSummary) -> Result<(), String> {
+    let inv = &summary.invoice;
+    let subject = format!("Order confirmation {} - {}", inv.order_number, settings.store_name);
+    let next = if inv.paid {
+        "You will receive a payment confirmation with your invoice in a separate email."
+    } else {
+        "As soon as your payment has been confirmed, we will send you your invoice."
+    };
     let content = format!(
-        r#"<p style="margin: 0 0 20px 0;">
-      We have received your order <strong>#{}</strong> and our logistics team is preparing it for processing.
-    </p>
-    <div style="padding: 20px; background-color: #0b0f19; border: 1px solid #1e293b; border-radius: 12px; margin: 24px 0;">
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size: 13px;">
-        <tr>
-          <td style="color: #94a3b8; padding-bottom: 8px;">Order Number:</td>
-          <td align="right" style="color: #ffffff; font-weight: 700; font-family: ui-monospace, monospace; padding-bottom: 8px;">#{}</td>
-        </tr>
-        <tr>
-          <td style="color: #94a3b8; padding-top: 8px; border-top: 1px solid #1e293b;">Total Amount:</td>
-          <td align="right" style="color: #10b981; font-weight: 800; font-size: 16px; padding-top: 8px; border-top: 1px solid #1e293b;">{}</td>
-        </tr>
-      </table>
-    </div>
-    <p style="margin: 0; color: #94a3b8; font-size: 13px;">
-      You will receive another notification as soon as your payment is confirmed and when your parcel is dispatched with tracking information.
-    </p>"#,
-        order_number, order_number, formatted_price
+        "{}{}{}",
+        paragraph(&format!(
+            "Hello {}, thank you for your order! We have received it and will take care of it right away.",
+            html_escape(&inv.buyer.name)
+        )),
+        summary.html(),
+        small(next)
     );
-    let heading = format!("Thank you for your order! (#{})", order_number);
-    let html = render_email_layout(
-        settings,
-        &format!("Your order #{} has been received.", order_number),
-        &heading,
-        "#f97316",
-        &content,
-    );
-
+    let heading = "Thank you for your order";
+    let html = render_email_layout(settings, &format!("We have received your order {}.", inv.order_number), heading, C_ACCENT, &content);
     send_email_raw(settings, to_email, &subject, &html).await
 }
 
 pub async fn send_payment_received_email(
     settings: &StoreSettings,
     to_email: &str,
-    order_number: &str,
-    total_cents: i32,
-    currency: &str,
+    summary: &OrderSummary,
+    attachments: Vec<EmailAttachment>,
 ) -> Result<(), String> {
-    let formatted_price = format!("{:.2} {}", total_cents as f64 / 100.0, currency);
-    let subject = format!("Payment Received for Order #{}", order_number);
+    let inv = &summary.invoice;
+    let subject = format!("Payment received for order {} - {}", inv.order_number, settings.store_name);
+    let next = if inv.has_physical_items {
+        "We are now packing your order and will let you know as soon as it has been shipped."
+    } else {
+        "Your digital products are ready: you can download them right away in your customer account or via the link on your order page."
+    };
+    let invoice_note = match attachments.iter().any(|a| a.content_type == "application/pdf") {
+        true => small("Your invoice is attached to this email as a PDF. Please keep it for your records."),
+        false => String::new(),
+    };
     let content = format!(
-        r#"<p style="margin: 0 0 20px 0;">
-      Your payment of <strong style="color: #10b981;">{}</strong> for Order <strong>#{}</strong> has been successfully confirmed.
-    </p>
-    <div style="padding: 18px 20px; background-color: #0b0f19; border: 1px solid #1e293b; border-radius: 12px; margin: 24px 0;">
-      <div style="color: #cbd5e1; font-size: 13px;">
-        <span style="color: #10b981; font-weight: bold; margin-right: 6px;">✓ Payment Verified:</span>
-        Our fulfillment warehouse is now assembling and packaging your items.
-      </div>
-    </div>
-    <p style="margin: 0; color: #94a3b8; font-size: 13px;">
-      You will receive a shipping confirmation email with tracking details as soon as the package is handed over to the courier.
-    </p>"#,
-        formatted_price, order_number
+        "{}{}{}{}",
+        paragraph(&format!(
+            "Hello {}, we have received your payment of <strong>{}</strong>. {}",
+            html_escape(&inv.buyer.name),
+            money(inv.payable_cents, &inv.currency_symbol),
+            next
+        )),
+        summary.html(),
+        details_box(&[("Paid via", html_escape(&inv.payment_label)), ("Invoice number", html_escape(&inv.number))]),
+        invoice_note
     );
-    let heading = format!("Payment Confirmed for Order #{}", order_number);
     let html = render_email_layout(
         settings,
-        &format!("Payment confirmed for Order #{}.", order_number),
-        &heading,
+        &format!("Payment confirmed for order {} — your invoice is attached.", inv.order_number),
+        "Payment received",
         "#10b981",
         &content,
     );
-
-    send_email_raw(settings, to_email, &subject, &html).await
+    send_email(settings, to_email, &subject, &html, attachments).await
 }
 
 pub async fn send_order_shipped_email(
@@ -401,31 +628,14 @@ pub async fn send_order_shipped_email(
         format!("https://parcelsapp.com/en/tracking/{}", tracking_number)
     };
 
-    let subject = format!("Your Order #{} has shipped!", order_number);
+    let subject = format!("Your order {} has been shipped", order_number);
     let content = format!(
-        r#"<p style="margin: 0 0 20px 0;">
-      Great news! Order <strong>#{}</strong> has been dispatched from our warehouse and is on its way to you.
-    </p>
-    <div style="padding: 24px 20px; background-color: #0b0f19; border: 1px solid #1e293b; border-radius: 12px; text-align: center; margin: 28px 0;">
-      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600; display: block; margin-bottom: 6px;">Tracking Number</span>
-      <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 19px; font-weight: 800; color: #f8fafc; letter-spacing: 0.5px;">{}</span>
-      <div style="margin-top: 20px;">
-        <a href="{}" target="_blank" style="background: linear-gradient(135deg, #0284c7, #38bdf8); color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 10px; font-weight: 700; font-size: 13px; display: inline-block; box-shadow: 0 4px 12px rgba(2, 132, 199, 0.35);">
-          Track Shipment &rarr;
-        </a>
-      </div>
-    </div>"#,
-        order_number, tracking_number, tracking_url
+        "{}{}{}",
+        paragraph(&format!("Good news: your order <strong>{}</strong> is on its way to you.", html_escape(order_number))),
+        details_box(&[("Order", html_escape(order_number)), ("Tracking number", html_escape(tracking_number))]),
+        button(&tracking_url, "Track your parcel", "#0284c7")
     );
-    let heading = format!("Your package is on its way! (#{})", order_number);
-    let html = render_email_layout(
-        settings,
-        &format!("Order #{} has been dispatched.", order_number),
-        &heading,
-        "#38bdf8",
-        &content,
-    );
-
+    let html = render_email_layout(settings, &format!("Order {} has been shipped.", order_number), "Your order is on its way", "#0284c7", &content);
     send_email_raw(settings, to_email, &subject, &html).await
 }
 
@@ -437,30 +647,16 @@ pub async fn send_back_in_stock_email(
 ) -> Result<(), String> {
     let subject = format!("Back in stock: {}", product_title);
     let content = format!(
-        r#"<p style="margin: 0 0 20px 0;">
-      You requested to be notified when <strong>{}</strong> returned to stock at <strong>{}</strong>. It is now back in stock and available to order!
-    </p>
-    <div style="margin: 32px 0; text-align: center;">
-      <a href="{}" target="_blank" style="background: linear-gradient(135deg, #ea580c, #f97316); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 10px; font-weight: 700; font-size: 14px; display: inline-block; box-shadow: 0 4px 12px rgba(234, 88, 12, 0.35);">
-        View Product Now &rarr;
-      </a>
-    </div>
-    <p style="margin: 0; color: #64748b; font-size: 12px; text-align: center;">
-      Stock levels may be limited. Secure yours before it sells out again!
-    </p>"#,
-        html_escape(product_title),
-        html_escape(&settings.store_name),
-        product_url
+        "{}{}{}",
+        paragraph(&format!(
+            "You asked us to let you know: <strong>{}</strong> is available again at {}.",
+            html_escape(product_title),
+            html_escape(&settings.store_name)
+        )),
+        button(product_url, "View product", C_ACCENT),
+        small("Stock may be limited — order soon to secure yours.")
     );
-    let heading = "Good news! It's back in stock!".to_string();
-    let html = render_email_layout(
-        settings,
-        &format!("{} is back in stock at {}.", product_title, settings.store_name),
-        &heading,
-        "#10b981",
-        &content,
-    );
-
+    let html = render_email_layout(settings, &format!("{} is available again.", product_title), "It's back in stock", "#10b981", &content);
     send_email_raw(settings, to_email, &subject, &html).await
 }
 
@@ -472,35 +668,16 @@ pub async fn send_password_reset_email(
     let reset_url = format!("{}/account/reset-password?token={}", shop_public_url(), token);
     let subject = format!("Reset your password - {}", settings.store_name);
     let content = format!(
-        r#"<p style="margin: 0 0 20px 0;">
-      A password reset request was made for your customer account at <strong>{}</strong>. The security link below is valid for <strong>1 hour</strong>.
-    </p>
-    <div style="margin: 32px 0; text-align: center;">
-      <a href="{}" target="_blank" style="background: linear-gradient(135deg, #ea580c, #f97316); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 10px; font-weight: 700; font-size: 14px; display: inline-block; box-shadow: 0 4px 12px rgba(234, 88, 12, 0.35);">
-        Choose a New Password
-      </a>
-    </div>
-    <div style="padding: 14px 16px; background-color: #0b0f19; border: 1px solid #1e293b; border-radius: 10px; font-size: 12px; color: #64748b; line-height: 1.5; margin-bottom: 16px;">
-      If the button above does not work, copy and paste this link into your browser:<br/>
-      <a href="{}" style="color: #38bdf8; word-break: break-all; text-decoration: underline;">{}</a>
-    </div>
-    <p style="margin: 0; color: #64748b; font-size: 12px;">
-      If you did not request a password reset, you can safely ignore this email — your password remains unchanged.
-    </p>"#,
-        html_escape(&settings.store_name),
-        reset_url,
-        reset_url,
-        reset_url
+        "{}{}{}{}",
+        paragraph(&format!(
+            "Someone asked to reset the password of your account at <strong>{}</strong>. The link is valid for <strong>1 hour</strong>.",
+            html_escape(&settings.store_name)
+        )),
+        button(&reset_url, "Choose a new password", C_ACCENT),
+        link_fallback(&reset_url),
+        small("If you did not request this, simply ignore this email — your password stays unchanged.")
     );
-    let heading = format!("Password Reset for {}", html_escape(&settings.store_name));
-    let html = render_email_layout(
-        settings,
-        "Password reset link for your account.",
-        &heading,
-        "#f97316",
-        &content,
-    );
-
+    let html = render_email_layout(settings, "Reset the password of your account.", "Reset your password", C_ACCENT, &content);
     send_email_raw(settings, to_email, &subject, &html).await
 }
 
@@ -514,64 +691,126 @@ pub async fn send_part_low_stock_email(
     storage_location: Option<&str>,
 ) -> Result<(), String> {
     let loc_str = storage_location.filter(|s| !s.trim().is_empty()).unwrap_or("Not specified");
-    let subject = format!("⚠️ Low Stock Warning: {} ({}) - {}", part_name, part_sku, settings.store_name);
+    let subject = format!("Low stock: {} ({}) - {}", part_name, part_sku, settings.store_name);
     let admin_url = format!("{}/products?tab=stock", admin_public_url());
-
     let content = format!(
-        r#"<p style="margin: 0 0 16px 0; font-size: 15px; color: #e2e8f0;">
-      The inventory level for part <strong>{}</strong> has fallen to or below its configured low-stock threshold.
-    </p>
-    <div style="background-color: #0b0f19; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin: 20px 0;">
-      <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; width: 40%;">Part Name:</td>
-          <td style="padding: 8px 0; color: #f8fafc; font-weight: 600;">{}</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8;">SKU:</td>
-          <td style="padding: 8px 0; color: #f8fafc; font-weight: 600; font-family: monospace;">{}</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8;">Current In Stock:</td>
-          <td style="padding: 8px 0; color: #ef4444; font-weight: 700; font-size: 16px;">{} units</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8;">Threshold:</td>
-          <td style="padding: 8px 0; color: #cbd5e1;">{} units</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8;">Storage Location:</td>
-          <td style="padding: 8px 0; color: #cbd5e1;">{}</td>
-        </tr>
-      </table>
-    </div>
-    <div style="margin: 28px 0 16px 0; text-align: center;">
-      <a href="{}" target="_blank" style="background: linear-gradient(135deg, #d97706, #f59e0b); color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 8px; font-weight: 700; font-size: 14px; display: inline-block;">
-        Open Stock & Inventory
-      </a>
-    </div>
-    <p style="margin: 0; color: #64748b; font-size: 12px; text-align: center;">
-      You received this notification based on your store's inventory alert settings.
-    </p>"#,
-        html_escape(part_name),
-        html_escape(part_name),
-        html_escape(part_sku),
-        stock_quantity,
-        low_stock_threshold,
-        html_escape(loc_str),
-        admin_url
+        "{}{}{}{}",
+        paragraph(&format!("The stock of <strong>{}</strong> has reached its low-stock threshold.", html_escape(part_name))),
+        details_box(&[
+            ("Part", html_escape(part_name)),
+            ("SKU", html_escape(part_sku)),
+            ("In stock", format!(r#"<span style="color: #dc2626;">{} units</span>"#, stock_quantity)),
+            ("Threshold", format!("{} units", low_stock_threshold)),
+            ("Storage location", html_escape(loc_str)),
+        ]),
+        button(&admin_url, "Open stock overview", "#d97706"),
+        small("You receive this notification because of your shop's stock alert settings.")
     );
-
-    let heading = format!("Low Stock Alert: {}", html_escape(part_name));
     let html = render_email_layout(
         settings,
-        &format!("Warning: {} ({}) is running low ({} units left).", part_name, part_sku, stock_quantity),
-        &heading,
+        &format!("{} ({}) is running low: {} units left.", part_name, part_sku, stock_quantity),
+        "Stock is running low",
         "#f59e0b",
         &content,
     );
-
     send_email_raw(settings, to_email, &subject, &html).await
+}
+
+pub async fn send_backup_failed_email(
+    settings: &StoreSettings,
+    to_email: &str,
+    repository: &str,
+    error_message: &str,
+) -> Result<(), String> {
+    let subject = format!("Automatic backup failed - {}", settings.store_name);
+    let admin_url = format!("{}/settings?tab=export", admin_public_url());
+    let content = format!(
+        "{}{}{}{}",
+        paragraph(&format!(
+            "The automatic backup of your shop to the GitHub repository <strong>{}</strong> could not be created. It is retried every hour; you will only get another email after a backup has succeeded again.",
+            html_escape(repository)
+        )),
+        format!(
+            r#"<div style="margin: 22px 0; padding: 16px 20px; background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; font-size: 14px; line-height: 1.55; color: #991b1b;">{}</div>"#,
+            html_escape(error_message)
+        ),
+        button(&admin_url, "Open backup settings", "#dc2626"),
+        small("You receive this notification because you are a superadmin of this shop.")
+    );
+    let html = render_email_layout(settings, "The automatic backup of your shop failed.", "Automatic backup failed", "#ef4444", &content);
+    send_email_raw(settings, to_email, &subject, &html).await
+}
+
+// ------------------------------------------------------------------ invoices for emails
+
+/// The invoice PDF (a ZUGFeRD / Factur-X e-invoice when enabled) for the payment confirmation.
+pub async fn invoice_attachments(settings: &StoreSettings, order: &Order, items: &[OrderItem]) -> Vec<EmailAttachment> {
+    if !settings.email_invoice_pdf {
+        return Vec::new();
+    }
+    match render_invoice_pdf(settings, order, items).await {
+        Ok((name, pdf)) => vec![EmailAttachment { filename: name, content_type: "application/pdf".to_string(), data: pdf }],
+        Err(e) => {
+            error!("Invoice PDF for order {} could not be created: {}", order.order_number, e);
+            Vec::new()
+        }
+    }
+}
+
+/// Renders the invoice of an order; returns the file name and the PDF.
+pub async fn render_invoice_pdf(settings: &StoreSettings, order: &Order, items: &[OrderItem]) -> Result<(String, Vec<u8>), String> {
+    let invoice = crate::services::invoice::Invoice::build(order, items, settings);
+    let settings = settings.clone();
+    let shop_url = shop_public_url();
+    tokio::task::spawn_blocking(move || {
+        let logo = crate::services::branding::logo_png(&settings, 600);
+        let xml = settings.einvoice_enabled.then(|| invoice.to_cii_xml());
+        let pdf = crate::services::invoice_pdf::render(&invoice, logo.as_deref(), &shop_url, xml.as_deref())?;
+        Ok((format!("{}.pdf", invoice.file_stem()), pdf))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ------------------------------------------------------------------ previews (test emails)
+
+fn sample_order(settings: &StoreSettings) -> (Order, Vec<OrderItem>) {
+    let now = chrono::Utc::now();
+    let order: Order = serde_json::from_value(serde_json::json!({
+        "id": Uuid::nil(), "order_number": "ORD-10042", "customer_name": "Erika Musterfrau", "customer_email": "erika@example.com",
+        "shipping_address": {}, "billing_address": { "full_name": "Erika Musterfrau", "street_address": "Beispielweg 5",
+            "postal_code": "80331", "city": "München", "country_code": "DE" },
+        "shipping_rate_id": null, "shipping_cost_cents": 490, "subtotal_cents": 7470, "tax_cents": 0, "total_cents": 7960,
+        "payment_provider": "stripe", "payment_status": "paid", "order_status": "processing", "tracking_number": null, "notes": null,
+        "coupon_code": null, "discount_cents": 0, "payment_reference": null, "is_test": true, "tax_mode": settings.tax_mode,
+        "created_at": now, "updated_at": now
+    }))
+    .expect("sample order");
+    let item = |title: &str, variant: &str, sku: &str, unit: i32, qty: i32, digital: bool| OrderItem {
+        id: Uuid::nil(),
+        order_id: Uuid::nil(),
+        product_id: None,
+        variant_id: None,
+        product_title: title.to_string(),
+        variant_title: variant.to_string(),
+        sku: sku.to_string(),
+        unit_price_cents: unit,
+        quantity: qty,
+        total_price_cents: unit * qty,
+        is_digital: digital,
+        download_url: None,
+        tax_rate_percent: Some(settings.tax_rate_percent),
+    };
+    let items = vec![
+        item("Pro Mechanical Keyboard", "Brown switches", "KB-PRO-BRN", 5990, 1, false),
+        item("USB-C Cable 2 m", "Standard", "CBL-USBC-2M", 990, 1, false),
+        item("Setup Guide (PDF)", "Standard", "GUIDE-PDF", 490, 1, true),
+    ];
+    // Totals as the checkout would compute them for the current tax mode
+    let mut order = order;
+    let probe = crate::services::invoice::Invoice::build(&order, &items, settings);
+    order.total_cents = if settings.tax_mode == "excluded" { probe.grand_total_cents as i32 } else { 7470 + 490 };
+    (order, items)
 }
 
 /// Dispatches a test email according to the specified template type (or default test email) with sample data.
@@ -582,119 +821,77 @@ pub async fn send_test_email_by_type(
 ) -> Result<(), String> {
     match email_type.unwrap_or("test") {
         "verification" => {
-            send_verification_email(
-                settings,
-                to_email,
-                "Alex Hunter",
-                "sample-verification-token-12345",
-                &shop_public_url(),
-            )
-            .await
+            send_verification_email(settings, to_email, "Erika Musterfrau", "sample-verification-token-12345", &shop_public_url()).await
         }
         "order_created" => {
-            send_order_created_email(
-                settings,
-                to_email,
-                "10042",
-                4999,
-                &settings.currency,
-            )
-            .await
+            let (order, items) = sample_order(settings);
+            send_order_created_email(settings, to_email, &OrderSummary::new(&order, &items, settings)).await
         }
         "payment_received" => {
-            send_payment_received_email(
-                settings,
-                to_email,
-                "10042",
-                4999,
-                &settings.currency,
-            )
-            .await
+            let (order, items) = sample_order(settings);
+            let attachments = invoice_attachments(settings, &order, &items).await;
+            send_payment_received_email(settings, to_email, &OrderSummary::new(&order, &items, settings), attachments).await
         }
-        "order_shipped" => {
-            send_order_shipped_email(
-                settings,
-                to_email,
-                "10042",
-                "DHL9876543210DE",
-            )
-            .await
-        }
+        "order_shipped" => send_order_shipped_email(settings, to_email, "ORD-10042", "DHL9876543210DE").await,
         "back_in_stock" => {
             let sample_url = format!("{}/products", shop_public_url());
-            send_back_in_stock_email(
-                settings,
-                to_email,
-                "Pro Mechanical Keyboard RGB",
-                &sample_url,
-            )
-            .await
+            send_back_in_stock_email(settings, to_email, "Pro Mechanical Keyboard", &sample_url).await
         }
-        "password_reset" => {
-            send_password_reset_email(
-                settings,
-                to_email,
-                "sample-password-reset-token-67890",
-            )
-            .await
-        }
+        "password_reset" => send_password_reset_email(settings, to_email, "sample-password-reset-token-67890").await,
         "low_stock_alert" => {
-            send_part_low_stock_email(
+            send_part_low_stock_email(settings, to_email, "Cherry MX Red Switches", "PRT-SW-CHERRY-RED", 3, 10, Some("Warehouse A - Shelf 4B")).await
+        }
+        "backup_failed" => {
+            send_backup_failed_email(
                 settings,
                 to_email,
-                "Cherry MX Red Switches",
-                "PRT-SW-CHERRY-RED",
-                3,
-                10,
-                Some("Warehouse A - Shelf 4B"),
+                "my-account/shop-backups",
+                "GitHub rejected the access token — it is wrong, expired or was deleted. Create a new token and save it.",
             )
             .await
         }
-        "test" | _ => {
-            send_test_email(settings, to_email).await
-        }
+        "test" | _ => send_test_email(settings, to_email).await,
     }
 }
 
-pub async fn send_order_created_notification(pool: &sqlx::PgPool, order_number: &str) {
+// ------------------------------------------------------------------ order notifications
+
+async fn load_order(pool: &sqlx::PgPool, order_number: &str) -> Option<(StoreSettings, Order, Vec<OrderItem>)> {
     let settings = match sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1").fetch_one(pool).await {
         Ok(s) => s,
         Err(e) => {
             error!("Cannot load store settings for order email {}: {}", order_number, e);
-            return;
+            return None;
         }
     };
-
-    if let Ok(order_row) = sqlx::query("SELECT customer_email, total_cents FROM orders WHERE order_number = $1")
+    let order = sqlx::query_as::<_, Order>("SELECT * FROM orders WHERE order_number = $1")
         .bind(order_number)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
-    {
-        use sqlx::Row;
-        let email: String = order_row.get("customer_email");
-        let total: i32 = order_row.get("total_cents");
-        let _ = send_order_created_email(&settings, &email, order_number, total, &settings.currency).await;
+        .ok()
+        .flatten()?;
+    let items = sqlx::query_as::<_, OrderItem>("SELECT * FROM order_items WHERE order_id = $1")
+        .bind(order.id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    Some((settings, order, items))
+}
+
+pub async fn send_order_created_notification(pool: &sqlx::PgPool, order_number: &str) {
+    let Some((settings, order, items)) = load_order(pool, order_number).await else { return };
+    let summary = OrderSummary::new(&order, &items, &settings);
+    if let Err(e) = send_order_created_email(&settings, &order.customer_email, &summary).await {
+        error!("Order confirmation for {} not sent: {}", order_number, e);
     }
 }
 
 pub async fn send_payment_received_notification(pool: &sqlx::PgPool, order_number: &str) {
-    let settings = match sqlx::query_as::<_, StoreSettings>("SELECT * FROM store_settings WHERE id = 1").fetch_one(pool).await {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Cannot load store settings for order email {}: {}", order_number, e);
-            return;
-        }
-    };
-
-    if let Ok(order_row) = sqlx::query("SELECT customer_email, total_cents FROM orders WHERE order_number = $1")
-        .bind(order_number)
-        .fetch_one(pool)
-        .await
-    {
-        use sqlx::Row;
-        let email: String = order_row.get("customer_email");
-        let total: i32 = order_row.get("total_cents");
-        let _ = send_payment_received_email(&settings, &email, order_number, total, &settings.currency).await;
+    let Some((settings, order, items)) = load_order(pool, order_number).await else { return };
+    let summary = OrderSummary::new(&order, &items, &settings);
+    let attachments = invoice_attachments(&settings, &order, &items).await;
+    if let Err(e) = send_payment_received_email(&settings, &order.customer_email, &summary, attachments).await {
+        error!("Payment confirmation for {} not sent: {}", order_number, e);
     }
 }
 
@@ -842,4 +1039,34 @@ pub fn admin_public_url() -> String {
         .unwrap_or_else(|_| "http://localhost:4000".to_string())
         .trim_end_matches('/')
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::invoice::tests::sample_settings;
+
+    #[test]
+    fn layout_embeds_logo_and_has_readable_text_version() {
+        let mut settings = sample_settings("kleingewerbe");
+        settings.logo_url = "/uploads/logo.png".into();
+        let html = render_email_layout(&settings, "Hidden preheader", "Payment received", "#10b981", &button("https://shop.example/x", "Open", C_ACCENT));
+        assert!(html.contains("src=\"cid:shop-logo\""));
+        assert!(html.contains(LOGO_WIDTH_TOKEN) && html.contains(LOGO_HEIGHT_TOKEN));
+        let text = html_to_text(&html);
+        assert!(!text.contains("Hidden preheader"));
+        assert!(text.contains("Payment received"));
+        assert!(text.contains("Open (https://shop.example/x)"));
+        assert!(!text.contains('<'));
+    }
+
+    #[test]
+    fn order_summary_lists_items_and_total() {
+        let settings = sample_settings("included");
+        let (order, items) = sample_order(&settings);
+        let html = OrderSummary::new(&order, &items, &settings).html();
+        assert!(html.contains("Pro Mechanical Keyboard"));
+        assert!(html.contains("79,60 €"));
+        assert!(html.contains("incl."));
+    }
 }

@@ -60,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
 
     crate::services::auth::init(&pool).await.expect("Failed to initialise authentication secrets");
 
+    // Automatic off-site backups (Admin → Settings → Export & Backups)
+    crate::services::backup::spawn_scheduler(pool.clone());
+
     // No CORS layer: browsers never call this API directly (only the storefront/admin servers do),
     // so cross-origin browser requests are refused by default.
     let app = routes::create_router(pool)

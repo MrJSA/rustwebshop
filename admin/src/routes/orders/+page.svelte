@@ -167,6 +167,15 @@
     isDocPreviewOpen = true;
   }
 
+  // Invoices are real PDFs from the backend; packing slips are printed from the HTML preview
+  function downloadPreviewDocument() {
+    if (docPreviewType === 'invoice') {
+      window.location.href = `/api/v1/admin/orders/${selectedOrder.id}/invoice?download=true`;
+    } else {
+      printPreviewDocument();
+    }
+  }
+
   function printPreviewDocument() {
     if (previewIframeRef && previewIframeRef.contentWindow) {
       previewIframeRef.contentWindow.focus();
@@ -323,6 +332,9 @@
                   <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[10px] font-bold uppercase border {getStatusBadgeClass(order.payment_status)}">
                     {order.payment_status}
                   </span>
+                  {#if order.is_test}
+                    <span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-black uppercase bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Paid in test mode — not counted in analytics">Test</span>
+                  {/if}
                   <div class="text-[10px] text-slate-500 uppercase font-mono mt-0.5">{order.payment_provider}</div>
                 </td>
 
@@ -370,6 +382,9 @@
             <span class="px-2.5 py-0.5 rounded text-[10px] font-bold uppercase border {getStatusBadgeClass(selectedOrder.payment_status)}">
               {selectedOrder.payment_status}
             </span>
+            {#if selectedOrder.is_test}
+              <span class="px-2.5 py-0.5 rounded text-[10px] font-black uppercase bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Paid in test mode — not counted in analytics">Test order</span>
+            {/if}
           </div>
           <p class="text-xs text-slate-400 mt-1">
             Placed on {new Date(selectedOrder.created_at).toLocaleString()} &bull; Provider: <strong class="text-white uppercase font-mono">{selectedOrder.payment_provider}</strong>
@@ -636,12 +651,23 @@
           <!-- Primary Download / Save as PDF Button -->
           <button
             type="button"
-            on:click={printPreviewDocument}
+            on:click={downloadPreviewDocument}
             class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold text-xs shadow-lg shadow-orange-600/30 transition-all flex items-center gap-2"
           >
             <Download size={15} />
             <span>Download PDF</span>
           </button>
+
+          {#if docPreviewType === 'invoice'}
+            <a
+              href={`/api/v1/admin/orders/${selectedOrder.id}/invoice-xml`}
+              title="EN 16931 XML (ZUGFeRD / Factur-X / XRechnung-compatible CII) for accounting software"
+              class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs border border-slate-700 transition-colors flex items-center gap-2"
+            >
+              <FileText size={15} class="text-emerald-400" />
+              <span>E-invoice XML</span>
+            </a>
+          {/if}
 
           <!-- Native Print Option -->
           <button

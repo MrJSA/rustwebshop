@@ -1,5 +1,5 @@
 <script>
-  import { Mail, Send, ShieldCheck, CheckCircle2, AlertCircle, Lock, Server, UserCheck, RefreshCw, Box, Bell, Users, Check, X } from 'lucide-svelte';
+  import { Mail, Send, ShieldCheck, CheckCircle2, AlertCircle, Lock, Server, UserCheck, RefreshCw, Box, Bell, Users, Check, X, FileText } from 'lucide-svelte';
 
   export let data;
   let settings = data.settings || {};
@@ -61,6 +61,11 @@
   let requireRegisteredCheckout = Boolean(settings.require_registered_checkout);
   let requireEmailVerification = Boolean(settings.require_email_verification);
 
+  // Invoices sent with the payment confirmation
+  let emailInvoicePdf = settings.email_invoice_pdf ?? true;
+  let einvoiceEnabled = Boolean(settings.einvoice_enabled);
+  const hasTaxId = Boolean((settings.vat_id || '').trim() || (settings.tax_number || '').trim());
+
   // BOM Low Stock Alerts Configuration
   let lowStockAlertsEnabled = settings.low_stock_alerts_enabled ?? true;
   let lowStockAlertRecipientsMode = settings.low_stock_alert_recipients_mode || 'stock_managers';
@@ -94,6 +99,7 @@
     { value: 'back_in_stock', label: 'Back in Stock Alert' },
     { value: 'password_reset', label: 'Password Reset' },
     { value: 'low_stock_alert', label: 'BOM Low Stock Inventory Alert' },
+    { value: 'backup_failed', label: 'Automatic Backup Failed' },
   ];
   let isSendingTest = false;
   let testResult = null; // { success: boolean, message: string }
@@ -127,6 +133,8 @@
           smtp_enabled: smtpEnabled,
           require_registered_checkout: requireRegisteredCheckout,
           require_email_verification: requireEmailVerification,
+          email_invoice_pdf: emailInvoicePdf,
+          einvoice_enabled: einvoiceEnabled,
           low_stock_alerts_enabled: lowStockAlertsEnabled,
           low_stock_alert_recipients_mode: lowStockAlertRecipientsMode,
           low_stock_alert_custom_emails: lowStockAlertCustomEmails,
@@ -376,6 +384,38 @@
     </div>
   </div>
 
+  <!-- Section 2a: Invoices attached to payment confirmations -->
+  <div class="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl space-y-5">
+    <div class="flex items-center gap-2.5 text-white font-bold text-sm uppercase tracking-wider pb-3 border-b border-slate-800">
+      <FileText size={18} class="text-emerald-400" />
+      <span>Invoices</span>
+    </div>
+
+    <label class="flex items-start gap-3 cursor-pointer">
+      <input type="checkbox" bind:checked={emailInvoicePdf} class="w-4 h-4 mt-0.5 accent-emerald-600" />
+      <span class="text-xs">
+        <span class="font-bold text-white block">Attach the invoice as PDF to the payment confirmation</span>
+        <span class="text-slate-400">Customers receive their invoice automatically as soon as the payment is confirmed. You can open every invoice in the order details.</span>
+      </span>
+    </label>
+
+    <label class="flex items-start gap-3 cursor-pointer">
+      <input type="checkbox" bind:checked={einvoiceEnabled} class="w-4 h-4 mt-0.5 accent-emerald-600" />
+      <span class="text-xs">
+        <span class="font-bold text-white block">E-invoice: ZUGFeRD / Factur-X (EN 16931)</span>
+        <span class="text-slate-400">
+          The invoice PDF additionally contains the invoice as structured XML (EN 16931, the European e-invoicing standard). People see a normal PDF,
+          accounting software and business customers can import it automatically. Recommended if you sell to businesses (B2B e-invoicing in Germany since 2025).
+        </span>
+      </span>
+    </label>
+    {#if einvoiceEnabled && !hasTaxId}
+      <div class="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs">
+        E-invoices need your VAT ID or tax number (Steuernummer). Enter one under Settings → Store Identity & Legal first.
+      </div>
+    {/if}
+  </div>
+
   <!-- Section 2b: BOM Inventory & Low Stock Alerts -->
   <div class="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl space-y-5">
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
@@ -590,7 +630,7 @@
       </div>
       <div class="p-3 rounded-xl bg-slate-950 border border-slate-800/80">
         <strong class="text-emerald-400 block mb-1">2. Payment Receipt</strong>
-        <p class="text-slate-400 text-[11px]">Sent once Stripe/PayPal or gateway marks order as authorized or paid.</p>
+        <p class="text-slate-400 text-[11px]">Sent once the payment is confirmed — with the invoice PDF attached.</p>
       </div>
       <div class="p-3 rounded-xl bg-slate-950 border border-slate-800/80">
         <strong class="text-sky-400 block mb-1">3. Shipment & Tracking</strong>
