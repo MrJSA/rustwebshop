@@ -316,6 +316,11 @@ impl CheckoutService {
         if !is_digital_only {
             let country = req.shipping_address.country_code.trim().to_uppercase();
             let (fitting, any_rates) = Self::fitting_rates(&mut *conn, &country, &parcel).await?;
+            // Once shipping is set up, a country no zone serves cannot be shipped to (a shop
+            // without any rates keeps shipping free to everywhere)
+            if !any_rates && Self::shop_has_shipping_rates(&mut *conn).await? {
+                return Err(anyhow!("Sorry, we do not ship to {} yet.", if country.is_empty() { "this country" } else { country.as_str() }));
+            }
             if fitting.is_empty() && any_rates {
                 return Err(anyhow!(
                     "No shipping option fits this parcel ({}). Please contact us for a shipping quote.",
@@ -487,6 +492,11 @@ impl CheckoutService {
         .await?;
         let any = !rates.is_empty();
         Ok((rates.into_iter().filter(|r| parcel.fits(&r.limits())).collect(), any))
+    }
+
+    /// Whether any shipping rate is configured at all.
+    async fn shop_has_shipping_rates(conn: &mut PgConnection) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM shipping_rates)").fetch_one(&mut *conn).await?)
     }
 
     /// Shipping options for some products to a country (product page: "delivery to …").

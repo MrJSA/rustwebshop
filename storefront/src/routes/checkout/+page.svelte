@@ -8,8 +8,10 @@
   import { loadStripe } from '@stripe/stripe-js';
   import StripePaymentForm from '$lib/components/StripePaymentForm.svelte';
   import StripeExpressButton from '$lib/components/StripeExpressButton.svelte';
+  import CountryInput from '$lib/components/CountryInput.svelte';
   import { checkoutMethods, EXPRESS_METHODS, expressButtons, expressProbeTypes } from '$lib/stripeMethods.js';
   import { rememberNewsletterOptIn, submitRememberedNewsletterOptIn } from '$lib/newsletter.js';
+  import { countryName, countryOptions, shippingCountryCodes } from '$lib/countries.js';
 
   export let data;
   $: store = data.store || {};
@@ -177,28 +179,12 @@
     couponError = '';
   }
 
-  const countries = [
-    { code: 'DE', name: 'Germany (Domestic)' },
-    { code: 'FR', name: 'France' },
-    { code: 'NL', name: 'Netherlands' },
-    { code: 'AT', name: 'Austria' },
-    { code: 'IT', name: 'Italy' },
-    { code: 'ES', name: 'Spain' },
-    { code: 'GB', name: 'United Kingdom' },
-    { code: 'US', name: 'United States' },
-    { code: 'CA', name: 'Canada' }
-  ];
+  // Every country a shipping zone serves; the current one stays selectable (e.g. from a saved address)
+  // so the select never silently switches to another country
+  $: shippingCodes = shippingCountryCodes(data.shippingProviders || []);
+  $: countries = countryOptions(shippingCodes.includes(countryCode) ? shippingCodes : [...shippingCodes, countryCode]);
 
   $: selectedRateEstimate = (availableRates.find((r) => r.id === selectedShippingRateId)?.estimated_delivery_days || '').trim();
-  const countryName = (code) => {
-    const known = countries.find((c) => c.code === code);
-    if (known) return known.name.replace(' (Domestic)', '');
-    try {
-      return new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code;
-    } catch (_) {
-      return code;
-    }
-  };
 
   // Shipping options come with the server quote: only packages the cart fits into (weight and
   // size) for the chosen country, cheapest first. Changing the address simply asks for a new quote.
@@ -839,18 +825,7 @@
           <div class="space-y-4">
             <div>
               <label for="checkout-country" class="block text-xs font-semibold text-slate-400 mb-1">Country / Region</label>
-              <select
-                id="checkout-country"
-                name="country"
-                autocomplete="country"
-                bind:value={countryCode}
-                on:change={fetchShippingRates}
-                class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm focus:outline-none focus:border-orange-500"
-              >
-                {#each countries as c}
-                  <option value={c.code}>{c.name}</option>
-                {/each}
-              </select>
+              <CountryInput id="checkout-country" {countries} bind:value={countryCode} on:change={fetchShippingRates} />
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">

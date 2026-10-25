@@ -3,6 +3,9 @@
   import { customer } from '$lib/stores/customer.js';
   import { goto } from '$app/navigation';
   import { MapPin, Plus, ArrowLeft, CheckCircle2, Trash2, Home, Building } from 'lucide-svelte';
+  import { countryOptions } from '$lib/countries.js';
+
+  const allCountries = countryOptions();
 
   let addresses = [];
   let isLoading = true;
@@ -276,15 +279,9 @@
             bind:value={countryCode}
             class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-orange-500"
           >
-            <option value="DE">Germany (DE)</option>
-            <option value="AT">Austria (AT)</option>
-            <option value="CH">Switzerland (CH)</option>
-            <option value="FR">France (FR)</option>
-            <option value="NL">Netherlands (NL)</option>
-            <option value="BE">Belgium (BE)</option>
-            <option value="PL">Poland (PL)</option>
-            <option value="US">United States (US)</option>
-            <option value="GB">United Kingdom (GB)</option>
+            {#each allCountries as c}
+              <option value={c.code}>{c.name} ({c.code})</option>
+            {/each}
           </select>
         </div>
 
