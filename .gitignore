@@ -1,5 +1,4 @@
 /target
-.agent/
 .idea/
 .private/
 .env

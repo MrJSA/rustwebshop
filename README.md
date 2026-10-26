@@ -1,5 +1,8 @@
 # RustCraft — Rust Webshop
 
+> **This repository has moved to [github.com/MrJSA/RustCraft](https://github.com/MrJSA/RustCraft).**
+> Installed shops switch over automatically with the update to v1.3.3.
+
 A self-hosted webshop with a **Rust** backend (Axum, SQLx, PostgreSQL) and **SvelteKit** storefront and admin dashboard, shipped as one Docker Compose stack with one-click updates.
 
 > **Installing on a server?** Follow **[INSTALL.md](INSTALL.md)**: domains, automatic HTTPS, first login, backups and updates.

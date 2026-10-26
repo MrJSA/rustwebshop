@@ -47,6 +47,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      repo-move:
+        condition: service_completed_successfully
     networks:
       - shop_net
       - updater_net
@@ -103,6 +105,27 @@ services:
       - updater_secrets:/secrets
     networks:
       - updater_net
+
+  # The shop moved to github.com/MrJSA/RustCraft: points existing installations there once, so updates keep arriving.
+  # Runs before the backend on every start and changes nothing when the address is already correct.
+  repo-move:
+    build:
+      context: ./updater
+      dockerfile: Dockerfile
+    restart: "no"
+    volumes:
+      - ./:/repo
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        git config --global --add safe.directory /repo
+        url=$$(git -C /repo remote get-url origin 2>/dev/null)
+        case "$$url" in
+          *github.com[:/]MrJSA/rustwebshop|*github.com[:/]MrJSA/rustwebshop.git|*github.com[:/]MrJSA/rustwebshop/)
+            git -C /repo remote set-url origin https://github.com/MrJSA/RustCraft.git && echo "Updates now come from github.com/MrJSA/RustCraft" ;;
+        esac
+        exit 0
+    network_mode: none
 
   # Optional HTTPS reverse proxy with automatic Let's Encrypt certificates.
   # Enable with COMPOSE_PROFILES=proxy plus SHOP_DOMAIN / ADMIN_DOMAIN (or from the admin settings).

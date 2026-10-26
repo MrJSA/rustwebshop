@@ -50,7 +50,7 @@ docker compose version          # must print v2.x
 
 ```bash
 sudo mkdir -p /opt/rustwebshop && sudo chown $USER: /opt/rustwebshop
-git clone https://github.com/MrJSA/rustwebshop.git /opt/rustwebshop
+git clone https://github.com/MrJSA/RustCraft.git /opt/rustwebshop
 cd /opt/rustwebshop
 git checkout "$(git describe --tags --abbrev=0 2>/dev/null || echo master)"   # newest release
 ```
