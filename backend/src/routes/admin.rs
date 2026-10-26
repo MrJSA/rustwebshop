@@ -110,6 +110,10 @@ pub fn admin_router(pool: PgPool) -> Router<PgPool> {
         .route("/backup/test", post(admin_test_backup_connection))
         .route("/backup/run", post(admin_run_backup))
         .route("/backup/disconnect", post(admin_disconnect_backup))
+        .route("/backup/restore/list", post(admin_list_restorable_backups))
+        .route("/backup/restore/github", post(admin_restore_from_github))
+        .route("/backup/restore/upload", post(admin_restore_from_upload))
+        .route("/backup/restore/status", get(admin_restore_status))
         .merge(crate::routes::shop_features::admin_routes())
         .layer(axum::middleware::from_fn_with_state(pool, crate::middleware::admin_auth_middleware));
 
@@ -4701,6 +4705,9 @@ async fn admin_run_backup(
     if backup::is_running() {
         return Err((StatusCode::CONFLICT, "A backup is already running".to_string()));
     }
+    if crate::services::restore::is_running() {
+        return Err((StatusCode::CONFLICT, "A backup is being restored right now".to_string()));
+    }
     tracing::info!("Manual backup started by admin '{}'", admin.username);
     tokio::spawn(async move {
         let _ = backup::run_backup(&pool).await;
@@ -4721,6 +4728,91 @@ async fn admin_disconnect_backup(
     tracing::info!("Backup repository disconnected by admin '{}'", admin.username);
     let s = crate::services::backup::BackupSettings::load(&pool).await.map_err(backup_db_err)?;
     Ok(Json(s.public_json()))
+}
+
+#[derive(Debug, Deserialize)]
+struct RestoreFromGitHubRequest {
+    github_repo: Option<String>,
+    github_token: Option<String>,
+    asset_id: u64,
+    file: Option<String>,
+    keep_backups_off: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestoreUploadQuery {
+    file: Option<String>,
+    keep_backups_off: Option<bool>,
+}
+
+/// Uploaded backups pass the admin's 50 MB request limit; larger ones are restored straight from GitHub
+const MAX_RESTORE_UPLOAD_BYTES: usize = 60 * 1024 * 1024;
+
+/// Repository and token for a restore: the ones entered in the form (e.g. on a freshly installed shop) or the saved ones.
+async fn restore_target(pool: &PgPool, repo: Option<String>, token: Option<String>) -> Result<(String, String), (StatusCode, String)> {
+    let current = crate::services::backup::BackupSettings::load(pool).await.map_err(backup_db_err)?;
+    let repo = match repo.as_deref().map(str::trim) {
+        Some(r) if !r.is_empty() => crate::services::backup::normalize_repo(r).map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+        _ => current.github_repo,
+    };
+    let token = token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or(current.github_token);
+    if repo.is_empty() || token.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Enter the GitHub repository and an access token first".to_string()));
+    }
+    Ok((repo, token))
+}
+
+async fn admin_list_restorable_backups(
+    State(pool): State<PgPool>,
+    Extension(admin): Extension<CurrentAdmin>,
+    Json(payload): Json<TestBackupConnectionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_backup_admin(&admin)?;
+    let (repo, token) = restore_target(&pool, payload.github_repo, payload.github_token).await?;
+    let gh = crate::services::backup::GitHub::new(&repo, &token);
+    gh.check_repo().await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let backups = gh.list_backups().await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({ "github_repo": repo, "backups": backups })))
+}
+
+async fn admin_restore_from_github(
+    State(pool): State<PgPool>,
+    Extension(admin): Extension<CurrentAdmin>,
+    Json(payload): Json<RestoreFromGitHubRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use crate::services::restore::{self, Source};
+    require_backup_admin(&admin)?;
+    let (repo, token) = restore_target(&pool, payload.github_repo, payload.github_token).await?;
+    let file = payload.file.unwrap_or_else(|| format!("backup {}", payload.asset_id));
+    tracing::warn!("Restore of {} from {} started by admin '{}'", file, repo, admin.username);
+    let source = Source::GitHub { repo, token, asset_id: payload.asset_id };
+    restore::start(pool, source, file, payload.keep_backups_off.unwrap_or(false)).map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok((StatusCode::ACCEPTED, Json(restore::status())))
+}
+
+async fn admin_restore_from_upload(
+    State(pool): State<PgPool>,
+    Extension(admin): Extension<CurrentAdmin>,
+    Query(query): Query<RestoreUploadQuery>,
+    body: axum::body::Body,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    use crate::services::restore::{self, Source};
+    require_backup_admin(&admin)?;
+    let bytes = axum::body::to_bytes(body, MAX_RESTORE_UPLOAD_BYTES).await.map_err(|_| {
+        (StatusCode::PAYLOAD_TOO_LARGE, "The file is too large to upload. Restore it straight from GitHub instead.".to_string())
+    })?;
+    if bytes.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "No file was uploaded".to_string()));
+    }
+    let file = query.file.filter(|f| !f.trim().is_empty()).unwrap_or_else(|| "uploaded backup".to_string());
+    tracing::warn!("Restore of uploaded {} started by admin '{}'", file, admin.username);
+    restore::start(pool, Source::Upload(bytes), file, query.keep_backups_off.unwrap_or(false)).map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok((StatusCode::ACCEPTED, Json(restore::status())))
+}
+
+async fn admin_restore_status(Extension(admin): Extension<CurrentAdmin>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_backup_admin(&admin)?;
+    Ok(Json(crate::services::restore::status()))
 }
 
 /// Which enabled Stripe methods are actually activated in the Stripe account.

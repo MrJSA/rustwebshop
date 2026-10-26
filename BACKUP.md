@@ -43,6 +43,7 @@ That's it. The repository may stay empty; the shop sets it up on the first backu
 ### Step 2 — Create an access token
 
 The token is like a password that only lets the shop write into this one repository and nothing else.
+Keep it in your password manager: you need it again to restore a backup on a new server.
 
 1. Open **[github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)**
    (GitHub → your picture → *Settings* → *Developer settings* → *Personal access tokens* → *Fine-grained tokens* → *Generate new token*).
@@ -120,21 +121,38 @@ in the admin — all settings come back with the backup.
 
 (Restoring on the existing server: skip this step.)
 
-### 2. Download the backup
+### 2. Restore in the admin
 
-1. On GitHub, open your backup repository → **Releases**.
-2. Pick the backup you want (normally the newest) and download the `shop-backup-….zip` file under *Assets*.
-3. Copy it to the server into the shop folder, e.g. from your PC:
+1. Log in to the admin as a **superadmin** (on a new server: with the initial admin password from the install).
+2. Go to **Settings → Export & Backups** → **Restore a Backup**.
+3. Enter your backup repository and its access token (on the existing server the saved ones are used — leave the fields empty)
+   and click **Show backups**.
+4. Select the backup you want (normally the newest, at the top).
+5. Tick **I understand that all current data of this shop is replaced by the backup** and click **Restore selected backup**.
 
-   ```bash
-   scp shop-backup-20261025-020000.zip user@your-server:/opt/rustwebshop/
-   ```
+The shop downloads the backup, checks it and loads it. This takes from a few seconds to a few minutes, depending on the
+size. The database restore is all-or-nothing: if anything goes wrong, the shop's data stays exactly as it was and the
+error is shown. Afterwards the shop restarts by itself and the admin takes you to the login page.
 
-   (On Windows you can also use [WinSCP](https://winscp.net/).)
+Instead of picking a backup on GitHub you can also upload a downloaded `shop-backup-….zip` file there (up to 50 MB).
 
-### 3. Restore
+**Restoring into a test or local copy?** Tick **Switch automatic backups off after restoring**, so the copy does not
+write its own backups into the repository of your live shop.
 
-On the server, in the shop folder:
+### 3. Done
+
+- Log in to the admin with your **old** admin username and password (the accounts come back with the backup).
+- Orders, customers, products, settings, payment and email settings are all back.
+- The backup settings come back too, so **automatic backups continue** on the new server without setting them up again.
+
+A backup made with a **newer** shop version is refused with a message — update the shop first
+(*Settings → System & Updates*), then restore.
+
+### Restoring on the command line
+
+Only needed if the admin cannot be reached. Download the `shop-backup-….zip` file from your backup repository
+(→ **Releases** → *Assets*), copy it into the shop folder on the server (e.g. `scp shop-backup-20261025-020000.zip user@your-server:/opt/rustwebshop/`)
+and run there:
 
 ```bash
 cd /opt/rustwebshop
@@ -152,14 +170,6 @@ docker compose cp restore/uploads/. backend:/app/uploads/
 # Clean up
 rm -rf restore shop-backup-20261025-020000.zip
 ```
-
-The database restore is all-or-nothing: if anything goes wrong, the database stays as it was and the error is printed.
-
-### 4. Done
-
-- Log in to the admin with your **old** admin username and password (the accounts come back with the backup).
-- Orders, customers, products, settings, payment and email settings are all back.
-- The backup settings come back too, so **automatic backups continue** on the new server without setting them up again.
 
 ---
 

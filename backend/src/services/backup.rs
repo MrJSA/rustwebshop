@@ -185,7 +185,7 @@ impl Drop for RunningGuard {
 }
 
 /// Deletes the temporary working directory when the backup ends (successfully or not).
-struct TempDir(PathBuf);
+pub(crate) struct TempDir(pub PathBuf);
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -201,6 +201,9 @@ pub struct BackupOutcome {
 
 /// Runs one backup now and records the result. Only one backup runs at a time.
 pub async fn run_backup(pool: &PgPool) -> Result<(), String> {
+    if crate::services::restore::is_running() {
+        return Err("A backup is being restored right now.".to_string());
+    }
     if RUNNING.swap(true, Ordering::SeqCst) {
         return Err("A backup is already running.".to_string());
     }
@@ -300,7 +303,7 @@ async fn create_backup(pool: &PgPool, settings: &BackupSettings) -> Result<Backu
     let tag = format!("{}{}", TAG_PREFIX, stamp);
     let title = format!("Backup {} UTC", now.format("%Y-%m-%d %H:%M"));
     let body = format!(
-        "Automatic backup of **{}**.\n\n- Database: complete dump (`database.sql`)\n- Uploaded files: {}\n- Size: {}\n\nRestore instructions: see `BACKUP.md` in the shop repository.",
+        "Automatic backup of **{}**.\n\n- Database: complete dump (`database.sql`)\n- Uploaded files: {}\n- Size: {}\n\nTo restore: shop admin → Settings → Export & Backups → Restore a Backup (see `BACKUP.md` in the shop repository).",
         if store_name.is_empty() { "the shop" } else { &store_name },
         if settings.include_media { format!("{} file(s) in `uploads/`", file_count) } else { "not included".to_string() },
         human_size(size)
@@ -411,7 +414,10 @@ const RESTORE_TXT: &str = "Shop backup
 database.sql  complete PostgreSQL dump (orders, customers, products, settings, ...)
 uploads/      uploaded images and files
 
-Restore on a freshly installed shop (in the shop folder on the server):
+Restore: in the admin under Settings -> Export & Backups -> Restore a Backup
+(pick the backup from GitHub or upload this ZIP file).
+
+Or on the command line (in the shop folder on the server):
 
   docker compose stop backend storefront admin
   docker compose exec -T db psql -v ON_ERROR_STOP=1 --single-transaction -U shop_user -d shop_db < database.sql
@@ -421,7 +427,7 @@ Restore on a freshly installed shop (in the shop folder on the server):
 Full guide: BACKUP.md in the shop repository.
 ";
 
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     let b = bytes as f64;
     if b >= 1024.0 * 1024.0 * 1024.0 {
         format!("{:.2} GB", b / (1024.0 * 1024.0 * 1024.0))
@@ -689,6 +695,71 @@ impl GitHub {
         }
         Ok(removed)
     }
+
+    /// All published backups (newest first) that carry a backup ZIP, for the restore picker.
+    pub async fn list_backups(&self) -> Result<Vec<Value>, String> {
+        let mut backups = Vec::new();
+        for page in 1..=10 {
+            let (status, _, resp) = self
+                .send(self.api(Method::GET, &format!("/releases?per_page=100&page={}", page)), "list the backups")
+                .await?;
+            if !status.is_success() {
+                return Err(self.error(status, &resp, "list the backups"));
+            }
+            let items = resp.as_array().cloned().unwrap_or_default();
+            if items.is_empty() {
+                break;
+            }
+            for r in items {
+                let tag = r["tag_name"].as_str().unwrap_or_default();
+                if !tag.starts_with(TAG_PREFIX) || r["draft"].as_bool().unwrap_or(false) {
+                    continue;
+                }
+                let assets = r["assets"].as_array().cloned().unwrap_or_default();
+                let Some(asset) = assets.iter().find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(".zip"))) else { continue };
+                backups.push(json!({
+                    "asset_id": asset["id"],
+                    "file": asset["name"],
+                    "size_bytes": asset["size"],
+                    "title": r["name"],
+                    "tag": tag,
+                    "created_at": r["published_at"],
+                }));
+            }
+        }
+        backups.sort_by(|a, b| b["tag"].as_str().cmp(&a["tag"].as_str()));
+        Ok(backups)
+    }
+
+    /// Downloads one release asset (the backup ZIP) to `target`.
+    pub async fn download_asset(&self, asset_id: u64, target: &Path) -> Result<u64, String> {
+        // GitHub answers with a redirect to its file storage; reqwest drops the token on that cross-host redirect
+        let req = self
+            .client
+            .get(format!("{}/repos/{}/releases/assets/{}", GITHUB_API, self.repo, asset_id))
+            .bearer_auth(&self.token)
+            .header(reqwest::header::ACCEPT, "application/octet-stream")
+            .header(reqwest::header::USER_AGENT, "rustwebshop-backup")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .timeout(std::time::Duration::from_secs(3 * 3600));
+        let mut resp = req.send().await.map_err(|e| format!("GitHub is not reachable (download the backup): {}", e))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            return Err(self.error(status, &body, "download the backup"));
+        }
+        let mut file = tokio::fs::File::create(target).await.map_err(|e| format!("Cannot store the download: {}", e))?;
+        let mut size = 0u64;
+        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("Downloading the backup was interrupted: {}", e))? {
+            size += chunk.len() as u64;
+            if size > MAX_ASSET_BYTES {
+                return Err("The download is larger than any backup can be.".to_string());
+            }
+            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await.map_err(|e| format!("Cannot store the download: {}", e))?;
+        }
+        tokio::io::AsyncWriteExt::flush(&mut file).await.map_err(|e| format!("Cannot store the download: {}", e))?;
+        Ok(size)
+    }
 }
 
 const README_MD: &str = "# Shop backups
@@ -698,7 +769,8 @@ Every backup is a **release** (see *Releases* on the right) with one ZIP file co
 complete database dump (`database.sql`) and the uploaded files (`uploads/`).
 
 Keep this repository **private** — the backups contain customer data.
-How to restore a backup is described in `BACKUP.md` of the shop software.
+To restore a backup open the shop admin → *Settings → Export & Backups* → *Restore a Backup*
+(details in `BACKUP.md` of the shop software).
 ";
 
 #[cfg(test)]

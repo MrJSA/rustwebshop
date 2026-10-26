@@ -39,7 +39,7 @@ function backendHeaders(request, locals) {
 async function readBody(request) {
   if (request.method === 'GET' || request.method === 'HEAD' || request.method === 'DELETE') return undefined;
   const contentType = request.headers.get('content-type') || '';
-  if (contentType.includes('multipart/form-data') || contentType.includes('image/') || contentType.includes('octet-stream')) {
+  if (contentType.includes('multipart/form-data') || contentType.includes('image/') || contentType.includes('octet-stream') || contentType.includes('application/zip')) {
     return request.arrayBuffer();
   }
   return request.text();

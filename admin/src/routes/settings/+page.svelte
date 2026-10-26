@@ -43,6 +43,7 @@
   import PaymentsManager from '$lib/components/PaymentsManager.svelte';
   import SystemManager from '$lib/components/SystemManager.svelte';
   import CloudBackupManager from '$lib/components/CloudBackupManager.svelte';
+  import RestoreBackupManager from '$lib/components/RestoreBackupManager.svelte';
   import ShopFeaturesManager from '$lib/components/ShopFeaturesManager.svelte';
 
   export let data;
@@ -1527,6 +1528,7 @@
   {:else if activeTab === 'export'}
     <div class="space-y-6">
       <CloudBackupManager />
+      <RestoreBackupManager />
 
       <div class="p-4 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-start gap-3">
         <Info size={18} class="text-indigo-400 flex-shrink-0 mt-0.5" />
